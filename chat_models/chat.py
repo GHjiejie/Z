@@ -16,9 +16,12 @@ if api_base_url is None:
 
 
 chat_model = ChatOpenAI(
-    temperature=1,
     model="k3",
     streaming=True,
     api_key=SecretStr(api_key),
+    use_responses_api=True,
+    reasoning={"effort": "medium", "summary": "auto"}, 
     base_url=api_base_url,
 )
+
+

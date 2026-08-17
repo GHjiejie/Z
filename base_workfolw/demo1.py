@@ -39,5 +39,5 @@ tools = [add, subtract, multiply, get_wather]
 model_with_tools = chat_model.bind_tools(tools)
 
 
-response = model_with_tools.invoke("深圳的天气怎么样？")
+response = model_with_tools.invoke("告诉我1+7等于多少？")
 print(response)
