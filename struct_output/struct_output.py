@@ -21,13 +21,14 @@ structured_model=chat_model.with_structured_output(
 def llm_call(state:State) -> State:
     messages_str = "\n".join(state["messages"])
 
-    result = structured_model.invoke(
-f"""
+    result = cast(
+        IntentResult,
+        structured_model.invoke(
+            f"""
 你是一个意图识别模型，你的任务是根据用户的输入识别用户
-用户的输入是: {messages_str}""")
-    
-    if not isinstance(result, IntentResult):
-        raise ValueError(f"Expected result to be of type IntentResult, but got {type(result)}")
+用户的输入是: {messages_str}"""
+        ),
+    )
     
     return {
         "messages": state["messages"] + [f"识别到的意图是: {result.intent}"],
@@ -84,8 +85,6 @@ result = graph.invoke({
 })
 
 print(result)
-
-
 
 
 
