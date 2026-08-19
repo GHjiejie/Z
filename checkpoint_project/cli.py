@@ -3,23 +3,19 @@
 from __future__ import annotations
 
 import argparse
-import os
 import shlex
 import sys
 import uuid
 from pathlib import Path
-from typing import Any
 
-from dotenv import load_dotenv
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
-from langchain_openai import ChatOpenAI
-from pydantic import SecretStr
 
 from checkpoint_project.graph import (
     CheckpointChatApp,
     checkpoint_id,
     iter_interrupts,
 )
+from checkpoint_project.model import build_model
 
 HELP = """
 普通文本                     发送一轮消息（同一 session 自动保留 memory）
@@ -34,23 +30,6 @@ HELP = """
 /help                        显示帮助
 /quit                        退出
 """.strip()
-
-
-def build_model() -> ChatOpenAI:
-    load_dotenv()
-    api_key = os.getenv("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("缺少 OPENAI_API_KEY，请在 .env 或环境变量中设置")
-    model = os.getenv("MODEL", "gpt-4.1-mini")
-    base_url = os.getenv("OPENAI_BASE_URL") or None
-    kwargs: dict[str, Any] = {
-        "model": model,
-        "temperature": 0,
-        "api_key": SecretStr(api_key),
-    }
-    if base_url:
-        kwargs["base_url"] = base_url
-    return ChatOpenAI(**kwargs)
 
 
 def parser() -> argparse.ArgumentParser:

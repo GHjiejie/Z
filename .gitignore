@@ -36,3 +36,4 @@ dist/
 # Runtime data produced by checkpoint_project
 checkpoint_project/data/
 checkpoint_project/workspace/
+checkpoint_project/frontend/node_modules/

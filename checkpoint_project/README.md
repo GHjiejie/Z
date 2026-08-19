@@ -1,8 +1,8 @@
-# LangGraph SQLite Checkpoint 综合终端
+# Checkpoint Studio：LangGraph + FastAPI + React
 
-这是一个将仓库内 checkpoint demos 组合成可交互项目的版本。它提供持久化多轮
-会话、文件工具人工审批、checkpoint 历史/分支、失败恢复，并把 graph checkpoint
-和会话目录都保存在本地 SQLite 中。
+这是一个将仓库内 checkpoint demos 组合成完整应用的版本。它同时提供 React Web
+界面和交互终端，支持持久化多轮会话、文件工具人工审批、checkpoint 历史/分支、
+失败恢复，并把 graph checkpoint 和会话目录都保存在本地 SQLite 中。
 
 ## 已实现能力
 
@@ -23,10 +23,14 @@
 
 ```text
 checkpoint_project/
+├── api.py                      # FastAPI 会话、消息、审批和分支接口
 ├── cli.py                      # 终端交互、会话/历史/审批命令
 ├── graph.py                    # StateGraph、interrupt、SQLite checkpointer、fork
+├── model.py                    # 终端和 API 共用的模型配置
 ├── file_tools.py               # 受工作区约束的读/写/删/列目录工具
 ├── session_store.py            # SQLite 会话目录与分支来源
+├── frontend/                   # React + TypeScript + Vite 单页应用
+├── test_api.py                 # FastAPI 离线 HTTP 集成测试
 ├── test_checkpoint_project.py  # 不访问网络的集成测试
 └── .env.example
 ```
@@ -42,7 +46,7 @@ SQLite 内既有 LangGraph 自动建立的 checkpoint/write 表，也有项目�
 `chat_sessions` 表。后者只保存会话 ID 和分支来源，实际 memory 仍由 LangGraph
 checkpoint 管理。
 
-## 启动
+## 启动 Web 应用
 
 在仓库根目录执行：
 
@@ -50,6 +54,58 @@ checkpoint 管理。
 cp checkpoint_project/.env.example .env
 # 编辑 .env，至少填入 OPENAI_API_KEY
 uv sync
+cd checkpoint_project/frontend
+npm install
+npm run build
+cd ../..
+uv run uvicorn checkpoint_project.api:app --host 127.0.0.1 --port 8000
+```
+
+打开 <http://127.0.0.1:8000>。FastAPI 会在启动时检测 `frontend/dist` 并以同一
+端口托管构建后的 React 应用，同时在 <http://127.0.0.1:8000/docs> 提供 OpenAPI
+交互文档。
+
+前端开发模式可以分别启动后端和 Vite；Vite 会把 `/api` 代理到 8000 端口：
+
+```bash
+# 终端 1：后端
+uv run uvicorn checkpoint_project.api:app --reload
+
+# 终端 2：前端热更新
+cd checkpoint_project/frontend
+npm run dev
+```
+
+访问 <http://127.0.0.1:5173>。
+
+可选运行变量：
+
+```text
+CHECKPOINT_DB=/path/to/checkpoints.sqlite
+CHECKPOINT_WORKSPACE=/path/to/workspace
+```
+
+Web 界面包括会话侧栏、消息与工具结果、人工审批卡、失败恢复入口、checkpoint
+时间线和 fork 弹窗，并为桌面和移动端提供响应式布局。
+
+## FastAPI 接口
+
+| 方法 | 路径 | 作用 |
+| --- | --- | --- |
+| `GET` | `/api/health` | 检查服务和本地存储路径 |
+| `GET/POST` | `/api/sessions` | 列出或创建会话 |
+| `GET` | `/api/sessions/{id}` | 获取完整会话状态和待审批项 |
+| `POST` | `/api/sessions/{id}/messages` | 发送消息并执行 graph |
+| `POST` | `/api/sessions/{id}/approval` | 批准或拒绝 pending 文件操作 |
+| `GET` | `/api/sessions/{id}/checkpoints` | 获取 checkpoint 时间线 |
+| `POST` | `/api/sessions/{id}/fork` | 从指定 checkpoint 创建分支 |
+| `POST` | `/api/sessions/{id}/retry` | 从失败节点恢复 |
+
+## 启动终端版本
+
+在仓库根目录执行：
+
+```bash
 uv run python -m checkpoint_project
 ```
 
@@ -115,11 +171,14 @@ hello checkpoint
 
 ```bash
 uv run python -m unittest -v checkpoint_project.test_checkpoint_project
+uv run python -m unittest -v checkpoint_project.test_api
 uv run ruff check checkpoint_project
+cd checkpoint_project/frontend && npm run build
 ```
 
 测试覆盖：多轮 memory 与重启恢复、写入批准、删除拒绝、从旧 checkpoint 派生
-独立会话，以及节点失败后从最后成功 checkpoint 重试。
+独立会话、节点失败后从最后成功 checkpoint 重试，以及完整 HTTP
+“会话 → 消息 → 审批 → checkpoint → fork”流程。
 
 ## 需要注意的边界
 

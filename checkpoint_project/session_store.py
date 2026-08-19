@@ -69,3 +69,11 @@ class SessionStore:
                 """
             ).fetchall()
         return [Session(**dict(row)) for row in rows]
+
+    def exists(self, thread_id: str) -> bool:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                "SELECT 1 FROM chat_sessions WHERE thread_id = ?",
+                (thread_id,),
+            ).fetchone()
+        return row is not None
