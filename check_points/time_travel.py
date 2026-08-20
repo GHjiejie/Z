@@ -1,6 +1,6 @@
 from typing import Annotated, TypedDict
 
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import BaseMessage, HumanMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
@@ -42,18 +42,25 @@ def main():
                 if not user_input.strip():
                     continue
 
-                events = graph.stream(
+                for part in graph.stream(
                     {"user_msg": [HumanMessage(content=user_input)]},
                     config=config,
-                    stream_mode="values",
-                )
+                    stream_mode="messages",
+                    version="v2",
+                ):
+                    if part["type"] != "messages":
+                        continue
 
-                for event in events:
-                    latest_message = event["user_msg"][-1]
-                    if isinstance(latest_message, AIMessage):
-                        print(f"bot: {latest_message.text}")
-                        # 找到最新的一条 AI 回复后退出当前事件的循环
-                        break
+                    message_chunk, metadata = part["data"]
+
+                    if metadata.get("langgraph_node") != "llm_call":
+                        continue
+
+                    text = str(message_chunk.text)
+                    if text:
+                        print(text, end="", flush=True)
+
+                print()  # 换行，准备下一轮输入
 
         except KeyboardInterrupt:
             print("\n\n👋 收到退出指令，聊天结束。再见！")
