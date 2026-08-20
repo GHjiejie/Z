@@ -51,7 +51,7 @@ def main():
                 for event in events:
                     latest_message = event["user_msg"][-1]
                     if isinstance(latest_message, AIMessage):
-                        print(f"bot: {latest_message.content}")
+                        print(f"bot: {latest_message.text}")
                         # 找到最新的一条 AI 回复后退出当前事件的循环
                         break
 
