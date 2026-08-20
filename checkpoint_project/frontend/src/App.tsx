@@ -5,8 +5,11 @@ import {
   useState,
   type FormEvent,
   type KeyboardEvent,
-  type ReactNode,
+  type Dispatch,
+  type SetStateAction,
 } from "react";
+import ReactMarkdown from "react-markdown";
+import remarkGfm from "remark-gfm";
 import { api } from "./api";
 import {
   BranchIcon,
@@ -152,8 +155,9 @@ export default function App() {
     setBusy("message");
     setError(null);
     setChat({ ...chat, messages: [...chat.messages, optimistic] });
+    const pushToken = createTokenSink(setChat);
     try {
-      const state = await api.sendMessage(activeId, content);
+      const state = await api.streamMessage(activeId, content, pushToken);
       setChat(state);
       const [history] = await Promise.all([
         api.checkpoints(activeId),
@@ -176,8 +180,14 @@ export default function App() {
     if (!activeId || busy) return;
     setBusy(approved ? "approve" : "reject");
     setError(null);
+    setChat((current) =>
+      current
+        ? { ...current, status: "idle", pending_approvals: [] }
+        : current,
+    );
+    const pushToken = createTokenSink(setChat);
     try {
-      const state = await api.decideApproval(activeId, approved);
+      const state = await api.streamApproval(activeId, approved, pushToken);
       setChat(state);
       const [history] = await Promise.all([
         api.checkpoints(activeId),
@@ -195,8 +205,9 @@ export default function App() {
     if (!activeId || busy) return;
     setBusy("retry");
     setError(null);
+    const pushToken = createTokenSink(setChat);
     try {
-      const state = await api.retry(activeId);
+      const state = await api.streamRetry(activeId, pushToken);
       setChat(state);
       setCheckpoints(await api.checkpoints(activeId));
       await refreshSessions();
@@ -282,7 +293,10 @@ export default function App() {
           <LoadingState />
         ) : (
           <>
-            <MessageList messages={chat?.messages ?? []} busy={busy === "message"} />
+            <MessageList
+              messages={chat?.messages ?? []}
+              busy={["message", "approve", "reject", "retry"].includes(busy ?? "")}
+            />
 
             {approval && (
               <ApprovalCard
@@ -458,8 +472,14 @@ function ChatHeader({
 function MessageList({ messages, busy }: { messages: ChatMessage[]; busy: boolean }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
-    endRef.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [messages.length, busy]);
+    const frame = requestAnimationFrame(() => {
+      endRef.current?.scrollIntoView({
+        behavior: busy ? "auto" : "smooth",
+        block: "end",
+      });
+    });
+    return () => cancelAnimationFrame(frame);
+  }, [messages, busy]);
 
   return (
     <section className="message-scroll" aria-live="polite">
@@ -468,7 +488,7 @@ function MessageList({ messages, busy }: { messages: ChatMessage[]; busy: boolea
         {messages.map((message, index) => (
           <MessageBubble key={message.id ?? `${message.type}-${index}`} message={message} />
         ))}
-        {busy && (
+        {busy && !messages.some(isStreamingMessage) && (
           <div className="message-row ai-row">
             <div className="avatar assistant-avatar"><SparkIcon /></div>
             <div className="thinking-bubble"><span /><span /><span /></div>
@@ -510,20 +530,23 @@ function MessageBubble({ message }: { message: ChatMessage }) {
   }
 
   const human = message.type === "human";
-  const { thought, answer } = splitThought(contentText(message.content));
+  const streaming = isStreamingMessage(message);
+  const { thought, answer, thinking } = splitThought(contentText(message.content));
   const toolCalls = message.tool_calls ?? [];
   return (
     <div className={`message-row ${human ? "human-row" : "ai-row"}`}>
       {!human && <div className="avatar assistant-avatar"><SparkIcon /></div>}
-      <div className={`message-bubble ${human ? "human-bubble" : "ai-bubble"}`}>
+      <div className={`message-bubble ${human ? "human-bubble" : "ai-bubble"} ${streaming ? "streaming" : ""}`}>
         {!human && <div className="message-author">Checkpoint Assistant</div>}
         {thought && (
-          <details className="thought-block">
-            <summary>查看模型思考</summary>
-            <p>{thought}</p>
+          <details className="thought-block" open={thinking}>
+            <summary>{thinking ? "模型正在思考…" : "查看模型思考"}</summary>
+            <MarkdownContent content={thought} compact />
+            {streaming && thinking && <span className="stream-cursor" />}
           </details>
         )}
-        {answer && <p className="message-text"><InlineText text={answer} /></p>}
+        {answer && <MarkdownContent content={answer} />}
+        {streaming && answer && <span className="stream-cursor" />}
         {!answer && toolCalls.length > 0 && (
           <p className="tool-intent">正在准备工具操作…</p>
         )}
@@ -741,30 +764,58 @@ function contentText(content: MessageContent): string {
   return typeof content === "string" ? content : JSON.stringify(content, null, 2);
 }
 
-function InlineText({ text }: { text: string }) {
-  const nodes: ReactNode[] = [];
-  const pattern = /(\*\*[^*]+\*\*|`[^`]+`)/g;
-  let cursor = 0;
-  for (const match of text.matchAll(pattern)) {
-    const index = match.index ?? 0;
-    if (index > cursor) nodes.push(text.slice(cursor, index));
-    const token = match[0];
-    if (token.startsWith("**")) {
-      nodes.push(<strong key={`${index}-strong`}>{token.slice(2, -2)}</strong>);
-    } else {
-      nodes.push(<code key={`${index}-code`}>{token.slice(1, -1)}</code>);
-    }
-    cursor = index + token.length;
-  }
-  if (cursor < text.length) nodes.push(text.slice(cursor));
-  return <>{nodes}</>;
+function MarkdownContent({ content, compact = false }: { content: string; compact?: boolean }) {
+  return (
+    <div className={`markdown-body ${compact ? "compact" : ""}`}>
+      <ReactMarkdown remarkPlugins={[remarkGfm]}>{content}</ReactMarkdown>
+    </div>
+  );
 }
 
-function splitThought(content: string): { thought: string; answer: string } {
+function splitThought(content: string): { thought: string; answer: string; thinking: boolean } {
   const match = content.match(/<think>([\s\S]*?)<\/think>/i);
+  const openThought = !match ? content.match(/^<think>([\s\S]*)$/i) : null;
   return {
-    thought: match?.[1].trim() ?? "",
-    answer: content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim(),
+    thought: (match?.[1] ?? openThought?.[1] ?? "").trim(),
+    answer: openThought
+      ? ""
+      : content.replace(/<think>[\s\S]*?<\/think>/gi, "").trim(),
+    thinking: Boolean(openThought),
+  };
+}
+
+function isStreamingMessage(message: ChatMessage): boolean {
+  return typeof message.id === "string" && message.id.startsWith("streaming-");
+}
+
+function createTokenSink(
+  setChat: Dispatch<SetStateAction<SessionState | null>>,
+): (token: string) => void {
+  const messageId = `streaming-${Date.now()}`;
+  let started = false;
+  return (token: string) => {
+    const firstToken = !started;
+    started = true;
+    setChat((current) => {
+      if (!current) return current;
+      if (firstToken) {
+        return {
+          ...current,
+          messages: [
+            ...current.messages,
+            { id: messageId, type: "ai", content: token },
+          ],
+        };
+      }
+      return {
+        ...current,
+        messages: current.messages.map((message) =>
+          message.id === messageId
+            ? { ...message, content: `${contentText(message.content)}${token}` }
+            : message,
+        ),
+      };
+    });
   };
 }
 

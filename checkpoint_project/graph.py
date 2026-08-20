@@ -178,6 +178,15 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
         self.sessions.ensure(thread_id)
         return self.graph.invoke(graph_input, config=self.config(thread_id))
 
+    def stream(self, thread_id: str, graph_input: Any) -> Iterator[tuple[str, Any]]:
+        """Stream LangGraph message events while retaining SQLite checkpoints."""
+        self.sessions.ensure(thread_id)
+        return self.graph.stream(
+            graph_input,
+            config=self.config(thread_id),
+            stream_mode=["messages"],
+        )
+
     def resume(self, thread_id: str, decision: bool) -> dict[str, Any]:
         return self.invoke(thread_id, Command(resume={"approved": decision}))
 

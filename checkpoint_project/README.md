@@ -18,6 +18,10 @@
   配置为一次只生成一个工具调用，避免恢复审批时重复部分文件副作用。
 - **本地文件安全边界**：所有文件路径都限制在 `--workspace` 下；读取/列目录无需
   审批，写入、覆盖和删除单个文件必须审批，目录删除被禁止。
+- **SSE 流式输出**：普通回复、审批恢复和失败重试都会把 LangGraph 的模型 token
+  实时推送到 React，流结束后再用 SQLite 中的最终 state 校准前端。
+- **Markdown 与自动滚动**：模型回复由 `react-markdown` + `remark-gfm` 安全渲染，
+  支持标题、列表、表格、引用和代码块；流式内容每次增长时消息区都会自动触底。
 
 ## 结构
 
@@ -85,8 +89,8 @@ CHECKPOINT_DB=/path/to/checkpoints.sqlite
 CHECKPOINT_WORKSPACE=/path/to/workspace
 ```
 
-Web 界面包括会话侧栏、消息与工具结果、人工审批卡、失败恢复入口、checkpoint
-时间线和 fork 弹窗，并为桌面和移动端提供响应式布局。
+Web 界面包括会话侧栏、Markdown 消息与工具结果、人工审批卡、失败恢复入口、
+checkpoint 时间线和 fork 弹窗，并为桌面和移动端提供响应式布局。
 
 ## FastAPI 接口
 
@@ -95,11 +99,14 @@ Web 界面包括会话侧栏、消息与工具结果、人工审批卡、失败�
 | `GET` | `/api/health` | 检查服务和本地存储路径 |
 | `GET/POST` | `/api/sessions` | 列出或创建会话 |
 | `GET` | `/api/sessions/{id}` | 获取完整会话状态和待审批项 |
-| `POST` | `/api/sessions/{id}/messages` | 发送消息并执行 graph |
-| `POST` | `/api/sessions/{id}/approval` | 批准或拒绝 pending 文件操作 |
+| `POST` | `/api/sessions/{id}/messages` | 发送消息（非流式兼容接口） |
+| `POST` | `/api/sessions/{id}/messages/stream` | 通过 SSE 流式发送消息和最终 state |
+| `POST` | `/api/sessions/{id}/approval` | 审批 pending 文件操作（非流式） |
+| `POST` | `/api/sessions/{id}/approval/stream` | 流式恢复审批后的模型回复 |
 | `GET` | `/api/sessions/{id}/checkpoints` | 获取 checkpoint 时间线 |
 | `POST` | `/api/sessions/{id}/fork` | 从指定 checkpoint 创建分支 |
-| `POST` | `/api/sessions/{id}/retry` | 从失败节点恢复 |
+| `POST` | `/api/sessions/{id}/retry` | 从失败节点恢复（非流式） |
+| `POST` | `/api/sessions/{id}/retry/stream` | 流式恢复失败节点 |
 
 ## 启动终端版本
 

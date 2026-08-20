@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -119,6 +120,44 @@ class CheckpointApiTests(unittest.TestCase):
             self.assertEqual(
                 {session["thread_id"] for session in sessions},
                 {"web-test", "web-branch"},
+            )
+
+    def test_message_sse_stream_returns_tokens_and_final_state(self) -> None:
+        api = create_api(
+            model=ScriptedChatModel(responses=[AIMessage(content="逐字输出成功")]),
+            db_path=self.root / "stream.sqlite",
+            workspace=self.root / "stream-workspace",
+        )
+        with TestClient(api) as client:
+            client.post("/api/sessions", json={"thread_id": "stream-test"})
+            with client.stream(
+                "POST",
+                "/api/sessions/stream-test/messages/stream",
+                json={"content": "测试流式输出"},
+            ) as response:
+                self.assertEqual(response.status_code, 200)
+                self.assertTrue(
+                    response.headers["content-type"].startswith("text/event-stream")
+                )
+                events = [
+                    json.loads(line.removeprefix("data: "))
+                    for line in response.iter_lines()
+                    if line.startswith("data: ")
+                ]
+
+            self.assertEqual(events[0]["type"], "start")
+            self.assertEqual(
+                "".join(
+                    event.get("content", "")
+                    for event in events
+                    if event["type"] == "token"
+                ),
+                "逐字输出成功",
+            )
+            self.assertEqual(events[-1]["type"], "state")
+            self.assertEqual(
+                events[-1]["state"]["messages"][-1]["content"],
+                "逐字输出成功",
             )
 
 

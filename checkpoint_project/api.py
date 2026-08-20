@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Annotated
@@ -12,11 +13,17 @@ from typing import Annotated
 from fastapi import FastAPI, HTTPException, Request, status
 from fastapi import Path as ApiPath
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.language_models.chat_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
-from langgraph.types import StateSnapshot
+from langchain_core.messages import (
+    AIMessage,
+    AIMessageChunk,
+    BaseMessage,
+    HumanMessage,
+    ToolMessage,
+)
+from langgraph.types import Command, StateSnapshot
 from pydantic import BaseModel, ConfigDict, Field
 
 from checkpoint_project.graph import (
@@ -195,6 +202,25 @@ def create_api(
             ) from exc
         return _serialize_state(thread_id, chat.state(thread_id))
 
+    @application.post("/api/sessions/{thread_id}/messages/stream")
+    def stream_message(
+        thread_id: ThreadId,
+        body: MessageCreate,
+        request: Request,
+    ) -> StreamingResponse:
+        chat = _chat(request)
+        _require_session(chat, thread_id)
+        current = chat.state(thread_id)
+        if list(iter_interrupts(current)):
+            raise HTTPException(status_code=409, detail="请先处理待审批操作")
+        if current.next:
+            raise HTTPException(status_code=409, detail="会话有待恢复任务，请先重试")
+        return _stream_response(
+            chat,
+            thread_id,
+            {"messages": [HumanMessage(content=body.content)]},
+        )
+
     @application.post("/api/sessions/{thread_id}/approval")
     def decide_approval(
         thread_id: ThreadId,
@@ -211,6 +237,22 @@ def create_api(
             raise HTTPException(status_code=502, detail=f"恢复审批失败: {exc}") from exc
         return _serialize_state(thread_id, chat.state(thread_id))
 
+    @application.post("/api/sessions/{thread_id}/approval/stream")
+    def stream_approval(
+        thread_id: ThreadId,
+        body: ApprovalDecision,
+        request: Request,
+    ) -> StreamingResponse:
+        chat = _chat(request)
+        _require_session(chat, thread_id)
+        if not list(iter_interrupts(chat.state(thread_id))):
+            raise HTTPException(status_code=409, detail="当前没有待审批操作")
+        return _stream_response(
+            chat,
+            thread_id,
+            Command(resume={"approved": body.approved}),
+        )
+
     @application.post("/api/sessions/{thread_id}/retry")
     def retry(thread_id: ThreadId, request: Request) -> dict[str, object]:
         chat = _chat(request)
@@ -225,6 +267,17 @@ def create_api(
         except Exception as exc:
             raise HTTPException(status_code=502, detail=f"重试失败: {exc}") from exc
         return _serialize_state(thread_id, chat.state(thread_id))
+
+    @application.post("/api/sessions/{thread_id}/retry/stream")
+    def stream_retry(thread_id: ThreadId, request: Request) -> StreamingResponse:
+        chat = _chat(request)
+        _require_session(chat, thread_id)
+        snapshot = chat.state(thread_id)
+        if list(iter_interrupts(snapshot)):
+            raise HTTPException(status_code=409, detail="待审批操作不能通过重试跳过")
+        if not snapshot.next:
+            raise HTTPException(status_code=409, detail="当前没有待恢复任务")
+        return _stream_response(chat, thread_id, None)
 
     @application.get("/api/sessions/{thread_id}/checkpoints")
     def list_checkpoints(
@@ -348,6 +401,69 @@ def _serialize_checkpoint(index: int, snapshot: StateSnapshot) -> dict[str, obje
         "step": metadata.get("step"),
         "source": metadata.get("source"),
     }
+
+
+def _stream_response(
+    chat: CheckpointChatApp,
+    thread_id: str,
+    graph_input: object,
+) -> StreamingResponse:
+    """Convert LangGraph message chunks and the final state to SSE events."""
+
+    def generate() -> Iterator[str]:
+        yield _sse({"type": "start", "thread_id": thread_id})
+        chunked_message_ids: set[str] = set()
+        try:
+            for mode, data in chat.stream(thread_id, graph_input):
+                if mode != "messages":
+                    continue
+                message, _metadata = data
+                if isinstance(message, AIMessageChunk):
+                    if message.id:
+                        chunked_message_ids.add(message.id)
+                elif not isinstance(message, AIMessage) or (
+                    message.id and message.id in chunked_message_ids
+                ):
+                    continue
+                content = _chunk_text(message.content)
+                if content:
+                    yield _sse({"type": "token", "content": content})
+            yield _sse(
+                {
+                    "type": "state",
+                    "state": _serialize_state(thread_id, chat.state(thread_id)),
+                }
+            )
+        except Exception as exc:  # noqa: BLE001 - report started stream failure in-band
+            yield _sse({"type": "error", "detail": f"模型或图执行失败: {exc}"})
+
+    return StreamingResponse(
+        generate(),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache, no-transform",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
+def _chunk_text(content: object) -> str:
+    if isinstance(content, str):
+        return content
+    if not isinstance(content, list):
+        return ""
+    parts: list[str] = []
+    for block in content:
+        if isinstance(block, str):
+            parts.append(block)
+        elif isinstance(block, dict) and isinstance(block.get("text"), str):
+            parts.append(block["text"])
+    return "".join(parts)
+
+
+def _sse(payload: dict[str, object]) -> str:
+    return f"data: {json.dumps(payload, ensure_ascii=False, default=str)}\n\n"
 
 
 app = create_api()

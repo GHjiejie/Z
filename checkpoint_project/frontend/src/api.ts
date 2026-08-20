@@ -30,6 +30,71 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return body as T;
 }
 
+interface StreamEvent {
+  type: "start" | "token" | "state" | "error";
+  content?: string;
+  detail?: string;
+  state?: SessionState;
+}
+
+async function streamRequest(
+  path: string,
+  init: RequestInit,
+  onToken: (token: string) => void,
+): Promise<SessionState> {
+  const response = await fetch(path, {
+    ...init,
+    headers: {
+      "Content-Type": "application/json",
+      Accept: "text/event-stream",
+      ...init.headers,
+    },
+  });
+  if (!response.ok) {
+    const body = await response.json().catch(() => null);
+    throw new ApiError(
+      response.status,
+      typeof body?.detail === "string"
+        ? body.detail
+        : `请求失败（HTTP ${response.status}）`,
+    );
+  }
+  if (!response.body) throw new ApiError(502, "服务器没有返回流式响应体");
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+  let finalState: SessionState | null = null;
+
+  const consume = (block: string) => {
+    const data = block
+      .split("\n")
+      .filter((line) => line.startsWith("data:"))
+      .map((line) => line.slice(5).trimStart())
+      .join("\n");
+    if (!data) return;
+    const event = JSON.parse(data) as StreamEvent;
+    if (event.type === "token" && event.content) onToken(event.content);
+    if (event.type === "state" && event.state) finalState = event.state;
+    if (event.type === "error") throw new ApiError(502, event.detail || "流式执行失败");
+  };
+
+  while (true) {
+    const { value, done } = await reader.read();
+    buffer += decoder.decode(value, { stream: !done }).replace(/\r\n/g, "\n");
+    let boundary = buffer.indexOf("\n\n");
+    while (boundary >= 0) {
+      consume(buffer.slice(0, boundary));
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf("\n\n");
+    }
+    if (done) break;
+  }
+  if (buffer.trim()) consume(buffer);
+  if (!finalState) throw new ApiError(502, "流式响应结束但缺少最终状态");
+  return finalState;
+}
+
 const sessionPath = (threadId: string) =>
   `/api/sessions/${encodeURIComponent(threadId)}`;
 
@@ -51,16 +116,51 @@ export const api = {
       body: JSON.stringify({ content }),
     }),
 
+  streamMessage: (
+    threadId: string,
+    content: string,
+    onToken: (token: string) => void,
+  ) =>
+    streamRequest(
+      `${sessionPath(threadId)}/messages/stream`,
+      {
+        method: "POST",
+        body: JSON.stringify({ content }),
+      },
+      onToken,
+    ),
+
   decideApproval: (threadId: string, approved: boolean) =>
     request<SessionState>(`${sessionPath(threadId)}/approval`, {
       method: "POST",
       body: JSON.stringify({ approved }),
     }),
 
+  streamApproval: (
+    threadId: string,
+    approved: boolean,
+    onToken: (token: string) => void,
+  ) =>
+    streamRequest(
+      `${sessionPath(threadId)}/approval/stream`,
+      {
+        method: "POST",
+        body: JSON.stringify({ approved }),
+      },
+      onToken,
+    ),
+
   retry: (threadId: string) =>
     request<SessionState>(`${sessionPath(threadId)}/retry`, {
       method: "POST",
     }),
+
+  streamRetry: (threadId: string, onToken: (token: string) => void) =>
+    streamRequest(
+      `${sessionPath(threadId)}/retry/stream`,
+      { method: "POST" },
+      onToken,
+    ),
 
   checkpoints: (threadId: string) =>
     request<Checkpoint[]>(`${sessionPath(threadId)}/checkpoints`),
