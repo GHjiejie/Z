@@ -37,16 +37,28 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 interface StreamEvent {
-  type: "start" | "token" | "artifact_ready" | "state" | "error";
+  type: "start" | "progress" | "token" | "artifact_ready" | "state" | "error";
   content?: string;
   detail?: string;
   state?: SessionState;
   artifact?: ArtifactRef;
+  phase?: string;
+  message?: string;
+  elapsed_ms?: number;
+  heartbeat?: boolean;
+}
+
+export interface StreamProgress {
+  phase: string;
+  message: string;
+  elapsed_ms: number;
+  heartbeat: boolean;
 }
 
 export interface StreamHandlers {
   onToken: (token: string) => void;
   onArtifact: (artifact: ArtifactRef) => void;
+  onProgress: (progress: StreamProgress) => void;
 }
 
 async function streamRequest(
@@ -86,6 +98,14 @@ async function streamRequest(
       .join("\n");
     if (!data) return;
     const event = JSON.parse(data) as StreamEvent;
+    if (event.type === "progress" && event.phase && event.message) {
+      handlers.onProgress({
+        phase: event.phase,
+        message: event.message,
+        elapsed_ms: event.elapsed_ms ?? 0,
+        heartbeat: event.heartbeat ?? false,
+      });
+    }
     if (event.type === "token" && event.content) handlers.onToken(event.content);
     if (event.type === "artifact_ready" && event.artifact) {
       handlers.onArtifact(event.artifact);

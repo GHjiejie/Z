@@ -205,6 +205,8 @@ svg { width: 20px; height: 20px; }
 .header-metrics { display: flex; align-items: center; gap: 8px; }
 .status-pill, .turn-pill { display: inline-flex; align-items: center; gap: 7px; padding: 6px 9px; color: #65716b; font-size: 10px; font-weight: 600; background: #f0f3ed; border: 1px solid #e3e8df; border-radius: 99px; white-space: nowrap; }
 .status-pill i { width: 6px; height: 6px; background: #45a275; border-radius: 50%; }
+.status-pill.working { color: #27664f; background: #e9f4ed; border-color: #cfe2d5; }
+.status-pill.working i { animation: live-pulse 1.4s ease-out infinite; }
 .status-pill.waiting_approval i { background: #e28b4d; }
 .status-pill.recoverable i { background: #d85f53; }
 .header-actions { display: flex; gap: 8px; margin-left: auto; }
@@ -288,6 +290,25 @@ svg { width: 20px; height: 20px; }
 .thought-block { margin: 0 0 10px; padding: 7px 10px; color: #7b8580; font-size: 11px; background: #f2f4f0; border-left: 2px solid #a8b9ae; border-radius: 2px 7px 7px 2px; }
 .thought-block summary { cursor: pointer; color: #607069; font-weight: 620; }
 .thought-block p { margin: 7px 0 0; white-space: pre-wrap; }
+
+.run-activity-row { margin-top: -6px; }
+.run-activity { width: min(540px, 100%); margin-top: 9px; padding: 11px 12px 9px; color: #43564c; background: linear-gradient(135deg, #f5faf6, #eef5f0); border: 1px solid #d5e3d8; border-radius: 10px; box-shadow: 0 6px 18px rgba(36, 88, 61, .06); }
+.run-activity-heading { display: flex; align-items: center; gap: 9px; }
+.run-live-dot { flex: 0 0 auto; width: 8px; height: 8px; background: #9ba8a0; border-radius: 50%; box-shadow: 0 0 0 4px rgba(123, 145, 133, .1); }
+.run-live-dot.connected { background: #35a875; box-shadow: 0 0 0 4px rgba(53, 168, 117, .12); animation: live-pulse 1.4s ease-out infinite; }
+.run-activity.stale { background: #fff9f0; border-color: #ead8bd; }
+.run-live-dot.connected.stale { background: #d68a3f; animation: none; box-shadow: 0 0 0 4px rgba(214, 138, 63, .12); }
+.run-activity.stale .run-activity-heading small { color: #a66a31; }
+.run-activity-heading > div { min-width: 0; flex: 1; }
+.run-activity-heading small { display: block; margin-bottom: 1px; color: #659079; font-size: 7px; font-weight: 820; letter-spacing: .15em; }
+.run-activity-heading strong { display: block; overflow: hidden; color: #2c4035; font-size: 11px; font-weight: 680; text-overflow: ellipsis; white-space: nowrap; }
+.run-activity-heading time { flex: 0 0 auto; color: #6f7e76; font: 9px ui-monospace, SFMono-Regular, Menlo, monospace; }
+.run-activity-meta { display: flex; justify-content: space-between; gap: 12px; margin-top: 7px; color: #77847d; font-size: 8px; }
+.run-activity-track { height: 2px; margin-top: 8px; overflow: hidden; background: #dce8df; border-radius: 2px; }
+.run-activity-track i { display: block; width: 35%; height: 100%; background: linear-gradient(90deg, transparent, #45a275, transparent); animation: run-track 1.6s ease-in-out infinite; }
+.run-activity.stale .run-activity-track i { background: linear-gradient(90deg, transparent, #d68a3f, transparent); }
+@keyframes run-track { from { transform: translateX(-110%); } to { transform: translateX(320%); } }
+@keyframes live-pulse { 0% { box-shadow: 0 0 0 0 rgba(53, 168, 117, .28); } 70%, 100% { box-shadow: 0 0 0 5px rgba(53, 168, 117, 0); } }
 
 .tool-call-chip { display: flex; align-items: center; gap: 8px; margin-top: 10px; padding: 8px 10px; color: #54645c; font-size: 11px; background: #f0f4ee; border: 1px solid #dce5da; border-radius: 8px; }
 .tool-call-chip svg { width: 15px; color: var(--green); }

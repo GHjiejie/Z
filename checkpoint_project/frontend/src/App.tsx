@@ -10,7 +10,7 @@ import {
 } from "react";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
-import { api } from "./api";
+import { api, type StreamProgress } from "./api";
 import {
   BranchIcon,
   BrowserIcon,
@@ -39,6 +39,12 @@ import type {
 
 const ACTIVE_SESSION_KEY = "checkpoint-studio-active-session";
 
+interface RunProgressView extends StreamProgress {
+  startedAt: number;
+  lastEventAt: number;
+  connected: boolean;
+}
+
 export default function App() {
   const initialized = useRef(false);
   const [sessions, setSessions] = useState<SessionSummary[]>([]);
@@ -52,6 +58,7 @@ export default function App() {
   const [timelineOpen, setTimelineOpen] = useState(false);
   const [forkTarget, setForkTarget] = useState<Checkpoint | null>(null);
   const [forkName, setForkName] = useState("");
+  const [runProgress, setRunProgress] = useState<RunProgressView | null>(null);
 
   const loadSession = useCallback(async (threadId: string) => {
     const [state, history] = await Promise.all([
@@ -157,9 +164,10 @@ export default function App() {
     };
     setComposer("");
     setBusy("message");
+    setRunProgress(beginRunProgress("正在连接后端并提交请求…"));
     setError(null);
     setChat({ ...chat, messages: [...chat.messages, optimistic] });
-    const streamHandlers = createStreamHandlers(setChat);
+    const streamHandlers = createStreamHandlers(setChat, setRunProgress);
     try {
       const state = await api.streamMessage(activeId, content, streamHandlers);
       setChat(state);
@@ -176,6 +184,7 @@ export default function App() {
         // Keep the original, more useful error.
       }
     } finally {
+      setRunProgress(null);
       setBusy(null);
     }
   };
@@ -183,13 +192,18 @@ export default function App() {
   const decideApproval = async (approved: boolean) => {
     if (!activeId || busy) return;
     setBusy(approved ? "approve" : "reject");
+    setRunProgress(
+      beginRunProgress(
+        approved ? "正在提交确认并创建实时预览…" : "正在提交选择并生成代码回答…",
+      ),
+    );
     setError(null);
     setChat((current) =>
       current
         ? { ...current, status: "idle", pending_approvals: [] }
         : current,
     );
-    const streamHandlers = createStreamHandlers(setChat);
+    const streamHandlers = createStreamHandlers(setChat, setRunProgress);
     try {
       const state = await api.streamApproval(activeId, approved, streamHandlers);
       setChat(state);
@@ -201,6 +215,7 @@ export default function App() {
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
+      setRunProgress(null);
       setBusy(null);
     }
   };
@@ -208,8 +223,9 @@ export default function App() {
   const retry = async () => {
     if (!activeId || busy) return;
     setBusy("retry");
+    setRunProgress(beginRunProgress("正在连接后端并恢复执行…"));
     setError(null);
-    const streamHandlers = createStreamHandlers(setChat);
+    const streamHandlers = createStreamHandlers(setChat, setRunProgress);
     try {
       const state = await api.streamRetry(activeId, streamHandlers);
       setChat(state);
@@ -218,6 +234,7 @@ export default function App() {
     } catch (reason) {
       setError(errorMessage(reason));
     } finally {
+      setRunProgress(null);
       setBusy(null);
     }
   };
@@ -279,6 +296,7 @@ export default function App() {
         <ChatHeader
           chat={chat}
           busy={busy}
+          runProgress={runProgress}
           onOpenSidebar={() => setSidebarOpen(true)}
           onOpenTimeline={() => setTimelineOpen(true)}
           onRefresh={() => void refreshCurrent()}
@@ -301,6 +319,7 @@ export default function App() {
               messages={chat?.messages ?? []}
               threadId={chat?.thread_id ?? null}
               busy={["message", "approve", "reject", "retry"].includes(busy ?? "")}
+              runProgress={runProgress}
             />
 
             {approval && (
@@ -433,6 +452,7 @@ function SessionSidebar({
 interface ChatHeaderProps {
   chat: SessionState | null;
   busy: string | null;
+  runProgress: RunProgressView | null;
   onOpenSidebar: () => void;
   onOpenTimeline: () => void;
   onRefresh: () => void;
@@ -441,6 +461,7 @@ interface ChatHeaderProps {
 function ChatHeader({
   chat,
   busy,
+  runProgress,
   onOpenSidebar,
   onOpenTimeline,
   onRefresh,
@@ -455,9 +476,9 @@ function ChatHeader({
         <h1>{chat?.thread_id ?? "正在连接…"}</h1>
       </div>
       <div className="header-metrics">
-        <span className={`status-pill ${chat?.status ?? "idle"}`}>
+        <span className={`status-pill ${runProgress ? "working" : chat?.status ?? "idle"}`}>
           <i />
-          {statusLabel(chat?.status)}
+          {runProgress ? "后端处理中" : statusLabel(chat?.status)}
         </span>
         <span className="turn-pill">{chat?.turn_count ?? 0} 次模型执行</span>
       </div>
@@ -478,10 +499,12 @@ function MessageList({
   messages,
   threadId,
   busy,
+  runProgress,
 }: {
   messages: ChatMessage[];
   threadId: string | null;
   busy: boolean;
+  runProgress: RunProgressView | null;
 }) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
@@ -503,9 +526,19 @@ function MessageList({
             key={message.id ?? `${message.type}-${index}`}
             message={message}
             threadId={threadId}
+            runProgress={isStreamingMessage(message) ? runProgress : null}
           />
         ))}
-        {busy && !messages.some(isStreamingMessage) && (
+        {runProgress && !messages.some(isStreamingMessage) && (
+          <div className="message-row ai-row run-activity-row">
+            <div className="avatar assistant-avatar"><SparkIcon /></div>
+            <div className="message-bubble ai-bubble">
+              <div className="message-author">Checkpoint Assistant</div>
+              <RunActivity progress={runProgress} />
+            </div>
+          </div>
+        )}
+        {busy && !runProgress && !messages.some(isStreamingMessage) && (
           <div className="message-row ai-row">
             <div className="avatar assistant-avatar"><SparkIcon /></div>
             <div className="thinking-bubble"><span /><span /><span /></div>
@@ -537,9 +570,11 @@ function EmptyConversation() {
 function MessageBubble({
   message,
   threadId,
+  runProgress,
 }: {
   message: ChatMessage;
   threadId: string | null;
+  runProgress: RunProgressView | null;
 }) {
   if (message.type === "tool") {
     if (message.artifact?.kind === "html" && threadId) {
@@ -573,13 +608,14 @@ function MessageBubble({
         {!human && <div className="message-author">Checkpoint Assistant</div>}
         {thought && (
           <details className="thought-block" open={thinking}>
-            <summary>{thinking ? "模型正在思考…" : "查看模型思考"}</summary>
+            <summary>{thinking ? "模型正在分析…" : streaming ? "模型分析完成" : "查看模型思考"}</summary>
             <MarkdownContent content={thought} compact />
             {streaming && thinking && <span className="stream-cursor" />}
           </details>
         )}
         {answer && <MarkdownContent content={answer} />}
         {streaming && answer && <span className="stream-cursor" />}
+        {runProgress && <RunActivity progress={runProgress} />}
         {!answer && toolCalls.length > 0 && (
           <p className="tool-intent">正在准备工具操作…</p>
         )}
@@ -919,6 +955,44 @@ function LoadingState() {
   );
 }
 
+function RunActivity({ progress }: { progress: RunProgressView }) {
+  const [now, setNow] = useState(Date.now());
+
+  useEffect(() => {
+    const timer = window.setInterval(() => setNow(Date.now()), 1000);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  const elapsedMs = Math.max(progress.elapsed_ms, now - progress.startedAt);
+  const heartbeatAge = now - progress.lastEventAt;
+  const connectionStale = progress.connected && heartbeatAge > 10000;
+  const connectionText = !progress.connected
+    ? "正在建立 SSE 流式连接"
+    : connectionStale
+      ? "超过 10 秒未收到后端心跳，连接可能异常"
+    : heartbeatAge <= 3500
+      ? "流式连接正常，后端服务正在运行"
+      : "等待后端下一次状态更新";
+
+  return (
+    <div className={`run-activity ${connectionStale ? "stale" : ""}`} role="status" aria-live="polite">
+      <div className="run-activity-heading">
+        <span className={`run-live-dot ${progress.connected ? "connected" : ""} ${connectionStale ? "stale" : ""}`} />
+        <div>
+          <small>{connectionStale ? "CONNECTION DELAYED" : progress.connected ? "BACKEND LIVE" : "CONNECTING"}</small>
+          <strong>{progress.message}</strong>
+        </div>
+        <time>{formatElapsed(elapsedMs)}</time>
+      </div>
+      <div className="run-activity-meta">
+        <span>{connectionText}</span>
+        <span>请保持页面开启</span>
+      </div>
+      <div className="run-activity-track"><i /></div>
+    </div>
+  );
+}
+
 function contentText(content: MessageContent): string {
   return typeof content === "string" ? content : JSON.stringify(content, null, 2);
 }
@@ -1011,11 +1085,48 @@ function createArtifactSink(
 
 function createStreamHandlers(
   setChat: Dispatch<SetStateAction<SessionState | null>>,
+  setRunProgress: Dispatch<SetStateAction<RunProgressView | null>>,
 ) {
   return {
     onToken: createTokenSink(setChat),
     onArtifact: createArtifactSink(setChat),
+    onProgress: createProgressSink(setRunProgress),
   };
+}
+
+function beginRunProgress(message: string): RunProgressView {
+  const now = Date.now();
+  return {
+    phase: "connecting",
+    message,
+    elapsed_ms: 0,
+    heartbeat: false,
+    startedAt: now,
+    lastEventAt: now,
+    connected: false,
+  };
+}
+
+function createProgressSink(
+  setRunProgress: Dispatch<SetStateAction<RunProgressView | null>>,
+): (progress: StreamProgress) => void {
+  return (progress) => {
+    const now = Date.now();
+    setRunProgress((current) => ({
+      ...progress,
+      startedAt: current?.startedAt ?? now - progress.elapsed_ms,
+      lastEventAt: now,
+      connected: true,
+    }));
+  };
+}
+
+function formatElapsed(elapsedMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(elapsedMs / 1000));
+  if (totalSeconds < 60) return `${totalSeconds} 秒`;
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `${minutes} 分 ${seconds.toString().padStart(2, "0")} 秒`;
 }
 
 const PREVIEW_CSP = [

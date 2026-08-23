@@ -146,6 +146,10 @@ class CheckpointApiTests(unittest.TestCase):
                 ]
 
             self.assertEqual(events[0]["type"], "start")
+            progress_events = [event for event in events if event["type"] == "progress"]
+            self.assertGreaterEqual(len(progress_events), 2)
+            self.assertEqual(progress_events[0]["phase"], "accepted")
+            self.assertEqual(progress_events[-1]["phase"], "finalizing")
             self.assertEqual(
                 "".join(
                     event.get("content", "")
@@ -158,6 +162,41 @@ class CheckpointApiTests(unittest.TestCase):
             self.assertEqual(
                 events[-1]["state"]["messages"][-1]["content"],
                 "逐字输出成功",
+            )
+
+    def test_stream_sends_heartbeat_while_model_is_silent(self) -> None:
+        api = create_api(
+            model=ScriptedChatModel(
+                responses=[AIMessage(content="延迟后完成")],
+                delay_seconds=1.2,
+            ),
+            db_path=self.root / "heartbeat.sqlite",
+            workspace=self.root / "heartbeat-workspace",
+        )
+        with TestClient(api) as client:
+            client.post("/api/sessions", json={"thread_id": "heartbeat-test"})
+            with client.stream(
+                "POST",
+                "/api/sessions/heartbeat-test/messages/stream",
+                json={"content": "执行一个较慢的请求"},
+            ) as response:
+                events = [
+                    json.loads(line.removeprefix("data: "))
+                    for line in response.iter_lines()
+                    if line.startswith("data: ")
+                ]
+
+            heartbeats = [
+                event
+                for event in events
+                if event["type"] == "progress" and event["heartbeat"]
+            ]
+            self.assertTrue(heartbeats)
+            self.assertGreaterEqual(heartbeats[0]["elapsed_ms"], 900)
+            self.assertEqual(events[-1]["type"], "state")
+            self.assertEqual(
+                events[-1]["state"]["messages"][-1]["content"],
+                "延迟后完成",
             )
 
     def test_html_artifact_stream_query_and_session_access(self) -> None:
@@ -213,6 +252,10 @@ class CheckpointApiTests(unittest.TestCase):
             self.assertEqual(approval_payload["kind"], "html_preview_approval")
             self.assertEqual(approval_payload["tool"], "render_html")
             self.assertEqual(approval_payload["title"], "交互页面")
+            self.assertIn(
+                "preparing_preview",
+                [event["phase"] for event in events if event["type"] == "progress"],
+            )
             self.assertEqual(
                 client.get("/api/sessions/artifact-api/artifacts").json(),
                 [],

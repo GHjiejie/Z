@@ -6,6 +6,7 @@ Run with: uv run python -m unittest checkpoint_project.test_checkpoint_project
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from collections.abc import Sequence
 from pathlib import Path
@@ -28,6 +29,7 @@ class ScriptedChatModel(BaseChatModel):
 
     responses: list[Any]
     seen_messages: list[list[BaseMessage]] = Field(default_factory=list)
+    delay_seconds: float = 0
 
     @property
     def _llm_type(self) -> str:
@@ -46,6 +48,8 @@ class ScriptedChatModel(BaseChatModel):
     ) -> ChatResult:
         del stop, run_manager, kwargs
         self.seen_messages.append(messages)
+        if self.delay_seconds:
+            time.sleep(self.delay_seconds)
         if not self.responses:
             raise AssertionError("脚本模型没有剩余响应")
         response = self.responses.pop(0)

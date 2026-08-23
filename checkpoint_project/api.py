@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import json
 import os
+import queue
+import threading
+import time
 import uuid
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
@@ -32,6 +35,8 @@ from checkpoint_project.graph import (
     iter_interrupts,
 )
 from checkpoint_project.model import build_model
+
+STREAM_HEARTBEAT_SECONDS = 1.0
 
 ThreadId = Annotated[
     str,
@@ -386,9 +391,7 @@ def _serialize_state(thread_id: str, snapshot: StateSnapshot) -> dict[str, objec
         "checkpoint_id": (
             checkpoint_id(snapshot) if snapshot.metadata is not None else None
         ),
-        "messages": [
-            _serialize_message(message, thread_id) for message in messages
-        ],
+        "messages": [_serialize_message(message, thread_id) for message in messages],
         "turn_count": snapshot.values.get("turn_count", 0),
         "next": list(snapshot.next),
         "status": _state_status(snapshot),
@@ -468,6 +471,7 @@ def _stream_response(
 
     def generate() -> Iterator[str]:
         run_id = f"run_{uuid.uuid4().hex}"
+        started_at = time.monotonic()
         yield _sse(
             {
                 "type": "start",
@@ -476,13 +480,80 @@ def _stream_response(
                 "thread_id": thread_id,
             }
         )
+        phase = "accepted"
+        phase_message = "后端已接收请求，正在调用模型…"
+        yield _sse(
+            _progress_event(
+                run_id,
+                phase,
+                phase_message,
+                started_at,
+            )
+        )
+        last_progress_at = time.monotonic()
         chunked_message_ids: set[str] = set()
+        inside_thought = False
+        active_tool = ""
+        graph_events: queue.Queue[tuple[str, object]] = queue.Queue()
+
+        def run_graph() -> None:
+            try:
+                for item in chat.stream(thread_id, graph_input):
+                    graph_events.put(("event", item))
+            except BaseException as exc:  # noqa: BLE001 - forward to SSE thread
+                graph_events.put(("error", exc))
+            finally:
+                graph_events.put(("done", None))
+
+        threading.Thread(
+            target=run_graph,
+            name=f"checkpoint-stream-{run_id[-8:]}",
+            daemon=True,
+        ).start()
+
         try:
-            for mode, data in chat.stream(thread_id, graph_input):
+            while True:
+                try:
+                    event_kind, payload = graph_events.get(
+                        timeout=STREAM_HEARTBEAT_SECONDS
+                    )
+                except queue.Empty:
+                    yield _sse(
+                        _progress_event(
+                            run_id,
+                            phase,
+                            phase_message,
+                            started_at,
+                            heartbeat=True,
+                        )
+                    )
+                    last_progress_at = time.monotonic()
+                    continue
+
+                if event_kind == "error":
+                    if isinstance(payload, BaseException):
+                        raise payload
+                    raise RuntimeError("未知图执行错误")
+                if event_kind == "done":
+                    break
+                if not isinstance(payload, tuple) or len(payload) != 2:
+                    continue
+                mode, data = payload
                 if mode == "custom":
                     event = _serialize_custom_event(data, thread_id, run_id)
                     if event:
                         yield _sse(event)
+                        phase = "finalizing"
+                        phase_message = "实时预览已生成，正在同步会话…"
+                        yield _sse(
+                            _progress_event(
+                                run_id,
+                                phase,
+                                phase_message,
+                                started_at,
+                            )
+                        )
+                        last_progress_at = time.monotonic()
                     continue
                 if mode != "messages":
                     continue
@@ -494,7 +565,61 @@ def _stream_response(
                     message.id and message.id in chunked_message_ids
                 ):
                     continue
+
+                tool_names: list[str] = []
+                has_tool_activity = False
+                if isinstance(message, AIMessageChunk):
+                    has_tool_activity = bool(message.tool_call_chunks)
+                    tool_names.extend(
+                        str(chunk.get("name"))
+                        for chunk in message.tool_call_chunks
+                        if chunk.get("name")
+                    )
+                else:
+                    has_tool_activity = bool(message.tool_calls)
+                    tool_names.extend(
+                        str(call.get("name"))
+                        for call in message.tool_calls
+                        if call.get("name")
+                    )
+                if tool_names:
+                    active_tool = tool_names[-1]
+                    phase, phase_message = _tool_progress(active_tool)
+                elif has_tool_activity and active_tool:
+                    phase, phase_message = _tool_progress(active_tool)
+
                 content = _chunk_text(message.content)
+                if content:
+                    lowered = content.lower()
+                    if "<think>" in lowered:
+                        inside_thought = True
+                    if "</think>" in lowered:
+                        inside_thought = False
+                        after_thought = lowered.rsplit("</think>", 1)[-1].strip()
+                        if not after_thought and not tool_names:
+                            phase = "organizing"
+                            phase_message = "分析完成，正在组织回答…"
+                    elif inside_thought:
+                        phase = "thinking"
+                        phase_message = "模型正在分析你的请求…"
+                    elif not tool_names:
+                        phase = "responding"
+                        phase_message = "模型正在生成回答…"
+
+                now = time.monotonic()
+                if now - last_progress_at >= STREAM_HEARTBEAT_SECONDS or tool_names:
+                    yield _sse(
+                        _progress_event(
+                            run_id,
+                            phase,
+                            phase_message,
+                            started_at,
+                            heartbeat=now - last_progress_at
+                            >= STREAM_HEARTBEAT_SECONDS,
+                        )
+                    )
+                    last_progress_at = now
+
                 if content:
                     yield _sse(
                         {
@@ -503,6 +628,16 @@ def _stream_response(
                             "content": content,
                         }
                     )
+            phase = "finalizing"
+            phase_message = "模型响应完成，正在保存 checkpoint…"
+            yield _sse(
+                _progress_event(
+                    run_id,
+                    phase,
+                    phase_message,
+                    started_at,
+                )
+            )
             yield _sse(
                 {
                     "type": "state",
@@ -529,6 +664,32 @@ def _stream_response(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+def _progress_event(
+    run_id: str,
+    phase: str,
+    message: str,
+    started_at: float,
+    *,
+    heartbeat: bool = False,
+) -> dict[str, object]:
+    return {
+        "type": "progress",
+        "run_id": run_id,
+        "phase": phase,
+        "message": message,
+        "elapsed_ms": max(0, round((time.monotonic() - started_at) * 1000)),
+        "heartbeat": heartbeat,
+    }
+
+
+def _tool_progress(tool_name: str) -> tuple[str, str]:
+    if tool_name == "render_html":
+        return "preparing_preview", "正在生成实时预览内容…"
+    if tool_name in {"write_file", "delete_file"}:
+        return "preparing_action", "正在准备文件操作…"
+    return "preparing_action", "正在准备可执行操作…"
 
 
 def _chunk_text(content: object) -> str:
