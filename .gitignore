@@ -38,7 +38,13 @@ checkpoint_project/data/
 checkpoint_project/workspace/
 checkpoint_project/frontend/node_modules/
 
-# Local LangGraph checkpoint database
-/check_points/time_travel.sqlite
-/check_points/time_travel.sqlite-shm
-/check_points/time_travel.sqlite-wal
+# Local databases and SQLite runtime files
+*.sqlite
+*.sqlite3
+*.db
+*.sqlite-shm
+*.sqlite-wal
+*.sqlite-journal
+*.db-shm
+*.db-wal
+*.db-journal
