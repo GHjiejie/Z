@@ -43,6 +43,16 @@ ThreadId = Annotated[
     ),
 ]
 
+ArtifactId = Annotated[
+    str,
+    ApiPath(
+        min_length=5,
+        max_length=64,
+        pattern=r"^art_[A-Fa-f0-9]+$",
+        description="Artifact ID",
+    ),
+]
+
 
 class SessionCreate(BaseModel):
     model_config = ConfigDict(str_strip_whitespace=True)
@@ -157,7 +167,7 @@ def create_api(
                     "source_checkpoint_id": session.source_checkpoint_id,
                     "message_count": len(snapshot.values.get("messages", [])),
                     "status": _state_status(snapshot),
-                    "last_message": _last_message(snapshot),
+                    "last_message": _last_message(snapshot, session.thread_id),
                 }
             )
         return result
@@ -287,7 +297,7 @@ def create_api(
         chat = _chat(request)
         _require_session(chat, thread_id)
         return [
-            _serialize_checkpoint(index, snapshot)
+            _serialize_checkpoint(index, snapshot, thread_id)
             for index, snapshot in enumerate(chat.history(thread_id))
         ]
 
@@ -308,6 +318,34 @@ def create_api(
         except ValueError as exc:
             raise HTTPException(status_code=409, detail=str(exc)) from exc
         return _serialize_state(new_thread_id, snapshot)
+
+    @application.get("/api/sessions/{thread_id}/artifacts")
+    def list_artifacts(
+        thread_id: ThreadId,
+        request: Request,
+    ) -> list[dict[str, object]]:
+        chat = _chat(request)
+        _require_session(chat, thread_id)
+        return [
+            _serialize_artifact_ref(artifact.public_ref(), thread_id)
+            for artifact in chat.artifacts.list_for_session(thread_id)
+        ]
+
+    @application.get("/api/sessions/{thread_id}/artifacts/{artifact_id}")
+    def get_artifact(
+        thread_id: ThreadId,
+        artifact_id: ArtifactId,
+        request: Request,
+    ) -> dict[str, object]:
+        chat = _chat(request)
+        _require_session(chat, thread_id)
+        artifact = chat.artifacts.get(thread_id, artifact_id)
+        if artifact is None:
+            raise HTTPException(status_code=404, detail="Artifact 不存在")
+        return {
+            **artifact.public_record(),
+            "content_url": _artifact_content_url(thread_id, artifact.artifact_id),
+        }
 
     frontend_dist = project_dir / "frontend" / "dist"
     if frontend_dist.is_dir():
@@ -348,7 +386,9 @@ def _serialize_state(thread_id: str, snapshot: StateSnapshot) -> dict[str, objec
         "checkpoint_id": (
             checkpoint_id(snapshot) if snapshot.metadata is not None else None
         ),
-        "messages": [_serialize_message(message) for message in messages],
+        "messages": [
+            _serialize_message(message, thread_id) for message in messages
+        ],
         "turn_count": snapshot.values.get("turn_count", 0),
         "next": list(snapshot.next),
         "status": _state_status(snapshot),
@@ -362,7 +402,10 @@ def _serialize_state(thread_id: str, snapshot: StateSnapshot) -> dict[str, objec
     }
 
 
-def _serialize_message(message: BaseMessage) -> dict[str, object]:
+def _serialize_message(
+    message: BaseMessage,
+    thread_id: str | None = None,
+) -> dict[str, object]:
     result: dict[str, object] = {
         "id": message.id,
         "type": message.type,
@@ -378,15 +421,26 @@ def _serialize_message(message: BaseMessage) -> dict[str, object]:
                 "tool_status": message.status,
             }
         )
+        if isinstance(message.artifact, dict):
+            artifact = _serialize_artifact_ref(message.artifact, thread_id)
+            if artifact:
+                result["artifact"] = artifact
     return result
 
 
-def _last_message(snapshot: StateSnapshot) -> dict[str, object] | None:
+def _last_message(
+    snapshot: StateSnapshot,
+    thread_id: str | None = None,
+) -> dict[str, object] | None:
     messages = snapshot.values.get("messages", [])
-    return _serialize_message(messages[-1]) if messages else None
+    return _serialize_message(messages[-1], thread_id) if messages else None
 
 
-def _serialize_checkpoint(index: int, snapshot: StateSnapshot) -> dict[str, object]:
+def _serialize_checkpoint(
+    index: int,
+    snapshot: StateSnapshot,
+    thread_id: str,
+) -> dict[str, object]:
     messages = snapshot.values.get("messages", [])
     metadata = snapshot.metadata or {}
     return {
@@ -396,7 +450,9 @@ def _serialize_checkpoint(index: int, snapshot: StateSnapshot) -> dict[str, obje
         "next": list(snapshot.next),
         "message_count": len(messages),
         "turn_count": snapshot.values.get("turn_count", 0),
-        "last_message": _serialize_message(messages[-1]) if messages else None,
+        "last_message": (
+            _serialize_message(messages[-1], thread_id) if messages else None
+        ),
         "has_interrupt": bool(list(iter_interrupts(snapshot))),
         "step": metadata.get("step"),
         "source": metadata.get("source"),
@@ -411,10 +467,23 @@ def _stream_response(
     """Convert LangGraph message chunks and the final state to SSE events."""
 
     def generate() -> Iterator[str]:
-        yield _sse({"type": "start", "thread_id": thread_id})
+        run_id = f"run_{uuid.uuid4().hex}"
+        yield _sse(
+            {
+                "type": "start",
+                "protocol_version": 2,
+                "run_id": run_id,
+                "thread_id": thread_id,
+            }
+        )
         chunked_message_ids: set[str] = set()
         try:
             for mode, data in chat.stream(thread_id, graph_input):
+                if mode == "custom":
+                    event = _serialize_custom_event(data, thread_id, run_id)
+                    if event:
+                        yield _sse(event)
+                    continue
                 if mode != "messages":
                     continue
                 message, _metadata = data
@@ -427,15 +496,29 @@ def _stream_response(
                     continue
                 content = _chunk_text(message.content)
                 if content:
-                    yield _sse({"type": "token", "content": content})
+                    yield _sse(
+                        {
+                            "type": "token",
+                            "run_id": run_id,
+                            "content": content,
+                        }
+                    )
             yield _sse(
                 {
                     "type": "state",
+                    "run_id": run_id,
                     "state": _serialize_state(thread_id, chat.state(thread_id)),
                 }
             )
         except Exception as exc:  # noqa: BLE001 - report started stream failure in-band
-            yield _sse({"type": "error", "detail": f"模型或图执行失败: {exc}"})
+            yield _sse(
+                {
+                    "type": "error",
+                    "run_id": run_id,
+                    "code": "GRAPH_EXECUTION_FAILED",
+                    "detail": f"模型或图执行失败: {exc}",
+                }
+            )
 
     return StreamingResponse(
         generate(),
@@ -460,6 +543,58 @@ def _chunk_text(content: object) -> str:
         elif isinstance(block, dict) and isinstance(block.get("text"), str):
             parts.append(block["text"])
     return "".join(parts)
+
+
+def _serialize_custom_event(
+    data: object,
+    thread_id: str,
+    run_id: str,
+) -> dict[str, object] | None:
+    """Whitelist custom graph events before exposing them to the browser."""
+    if not isinstance(data, dict) or data.get("type") != "artifact_ready":
+        return None
+    artifact = data.get("artifact")
+    if not isinstance(artifact, dict):
+        return None
+    reference = _serialize_artifact_ref(artifact, thread_id)
+    if not reference:
+        return None
+    return {
+        "type": "artifact_ready",
+        "run_id": run_id,
+        "artifact": reference,
+    }
+
+
+def _serialize_artifact_ref(
+    value: dict[str, object],
+    thread_id: str | None,
+) -> dict[str, object]:
+    """Return only the public artifact metadata understood by the frontend."""
+    artifact_id = value.get("artifact_id")
+    kind = value.get("kind")
+    title = value.get("title")
+    if not all(isinstance(item, str) and item for item in (artifact_id, kind, title)):
+        return {}
+    result = {
+        key: value.get(key)
+        for key in (
+            "artifact_id",
+            "kind",
+            "mime_type",
+            "title",
+            "byte_size",
+            "parent_artifact_id",
+            "created_at",
+        )
+    }
+    if thread_id:
+        result["content_url"] = _artifact_content_url(thread_id, artifact_id)
+    return result
+
+
+def _artifact_content_url(thread_id: str, artifact_id: str) -> str:
+    return f"/api/sessions/{thread_id}/artifacts/{artifact_id}"
 
 
 def _sse(payload: dict[str, object]) -> str:

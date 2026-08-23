@@ -160,6 +160,93 @@ class CheckpointApiTests(unittest.TestCase):
                 "逐字输出成功",
             )
 
+    def test_html_artifact_stream_query_and_session_access(self) -> None:
+        html = (
+            "<!doctype html><html><body>"
+            "<button onclick=\"document.body.dataset.clicked='yes'\">运行</button>"
+            "</body></html>"
+        )
+        render_call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "render_html",
+                    "args": {"title": "交互页面", "html": html},
+                    "id": "api-render-html",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        api = create_api(
+            model=ScriptedChatModel(
+                responses=[render_call, AIMessage(content="页面已经生成。")]
+            ),
+            db_path=self.root / "artifact-api.sqlite",
+            workspace=self.root / "artifact-workspace",
+        )
+
+        with TestClient(api) as client:
+            client.post("/api/sessions", json={"thread_id": "artifact-api"})
+            client.post("/api/sessions", json={"thread_id": "other-session"})
+            with client.stream(
+                "POST",
+                "/api/sessions/artifact-api/messages/stream",
+                json={"content": "生成一个可以运行的按钮页面"},
+            ) as response:
+                events = [
+                    json.loads(line.removeprefix("data: "))
+                    for line in response.iter_lines()
+                    if line.startswith("data: ")
+                ]
+
+            artifact_events = [
+                event for event in events if event["type"] == "artifact_ready"
+            ]
+            self.assertEqual(events[0]["protocol_version"], 2)
+            self.assertTrue(events[0]["run_id"].startswith("run_"))
+            self.assertTrue(
+                all(
+                    event.get("run_id") == events[0]["run_id"]
+                    for event in events
+                )
+            )
+            self.assertEqual(len(artifact_events), 1)
+            reference = artifact_events[0]["artifact"]
+            artifact_id = reference["artifact_id"]
+            self.assertEqual(reference["kind"], "html")
+            self.assertEqual(
+                reference["content_url"],
+                f"/api/sessions/artifact-api/artifacts/{artifact_id}",
+            )
+
+            final_state = events[-1]["state"]
+            tool_message = next(
+                message
+                for message in final_state["messages"]
+                if message["type"] == "tool" and message["name"] == "render_html"
+            )
+            self.assertEqual(tool_message["artifact"]["artifact_id"], artifact_id)
+            self.assertNotIn("content", tool_message["artifact"])
+
+            reloaded_state = client.get("/api/sessions/artifact-api").json()
+            reloaded_tool = next(
+                message
+                for message in reloaded_state["messages"]
+                if message["type"] == "tool" and message["name"] == "render_html"
+            )
+            self.assertEqual(reloaded_tool["artifact"]["artifact_id"], artifact_id)
+
+            artifact = client.get(reference["content_url"])
+            self.assertEqual(artifact.status_code, 200)
+            self.assertEqual(artifact.json()["content"], html)
+            listed = client.get("/api/sessions/artifact-api/artifacts").json()
+            self.assertEqual([item["artifact_id"] for item in listed], [artifact_id])
+
+            denied = client.get(
+                f"/api/sessions/other-session/artifacts/{artifact_id}"
+            )
+            self.assertEqual(denied.status_code, 404)
+
 
 if __name__ == "__main__":
     unittest.main()

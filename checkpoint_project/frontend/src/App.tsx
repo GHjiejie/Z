@@ -13,8 +13,10 @@ import remarkGfm from "remark-gfm";
 import { api } from "./api";
 import {
   BranchIcon,
+  BrowserIcon,
   ClockIcon,
   CloseIcon,
+  CodeIcon,
   DatabaseIcon,
   FileIcon,
   MenuIcon,
@@ -26,6 +28,8 @@ import {
 } from "./icons";
 import type {
   ApprovalPayload,
+  Artifact,
+  ArtifactRef,
   ChatMessage,
   Checkpoint,
   MessageContent,
@@ -155,9 +159,9 @@ export default function App() {
     setBusy("message");
     setError(null);
     setChat({ ...chat, messages: [...chat.messages, optimistic] });
-    const pushToken = createTokenSink(setChat);
+    const streamHandlers = createStreamHandlers(setChat);
     try {
-      const state = await api.streamMessage(activeId, content, pushToken);
+      const state = await api.streamMessage(activeId, content, streamHandlers);
       setChat(state);
       const [history] = await Promise.all([
         api.checkpoints(activeId),
@@ -185,9 +189,9 @@ export default function App() {
         ? { ...current, status: "idle", pending_approvals: [] }
         : current,
     );
-    const pushToken = createTokenSink(setChat);
+    const streamHandlers = createStreamHandlers(setChat);
     try {
-      const state = await api.streamApproval(activeId, approved, pushToken);
+      const state = await api.streamApproval(activeId, approved, streamHandlers);
       setChat(state);
       const [history] = await Promise.all([
         api.checkpoints(activeId),
@@ -205,9 +209,9 @@ export default function App() {
     if (!activeId || busy) return;
     setBusy("retry");
     setError(null);
-    const pushToken = createTokenSink(setChat);
+    const streamHandlers = createStreamHandlers(setChat);
     try {
-      const state = await api.streamRetry(activeId, pushToken);
+      const state = await api.streamRetry(activeId, streamHandlers);
       setChat(state);
       setCheckpoints(await api.checkpoints(activeId));
       await refreshSessions();
@@ -295,6 +299,7 @@ export default function App() {
           <>
             <MessageList
               messages={chat?.messages ?? []}
+              threadId={chat?.thread_id ?? null}
               busy={["message", "approve", "reject", "retry"].includes(busy ?? "")}
             />
 
@@ -469,7 +474,15 @@ function ChatHeader({
   );
 }
 
-function MessageList({ messages, busy }: { messages: ChatMessage[]; busy: boolean }) {
+function MessageList({
+  messages,
+  threadId,
+  busy,
+}: {
+  messages: ChatMessage[];
+  threadId: string | null;
+  busy: boolean;
+}) {
   const endRef = useRef<HTMLDivElement>(null);
   useEffect(() => {
     const frame = requestAnimationFrame(() => {
@@ -486,7 +499,11 @@ function MessageList({ messages, busy }: { messages: ChatMessage[]; busy: boolea
       <div className="message-inner">
         {!messages.length ? <EmptyConversation /> : null}
         {messages.map((message, index) => (
-          <MessageBubble key={message.id ?? `${message.type}-${index}`} message={message} />
+          <MessageBubble
+            key={message.id ?? `${message.type}-${index}`}
+            message={message}
+            threadId={threadId}
+          />
         ))}
         {busy && !messages.some(isStreamingMessage) && (
           <div className="message-row ai-row">
@@ -511,13 +528,29 @@ function EmptyConversation() {
         <span>试试：</span>
         <code>记住我喜欢简洁的方案</code>
         <code>列出工作区文件</code>
+        <code>生成一个可预览的登录页面</code>
       </div>
     </div>
   );
 }
 
-function MessageBubble({ message }: { message: ChatMessage }) {
+function MessageBubble({
+  message,
+  threadId,
+}: {
+  message: ChatMessage;
+  threadId: string | null;
+}) {
   if (message.type === "tool") {
+    if (message.artifact?.kind === "html" && threadId) {
+      return (
+        <HtmlArtifactCard
+          threadId={threadId}
+          reference={message.artifact}
+          failed={message.tool_status === "error"}
+        />
+      );
+    }
     return (
       <div className={`tool-result ${message.tool_status === "error" ? "error" : ""}`}>
         <FileIcon />
@@ -552,14 +585,115 @@ function MessageBubble({ message }: { message: ChatMessage }) {
         )}
         {toolCalls.map((call) => (
           <div className="tool-call-chip" key={call.id}>
-            <FileIcon />
+            {call.name === "render_html" ? <BrowserIcon /> : <FileIcon />}
             <span>{call.name}</span>
             {typeof call.args.path === "string" && <code>{call.args.path}</code>}
+            {typeof call.args.title === "string" && <code>{call.args.title}</code>}
           </div>
         ))}
       </div>
       {human && <div className="avatar human-avatar">你</div>}
     </div>
+  );
+}
+
+function HtmlArtifactCard({
+  threadId,
+  reference,
+  failed,
+}: {
+  threadId: string;
+  reference: ArtifactRef;
+  failed: boolean;
+}) {
+  const [artifact, setArtifact] = useState<Artifact | null>(null);
+  const [loadError, setLoadError] = useState<string | null>(null);
+  const [mode, setMode] = useState<"preview" | "source">("preview");
+  const [renderKey, setRenderKey] = useState(0);
+
+  useEffect(() => {
+    let cancelled = false;
+    setArtifact(null);
+    setLoadError(null);
+    api.artifact(threadId, reference.artifact_id)
+      .then((result) => {
+        if (!cancelled) setArtifact(result);
+      })
+      .catch((reason: unknown) => {
+        if (!cancelled) setLoadError(errorMessage(reason));
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [reference.artifact_id, threadId]);
+
+  return (
+    <article className={`artifact-card ${failed ? "error" : ""}`}>
+      <header className="artifact-header">
+        <div className="artifact-mark"><BrowserIcon /></div>
+        <div className="artifact-title">
+          <span>RUNNABLE HTML ARTIFACT</span>
+          <h3>{reference.title}</h3>
+        </div>
+        <div className="artifact-actions" role="group" aria-label="预览显示方式">
+          <button
+            className={mode === "preview" ? "active" : ""}
+            onClick={() => setMode("preview")}
+            type="button"
+          >
+            <BrowserIcon /> 预览
+          </button>
+          <button
+            className={mode === "source" ? "active" : ""}
+            onClick={() => setMode("source")}
+            type="button"
+          >
+            <CodeIcon /> 源码
+          </button>
+          <button
+            onClick={() => setRenderKey((value) => value + 1)}
+            disabled={!artifact || mode !== "preview"}
+            type="button"
+            title="重新运行页面"
+          >
+            <RefreshIcon />
+            <span className="visually-hidden">重新运行页面</span>
+          </button>
+        </div>
+      </header>
+
+      <div className="artifact-stage">
+        {!artifact && !loadError && (
+          <div className="artifact-loading">
+            <span /><span /><span />
+            <p>正在载入持久化页面…</p>
+          </div>
+        )}
+        {loadError && (
+          <div className="artifact-load-error" role="alert">
+            <strong>页面载入失败</strong>
+            <span>{loadError}</span>
+          </div>
+        )}
+        {artifact && mode === "preview" && (
+          <iframe
+            key={`${artifact.artifact_id}-${renderKey}`}
+            title={`${artifact.title} HTML 预览`}
+            sandbox="allow-scripts"
+            referrerPolicy="no-referrer"
+            srcDoc={sandboxDocument(artifact.content)}
+          />
+        )}
+        {artifact && mode === "source" && (
+          <pre className="artifact-source"><code>{artifact.content}</code></pre>
+        )}
+      </div>
+
+      <footer className="artifact-footer">
+        <span><i /> 沙箱运行 · 禁止网络与宿主访问</span>
+        <code>{formatBytes(reference.byte_size)}</code>
+      </footer>
+    </article>
   );
 }
 
@@ -635,7 +769,7 @@ function Composer({ value, disabled, waitingApproval, onChange, onSubmit }: Comp
           onKeyDown={handleKeyDown}
           disabled={disabled}
           rows={1}
-          placeholder={waitingApproval ? "请先处理上方的文件操作审批" : "发送消息，或要求助手操作工作区文件…"}
+          placeholder={waitingApproval ? "请先处理上方的文件操作审批" : "发送消息、操作文件，或生成可预览页面…"}
           aria-label="消息内容"
         />
         <button type="submit" disabled={disabled || !value.trim()} aria-label="发送消息">
@@ -817,6 +951,73 @@ function createTokenSink(
       };
     });
   };
+}
+
+function createArtifactSink(
+  setChat: Dispatch<SetStateAction<SessionState | null>>,
+): (artifact: ArtifactRef) => void {
+  return (artifact) => {
+    setChat((current) => {
+      if (
+        !current ||
+        current.messages.some(
+          (message) => message.artifact?.artifact_id === artifact.artifact_id,
+        )
+      ) {
+        return current;
+      }
+      return {
+        ...current,
+        messages: [
+          ...current.messages,
+          {
+            id: `streaming-artifact-${artifact.artifact_id}`,
+            type: "tool",
+            name: "render_html",
+            tool_status: "success",
+            content: `已创建可预览页面：${artifact.title}`,
+            artifact,
+          },
+        ],
+      };
+    });
+  };
+}
+
+function createStreamHandlers(
+  setChat: Dispatch<SetStateAction<SessionState | null>>,
+) {
+  return {
+    onToken: createTokenSink(setChat),
+    onArtifact: createArtifactSink(setChat),
+  };
+}
+
+const PREVIEW_CSP = [
+  "default-src 'none'",
+  "script-src 'unsafe-inline'",
+  "style-src 'unsafe-inline'",
+  "img-src data: blob:",
+  "connect-src 'none'",
+  "font-src data:",
+  "media-src data: blob:",
+  "object-src 'none'",
+  "base-uri 'none'",
+  "form-action 'none'",
+].join("; ");
+
+function sandboxDocument(html: string): string {
+  const documentNode = new DOMParser().parseFromString(html, "text/html");
+  const csp = documentNode.createElement("meta");
+  csp.httpEquiv = "Content-Security-Policy";
+  csp.content = PREVIEW_CSP;
+  documentNode.head.prepend(csp);
+  return `<!doctype html>\n${documentNode.documentElement.outerHTML}`;
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) return `${value} B`;
+  return `${(value / 1024).toFixed(value < 10 * 1024 ? 1 : 0)} KiB`;
 }
 
 function errorMessage(reason: unknown): string {

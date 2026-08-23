@@ -7,6 +7,22 @@ export interface ToolCall {
   type?: string;
 }
 
+export interface ArtifactRef {
+  artifact_id: string;
+  kind: "html" | string;
+  mime_type: string;
+  title: string;
+  byte_size: number;
+  parent_artifact_id: string | null;
+  created_at: string;
+  content_url: string;
+}
+
+export interface Artifact extends ArtifactRef {
+  content: string;
+  content_sha256: string;
+}
+
 export interface ChatMessage {
   id: string | null;
   type: "human" | "ai" | "tool" | "system" | string;
@@ -15,6 +31,7 @@ export interface ChatMessage {
   tool_call_id?: string;
   name?: string;
   tool_status?: "success" | "error";
+  artifact?: ArtifactRef;
 }
 
 export interface ApprovalPayload {

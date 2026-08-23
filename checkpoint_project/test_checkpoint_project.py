@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any
 
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, BaseMessage, HumanMessage
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from pydantic import Field
 
@@ -224,6 +224,170 @@ class CheckpointProjectTests(unittest.TestCase):
             app.invoke("retry", None)
             self.assertEqual(
                 app.state("retry").values["messages"][-1].content, "恢复成功"
+            )
+
+    def test_html_artifact_is_durable_idempotent_and_available_to_fork(self) -> None:
+        html = "<!doctype html><html><body><h1>Checkpoint Page</h1></body></html>"
+
+        def render_call() -> AIMessage:
+            return AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "render_html",
+                        "args": {"title": "Checkpoint Page", "html": html},
+                        "id": "render-html-1",
+                        "type": "tool_call",
+                    }
+                ],
+            )
+
+        responses = [
+            render_call(),
+            AIMessage(content="页面已生成。"),
+            render_call(),
+            AIMessage(content="仍然是同一个页面。"),
+        ]
+        with self.app(responses) as app:
+            app.invoke("artifact-source", {"messages": [HumanMessage(content="生成页面")]})
+            artifact_checkpoint = checkpoint_id(app.state("artifact-source"))
+            tool_message = next(
+                message
+                for message in app.state("artifact-source").values["messages"]
+                if isinstance(message, ToolMessage) and message.name == "render_html"
+            )
+            self.assertIsInstance(tool_message.artifact, dict)
+            artifact_id = tool_message.artifact["artifact_id"]
+            stored = app.artifacts.get("artifact-source", artifact_id)
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored.content, html)
+
+            app.invoke(
+                "artifact-source",
+                {"messages": [HumanMessage(content="重新生成同一个页面")]},
+            )
+            self.assertEqual(
+                len(app.artifacts.list_for_session("artifact-source")),
+                1,
+            )
+
+            app.fork("artifact-source", artifact_checkpoint, "artifact-branch")
+            forked = app.artifacts.get("artifact-branch", artifact_id)
+            self.assertIsNotNone(forked)
+            self.assertEqual(forked.content, html)
+
+            initial_checkpoint = checkpoint_id(app.history("artifact-source")[-1])
+            app.fork("artifact-source", initial_checkpoint, "before-artifact")
+            self.assertIsNone(app.artifacts.get("before-artifact", artifact_id))
+
+    def test_plain_html_code_block_does_not_create_artifact(self) -> None:
+        with self.app(
+            [AIMessage(content="HTML 示例：\n```html\n<button>示例</button>\n```")]
+        ) as app:
+            app.invoke(
+                "html-lesson",
+                {"messages": [HumanMessage(content="解释一下 HTML 按钮")]},
+            )
+            self.assertEqual(app.artifacts.list_for_session("html-lesson"), [])
+
+    def test_invalid_html_artifact_becomes_tool_error(self) -> None:
+        oversized_by_bytes = "<p>" + ("汉" * 90_000) + "</p>"
+        render_call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "render_html",
+                    "args": {"title": "太大的页面", "html": oversized_by_bytes},
+                    "id": "render-too-large",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        with self.app([render_call, AIMessage(content="页面过大，未创建预览。")]) as app:
+            app.invoke(
+                "invalid-artifact",
+                {"messages": [HumanMessage(content="生成一个超大页面")]},
+            )
+            tool_message = next(
+                message
+                for message in app.state("invalid-artifact").values["messages"]
+                if isinstance(message, ToolMessage)
+            )
+            self.assertEqual(tool_message.status, "error")
+            self.assertIn("256 KiB", str(tool_message.content))
+            self.assertEqual(app.artifacts.list_for_session("invalid-artifact"), [])
+
+    def test_branch_artifact_revision_does_not_change_source(self) -> None:
+        first_html = "<!doctype html><html><body>v1</body></html>"
+        first_call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "render_html",
+                    "args": {"title": "版本一", "html": first_html},
+                    "id": "render-v1",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        model = ScriptedChatModel(
+            responses=[first_call, AIMessage(content="版本一已生成。")]
+        )
+        with CheckpointChatApp(
+            model,
+            db_path=self.db_path,
+            workspace=self.workspace,
+        ) as app:
+            app.invoke("revision-source", {"messages": [HumanMessage(content="生成 v1")]})
+            source_checkpoint = checkpoint_id(app.state("revision-source"))
+            source_artifact = app.artifacts.list_for_session("revision-source")[0]
+            app.fork("revision-source", source_checkpoint, "revision-branch")
+
+            second_html = "<!doctype html><html><body>v2</body></html>"
+            model.responses.extend(
+                [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "render_html",
+                                "args": {
+                                    "title": "版本二",
+                                    "html": second_html,
+                                    "parent_artifact_id": source_artifact.artifact_id,
+                                },
+                                "id": "render-v2",
+                                "type": "tool_call",
+                            }
+                        ],
+                    ),
+                    AIMessage(content="版本二已生成。"),
+                ]
+            )
+            app.invoke(
+                "revision-branch",
+                {"messages": [HumanMessage(content="修改为 v2")]},
+            )
+
+            source_artifacts = app.artifacts.list_for_session("revision-source")
+            branch_artifacts = app.artifacts.list_for_session("revision-branch")
+            self.assertEqual([item.content for item in source_artifacts], [first_html])
+            self.assertEqual(len(branch_artifacts), 2)
+            revision = next(
+                item
+                for item in branch_artifacts
+                if item.parent_artifact_id == source_artifact.artifact_id
+            )
+            self.assertEqual(revision.content, second_html)
+            self.assertEqual(
+                revision.parent_artifact_id,
+                source_artifact.artifact_id,
+            )
+            self.assertIsNone(
+                app.artifacts.get(
+                    "revision-source",
+                    revision.artifact_id,
+                )
             )
 
 

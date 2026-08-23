@@ -20,6 +20,9 @@
   审批，写入、覆盖和删除单个文件必须审批，目录删除被禁止。
 - **SSE 流式输出**：普通回复、审批恢复和失败重试都会把 LangGraph 的模型 token
   实时推送到 React，流结束后再用 SQLite 中的最终 state 校准前端。
+- **可运行 HTML Artifact**：用户要求生成或预览页面时，模型通过 `render_html`
+  工具创建不可变 artifact。后端实时推送 `artifact_ready`，前端在隔离 iframe 中
+  运行页面，并支持源码查看、刷新恢复、checkpoint 历史和 fork 访问。
 - **Markdown 与自动滚动**：模型回复由 `react-markdown` + `remark-gfm` 安全渲染，
   支持标题、列表、表格、引用和代码块；流式内容每次增长时消息区都会自动触底。
 
@@ -32,6 +35,8 @@ checkpoint_project/
 ├── graph.py                    # StateGraph、interrupt、SQLite checkpointer、fork
 ├── model.py                    # 终端和 API 共用的模型配置
 ├── file_tools.py               # 受工作区约束的读/写/删/列目录工具
+├── artifact_tools.py           # render_html 模型工具与实时 artifact 事件
+├── artifact_store.py           # 不可变 artifact、幂等写入与会话访问授权
 ├── session_store.py            # SQLite 会话目录与分支来源
 ├── frontend/                   # React + TypeScript + Vite 单页应用
 ├── test_api.py                 # FastAPI 离线 HTTP 集成测试
@@ -47,8 +52,9 @@ checkpoint_project/workspace/
 ```
 
 SQLite 内既有 LangGraph 自动建立的 checkpoint/write 表，也有项目建立的
-`chat_sessions` 表。后者只保存会话 ID 和分支来源，实际 memory 仍由 LangGraph
-checkpoint 管理。
+`chat_sessions`、`artifacts` 和 `session_artifacts` 表。会话表只保存会话 ID 和
+分支来源，实际 memory 仍由 LangGraph checkpoint 管理；完整 HTML 只在 artifact
+表保存一次，checkpoint 中的 `ToolMessage` 只保留小型引用。
 
 ## 启动 Web 应用
 
@@ -89,8 +95,8 @@ CHECKPOINT_DB=/path/to/checkpoints.sqlite
 CHECKPOINT_WORKSPACE=/path/to/workspace
 ```
 
-Web 界面包括会话侧栏、Markdown 消息与工具结果、人工审批卡、失败恢复入口、
-checkpoint 时间线和 fork 弹窗，并为桌面和移动端提供响应式布局。
+Web 界面包括会话侧栏、Markdown 消息与工具结果、HTML 预览/源码卡片、人工审批卡、
+失败恢复入口、checkpoint 时间线和 fork 弹窗，并为桌面和移动端提供响应式布局。
 
 ## FastAPI 接口
 
@@ -107,6 +113,19 @@ checkpoint 时间线和 fork 弹窗，并为桌面和移动端提供响应式布
 | `POST` | `/api/sessions/{id}/fork` | 从指定 checkpoint 创建分支 |
 | `POST` | `/api/sessions/{id}/retry` | 从失败节点恢复（非流式） |
 | `POST` | `/api/sessions/{id}/retry/stream` | 流式恢复失败节点 |
+| `GET` | `/api/sessions/{id}/artifacts` | 列出会话可访问的 artifacts |
+| `GET` | `/api/sessions/{id}/artifacts/{artifact_id}` | 获取 artifact 元数据和源码 |
+
+SSE 现在包含 `start`、`token`、`artifact_ready`、`state` 和 `error` 事件。前端可以
+在 `artifact_ready` 到达时立即显示预览，但最终 `state` 仍是刷新和断线恢复的事实
+来源。
+
+### HTML 预览安全边界
+
+HTML 被视为不可信文本：后端不执行 JavaScript，也不在主站同源直接返回
+`text/html`。前端使用不含 `allow-same-origin` 的 `sandbox="allow-scripts"` iframe，
+并注入固定 CSP；默认禁止外部网络、表单提交、宿主页面访问、对象嵌入和顶层导航。
+因此第一版生成页面应使用内联 CSS/JavaScript 和 `data:`/`blob:` 资源。
 
 ## 启动终端版本
 
@@ -184,8 +203,8 @@ cd checkpoint_project/frontend && npm run build
 ```
 
 测试覆盖：多轮 memory 与重启恢复、写入批准、删除拒绝、从旧 checkpoint 派生
-独立会话、节点失败后从最后成功 checkpoint 重试，以及完整 HTTP
-“会话 → 消息 → 审批 → checkpoint → fork”流程。
+独立会话、节点失败后从最后成功 checkpoint 重试、artifact 持久化/幂等/访问控制/
+SSE/fork，以及完整 HTTP“会话 → 消息 → 审批 → checkpoint → fork”流程。
 
 ## 需要注意的边界
 
@@ -194,3 +213,5 @@ cd checkpoint_project/frontend && npm run build
   拒绝。重要文件仍应使用版本控制或额外备份。
 - checkpoint 会长期保存完整消息和工具结果；生产环境应增加保留期限、敏感信息
   脱敏、数据库加密和会话访问控制。
+- HTML artifact 当前限制为 256 KiB，且默认无法访问 CDN 或外部 API。若以后开放
+  网络能力，应使用明确的域名白名单和独立预览域名，不能直接放宽主应用的 CSP。

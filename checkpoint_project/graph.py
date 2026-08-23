@@ -15,15 +15,21 @@ from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, StateSnapshot, interrupt
 
+from checkpoint_project.artifact_store import ArtifactStore
+from checkpoint_project.artifact_tools import build_artifact_tools
 from checkpoint_project.file_tools import WorkspaceFiles, approval_preview, tool_map
 from checkpoint_project.session_store import SessionStore
 
 SENSITIVE_TOOLS = {"write_file", "delete_file"}
 
-SYSTEM_PROMPT = """你是一个具有持久记忆的终端文件助手。
+SYSTEM_PROMPT = """你是一个具有持久记忆的终端文件助手和页面原型助手。
 你只能通过已提供的工具访问工作区。读取和列出文件可以直接执行；写入、覆盖、
 删除文件会由系统暂停并请求用户批准。不要声称未经工具确认的文件操作已经完成。
 结合消息历史回答，以简洁中文与用户交流。每轮尽量只发起一个文件变更工具调用。
+当用户明确要求生成、修改或预览可运行网页时，调用 render_html；不要把需要预览的
+HTML 仅放在 Markdown 代码块中。如果只是在解释 HTML 或提供教学示例，不要调用
+render_html。HTML 应尽量自包含，不依赖外部网络资源。工具成功后简短说明页面已经
+生成，不要再次输出完整 HTML。
 """
 
 
@@ -46,7 +52,11 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
         self.db_path = db_path.expanduser().resolve()
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
         self.files = WorkspaceFiles(workspace)
-        self.tools = self.files.build_tools()
+        self.artifacts = ArtifactStore(self.db_path)
+        self.tools = [
+            *self.files.build_tools(),
+            *build_artifact_tools(self.artifacts),
+        ]
         self.tools_by_name = tool_map(self.tools)
         self.sessions = SessionStore(self.db_path)
         # from_conn_string is a context manager.  Keep it open for as long as
@@ -82,7 +92,10 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
                 return "tools"
             return END
 
-        def execute_tools(state: ChatState) -> dict[str, list[ToolMessage]]:
+        def execute_tools(
+            state: ChatState,
+            config: RunnableConfig,
+        ) -> dict[str, list[ToolMessage]]:
             latest = state["messages"][-1]
             if not isinstance(latest, AIMessage):
                 raise TypeError("tools 节点要求最后一条消息是 AIMessage")
@@ -131,14 +144,17 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
                     )
                     continue
                 try:
-                    output = selected.invoke(call["args"])
-                    results.append(
-                        ToolMessage(
-                            content=str(output),
-                            tool_call_id=call["id"],
-                            name=name,
+                    output = selected.invoke(call, config=config)
+                    if isinstance(output, ToolMessage):
+                        results.append(output)
+                    else:
+                        results.append(
+                            ToolMessage(
+                                content=str(output),
+                                tool_call_id=call["id"],
+                                name=name,
+                            )
                         )
-                    )
                 except Exception as exc:  # noqa: BLE001 - expose tool error to the model
                     results.append(
                         ToolMessage(
@@ -184,7 +200,7 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
         return self.graph.stream(
             graph_input,
             config=self.config(thread_id),
-            stream_mode=["messages"],
+            stream_mode=["messages", "custom"],
         )
 
     def resume(self, thread_id: str, decision: bool) -> dict[str, Any]:
@@ -214,12 +230,17 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
             source_thread_id=source_thread_id,
             source_checkpoint_id=checkpoint_id,
         )
+        branch_values = _branch_values(source.values)
+        self.artifacts.grant_to_session(
+            new_thread_id,
+            _artifact_ids(branch_values.get("messages", [])),
+        )
         # Mark the copied state as a completed synthetic node.  This deliberately
         # copies memory but not an old checkpoint's pending task/interrupt, so the
         # branch is immediately ready for a new user turn.
         result_config = self.graph.update_state(
             self.config(new_thread_id),
-            values=_branch_values(source.values),
+            values=branch_values,
             as_node="session_boundary",
         )
         return self.graph.get_state(result_config)
@@ -260,6 +281,21 @@ def _branch_values(values: dict[str, Any]) -> dict[str, Any]:
             )
     copied["messages"] = messages
     return copied
+
+
+def _artifact_ids(messages: object) -> list[str]:
+    if not isinstance(messages, list):
+        return []
+    result: list[str] = []
+    for message in messages:
+        if not isinstance(message, ToolMessage) or not isinstance(
+            message.artifact, dict
+        ):
+            continue
+        artifact_id = message.artifact.get("artifact_id")
+        if isinstance(artifact_id, str):
+            result.append(artifact_id)
+    return result
 
 
 def checkpoint_id(snapshot: StateSnapshot) -> str:

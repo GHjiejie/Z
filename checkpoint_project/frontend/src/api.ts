@@ -1,4 +1,10 @@
-import type { Checkpoint, SessionState, SessionSummary } from "./types";
+import type {
+  Artifact,
+  ArtifactRef,
+  Checkpoint,
+  SessionState,
+  SessionSummary,
+} from "./types";
 
 export class ApiError extends Error {
   status: number;
@@ -31,16 +37,22 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 }
 
 interface StreamEvent {
-  type: "start" | "token" | "state" | "error";
+  type: "start" | "token" | "artifact_ready" | "state" | "error";
   content?: string;
   detail?: string;
   state?: SessionState;
+  artifact?: ArtifactRef;
+}
+
+export interface StreamHandlers {
+  onToken: (token: string) => void;
+  onArtifact: (artifact: ArtifactRef) => void;
 }
 
 async function streamRequest(
   path: string,
   init: RequestInit,
-  onToken: (token: string) => void,
+  handlers: StreamHandlers,
 ): Promise<SessionState> {
   const response = await fetch(path, {
     ...init,
@@ -74,7 +86,10 @@ async function streamRequest(
       .join("\n");
     if (!data) return;
     const event = JSON.parse(data) as StreamEvent;
-    if (event.type === "token" && event.content) onToken(event.content);
+    if (event.type === "token" && event.content) handlers.onToken(event.content);
+    if (event.type === "artifact_ready" && event.artifact) {
+      handlers.onArtifact(event.artifact);
+    }
     if (event.type === "state" && event.state) finalState = event.state;
     if (event.type === "error") throw new ApiError(502, event.detail || "流式执行失败");
   };
@@ -119,7 +134,7 @@ export const api = {
   streamMessage: (
     threadId: string,
     content: string,
-    onToken: (token: string) => void,
+    handlers: StreamHandlers,
   ) =>
     streamRequest(
       `${sessionPath(threadId)}/messages/stream`,
@@ -127,7 +142,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ content }),
       },
-      onToken,
+      handlers,
     ),
 
   decideApproval: (threadId: string, approved: boolean) =>
@@ -139,7 +154,7 @@ export const api = {
   streamApproval: (
     threadId: string,
     approved: boolean,
-    onToken: (token: string) => void,
+    handlers: StreamHandlers,
   ) =>
     streamRequest(
       `${sessionPath(threadId)}/approval/stream`,
@@ -147,7 +162,7 @@ export const api = {
         method: "POST",
         body: JSON.stringify({ approved }),
       },
-      onToken,
+      handlers,
     ),
 
   retry: (threadId: string) =>
@@ -155,11 +170,19 @@ export const api = {
       method: "POST",
     }),
 
-  streamRetry: (threadId: string, onToken: (token: string) => void) =>
+  streamRetry: (threadId: string, handlers: StreamHandlers) =>
     streamRequest(
       `${sessionPath(threadId)}/retry/stream`,
       { method: "POST" },
-      onToken,
+      handlers,
+    ),
+
+  artifacts: (threadId: string) =>
+    request<ArtifactRef[]>(`${sessionPath(threadId)}/artifacts`),
+
+  artifact: (threadId: string, artifactId: string) =>
+    request<Artifact>(
+      `${sessionPath(threadId)}/artifacts/${encodeURIComponent(artifactId)}`,
     ),
 
   checkpoints: (threadId: string) =>

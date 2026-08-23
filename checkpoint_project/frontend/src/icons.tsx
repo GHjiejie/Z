@@ -53,6 +53,14 @@ export const FileIcon = (props: IconProps) => (
   <Icon {...props}><path d="M6 2h8l4 4v16H6Z" /><path d="M14 2v5h5M9 13h6M9 17h4" /></Icon>
 );
 
+export const BrowserIcon = (props: IconProps) => (
+  <Icon {...props}><rect x="3" y="4" width="18" height="16" rx="2" /><path d="M3 9h18M7 6.5h.01M10 6.5h.01" /></Icon>
+);
+
+export const CodeIcon = (props: IconProps) => (
+  <Icon {...props}><path d="m8 9-3 3 3 3M16 9l3 3-3 3M14 6l-4 12" /></Icon>
+);
+
 export const SparkIcon = (props: IconProps) => (
   <Icon {...props}><path d="m12 3 1.4 4.1L17 9l-3.6 1.9L12 15l-1.4-4.1L7 9l3.6-1.9Z" /><path d="m18.5 15 .8 2.2 1.7.8-1.7.8-.8 2.2-.8-2.2L16 18l1.7-.8Z" /></Icon>
 );
