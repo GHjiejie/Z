@@ -358,14 +358,23 @@ svg { width: 20px; height: 20px; }
 .operation-badge { padding: 4px 7px; border-radius: 5px; }
 .operation-badge.write { color: #2e7457; background: #e2efe4; }
 .operation-badge.delete { color: #a34438; background: #f7dfda; }
+.operation-badge.preview { color: #245f75; background: #dceef3; }
+.approval-card.preview-approval { background: #f7fbfa; border-color: #c8ddd6; }
+.preview-approval .approval-icon { color: #246b61; background: #dcefe9; }
+.preview-approval .approval-heading > div > span { color: #3f7d72; }
 .approval-path { display: flex; align-items: center; gap: 7px; padding: 8px 10px; color: #4e5c55; background: rgba(255,255,255,.7); border: 1px solid #eadfce; border-radius: 7px; }
 .approval-path svg { width: 14px; color: #a26945; }
 .approval-path code { overflow: hidden; font-size: 11px; text-overflow: ellipsis; }
+.approval-path.preview-title { border-color: #d3e4df; }
+.preview-title strong { min-width: 0; overflow: hidden; flex: 1; font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.preview-title small { color: #71817a; font-size: 9px; }
 .approval-preview { margin-top: 9px; padding: 9px 10px; background: #f7f3eb; border-radius: 7px; }
 .approval-preview > div { display: flex; justify-content: space-between; color: #7a6c61; font-size: 9px; }
 .approval-preview > div span { font-weight: 700; }
 .approval-preview pre { max-height: 88px; overflow: auto; margin: 8px 0 0; color: #4a514d; font: 10px/1.55 ui-monospace, monospace; white-space: pre-wrap; }
 .delete-warning { margin: 10px 0 0; color: #9b4b3d; font-size: 11px; }
+.preview-note { margin: 9px 0 0; color: #60766e; font-size: 10px; }
+.html-preview-summary { background: #edf5f2; }
 .approval-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 13px; }
 .approval-actions button { padding: 8px 13px; font-size: 11px; font-weight: 680; border-radius: 8px; }
 .reject-button { color: #715f53; background: transparent; border: 1px solid #d9cbbb; }

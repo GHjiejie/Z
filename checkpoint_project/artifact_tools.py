@@ -12,6 +12,22 @@ from pydantic import Field
 from checkpoint_project.artifact_store import ArtifactStore
 
 
+def html_preview_approval(args: dict[str, object]) -> dict[str, object]:
+    """Build the small, serializable HITL payload shown before rendering HTML."""
+    raw_title = args.get("title")
+    raw_html = args.get("html")
+    title = raw_title.strip() if isinstance(raw_title, str) else ""
+    html = raw_html if isinstance(raw_html, str) else ""
+    return {
+        "kind": "html_preview_approval",
+        "tool": "render_html",
+        "title": title[:120] or "未命名页面",
+        "characters": len(html),
+        "byte_size": len(html.encode("utf-8")),
+        "preview": html[:320],
+    }
+
+
 def build_artifact_tools(store: ArtifactStore) -> list[BaseTool]:
     """Build tools bound to the application's artifact store."""
 
@@ -23,11 +39,14 @@ def build_artifact_tools(store: ArtifactStore) -> list[BaseTool]:
         config: RunnableConfig,
         parent_artifact_id: str | None = None,
     ) -> tuple[str, dict[str, object]]:
-        """创建可运行的 HTML 页面预览。
+        """为适合可视化演示的前端需求创建可运行 HTML 页面预览。
 
-        只有用户明确要求生成、修改或预览网页时才使用。讲解 HTML 或提供代码
-        示例时不要调用。html 应是完整且尽量自包含的 HTML、CSS 和 JavaScript。
-        修改已有页面时，把原页面的 artifact ID 传给 parent_artifact_id。
+        根据用户意图使用：用户请求页面、组件、视觉效果、动画、交互或其代码示例，
+        且完整可运行演示能让答案更直观时，即使用户没有说“预览”也应调用。
+        仅解释语法、概念，或只需非可运行片段时不调用。html 应是完整且尽量
+        自包含的 HTML、CSS 和 JavaScript。修改已有页面时，把原页面的 artifact ID
+        传给 parent_artifact_id。工具执行前系统会自动请求用户确认，不要先在对话中
+        询问是否预览。
         """
         thread_id = str(config.get("configurable", {}).get("thread_id", ""))
         if not thread_id:
@@ -43,9 +62,7 @@ def build_artifact_tools(store: ArtifactStore) -> list[BaseTool]:
         # The final ToolMessage/checkpoint remains authoritative.  Custom streaming
         # only improves latency and may be unavailable during a direct tool test.
         try:
-            get_stream_writer()(
-                {"type": "artifact_ready", "artifact": reference}
-            )
+            get_stream_writer()({"type": "artifact_ready", "artifact": reference})
         except (KeyError, RuntimeError):
             pass
         return f"已创建可预览页面：{artifact.title}", reference

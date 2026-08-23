@@ -37,10 +37,12 @@ export interface ChatMessage {
 export interface ApprovalPayload {
   kind: string;
   tool: "write_file" | "delete_file" | string;
-  path: string;
+  path?: string;
   resolved_path?: string;
+  title?: string;
   overwrite?: boolean;
   characters?: number;
+  byte_size?: number;
   preview?: string;
   tool_call_id?: string;
 }

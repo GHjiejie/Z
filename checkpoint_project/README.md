@@ -8,8 +8,8 @@
 
 - **Memory**：`MessagesState` 使用 `add_messages` reducer；同一 `thread_id` 的历史
   会在后续调用中自动恢复，程序退出后也不会丢失。
-- **Human-in-the-loop**：`write_file`、`delete_file` 在产生副作用之前调用
-  `interrupt()`。审批本身也是 checkpoint 状态，退出终端后重新启动仍会再次显示。
+- **Human-in-the-loop**：`write_file`、`delete_file` 和 HTML 实时预览在执行前调用
+  `interrupt()`。确认本身也是 checkpoint 状态，退出终端后重新启动仍会再次显示。
 - **Time travel / fork**：`/history` 可看到任意 checkpoint；`/fork` 把所选时点的
   state 复制到新的 `thread_id`。源会话和新会话从此独立演进。
 - **Fault tolerance**：节点异常时，SQLite 保留最后一个成功的 super-step；修复
@@ -20,9 +20,11 @@
   审批，写入、覆盖和删除单个文件必须审批，目录删除被禁止。
 - **SSE 流式输出**：普通回复、审批恢复和失败重试都会把 LangGraph 的模型 token
   实时推送到 React，流结束后再用 SQLite 中的最终 state 校准前端。
-- **可运行 HTML Artifact**：用户要求生成或预览页面时，模型通过 `render_html`
-  工具创建不可变 artifact。后端实时推送 `artifact_ready`，前端在隔离 iframe 中
-  运行页面，并支持源码查看、刷新恢复、checkpoint 历史和 fork 访问。
+- **意图驱动的 HTML Artifact**：模型会识别页面、组件、动画、交互及其代码示例等
+  可视化意图，不要求用户说出“预览”或 `render_html`。模型发起工具调用后先展示
+  Human-in-the-loop 确认；批准才创建 artifact 并在隔离 iframe 中运行，选择“仅查看
+  代码”则不创建预览并回退为 Markdown。页面支持源码查看、刷新恢复、checkpoint
+  历史和 fork 访问。
 - **Markdown 与自动滚动**：模型回复由 `react-markdown` + `remark-gfm` 安全渲染，
   支持标题、列表、表格、引用和代码块；流式内容每次增长时消息区都会自动触底。
 

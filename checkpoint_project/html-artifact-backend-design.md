@@ -11,12 +11,15 @@
 本方案为应用增加“模型生成可运行 HTML，并在前端直接预览”的后端能力，要求同时满足：
 
 - 不通过正则或字符串特征猜测模型输出是否为可运行 HTML。
-- 由模型通过明确的工具调用表达“创建预览页面”的意图。
+- 由模型理解用户的自然语言意图，并通过明确工具调用表达“建议创建预览页面”；用户
+  不需要说出“预览”或内部工具名。
+- 在运行任何模型生成的 HTML 前，通过 LangGraph `interrupt()` 让用户明确选择
+  “运行实时预览”或“仅查看代码”。
 - 后端只校验、保存和分发 HTML，不在服务端执行 HTML 或 JavaScript。
 - 前端能够实时收到新页面事件。
 - 页面刷新、SSE 断线、checkpoint 历史和 fork 后仍可恢复页面。
 - retry 或 LangGraph 节点重放不会重复创建页面。
-- 普通 HTML 教学代码仍作为 Markdown 代码块显示，不自动运行。
+- 用户拒绝预览或只需要概念/语法时，HTML 仍作为 Markdown 代码块显示，不自动运行。
 
 ## 2. 核心决策
 
@@ -24,12 +27,15 @@
 
 ```text
 模型调用 render_html
-    → 后端校验 HTML
+    → LangGraph interrupt(html_preview_approval)
+    ├─ 用户拒绝 → 不创建 artifact → 模型返回说明和 Markdown 代码
+    └─ 用户批准
+         → 后端校验 HTML
     → 幂等写入 ArtifactStore
     → 写入带 artifact 引用的 ToolMessage
     → 通过 LangGraph custom stream 推送 artifact_ready
     → 最终 state 再次携带 artifact 引用
-    → 前端获取 HTML 并在隔离 iframe 中运行
+         → 前端获取 HTML 并在隔离 iframe 中运行
 ```
 
 不采用以下方式作为正式实现：
@@ -44,14 +50,16 @@
 
 ### 3.1 模型
 
-- 判断用户是否明确要求创建、修改或预览可运行页面。
-- 需要预览时调用 `render_html`。
-- 讲解 HTML 或提供代码示例时输出普通 Markdown，不调用工具。
+- 识别用户是否希望看到页面、组件、视觉效果、动画或交互的实现/代码/演示。
+- 完整可运行演示明显更有帮助时调用 `render_html`，即使用户没有明确提到预览。
+- 仅解释语法/概念、明确不要运行或无法组成页面时输出普通 Markdown。
+- 用户拒绝实时预览后输出说明和 Markdown 代码，不重复发起预览确认。
 - 尽量生成自包含的 HTML、CSS 和 JavaScript。
 
 ### 3.2 后端
 
 - 注册 `render_html` 工具。
+- 在工具执行前生成精简 `html_preview_approval` payload 并调用 `interrupt()`。
 - 验证工具参数。
 - 将 HTML 作为不可信文本持久化。
 - 生成不可变 artifact 和 ToolMessage 引用。
@@ -62,6 +70,7 @@
 ### 3.3 前端
 
 - 根据 `artifact_ready` 或最终 state 渲染预览卡片。
+- 根据 pending approval 渲染“运行实时预览 / 仅查看代码”确认卡。
 - 从 artifact API 获取 HTML。
 - 使用 sandbox iframe 和固定 CSP 执行 HTML。
 - 按 `artifact_id` 对重复事件去重。
@@ -82,7 +91,7 @@ class RenderHtmlInput(BaseModel):
 ```json
 {
   "name": "render_html",
-  "description": "创建或更新一个用户可以直接运行和预览的 HTML 页面。只有用户明确要求生成、修改或预览网页时才使用；讲解 HTML 或提供代码示例时不要使用。",
+  "description": "为页面、组件、视觉效果、动画或交互需求创建可运行 HTML。当完整演示明显有帮助时，即使用户未提到预览也使用；仅解释语法/概念时不使用。执行前系统会自动请求用户确认。",
   "parameters": {
     "type": "object",
     "properties": {
@@ -109,14 +118,17 @@ class RenderHtmlInput(BaseModel):
 系统提示词应加入：
 
 ```text
-当用户明确要求生成、修改或预览可运行网页时，调用 render_html。
-不要把需要预览的 HTML 仅放在 Markdown 代码块中。
-如果只是在解释 HTML 或提供教学示例，不要调用 render_html。
+主动识别用户的真实意图，不等待用户说出“预览”或 render_html。
+当用户请求前端页面、组件、动画、交互及其代码示例，并且完整演示更有帮助时，
+生成完整 HTML 并调用 render_html。
+不要在对话中先追问；系统会自动触发 Human-in-the-loop 确认。
+用户拒绝后提供 Markdown 代码，不重复调用 render_html。
 HTML 应尽量自包含，不依赖外部网络资源。
 调用成功后只需简短说明页面已经生成，不要再次输出完整 HTML。
 ```
 
-`render_html` 不需要人工审批，因为它只创建应用内部 artifact，不修改用户工作区文件。
+`render_html` 必须经过人工确认。这里的确认不是因为它修改工作区，而是因为后续会在
+浏览器沙箱里运行模型生成的 JavaScript；用户应对“是否运行”保有最终决定权。
 
 ## 5. Artifact 数据模型
 
@@ -255,7 +267,29 @@ def render_html(
     return f"已创建可预览页面：{title}", artifact.public_ref()
 ```
 
-### 7.2 工具执行器
+### 7.2 预览确认中断
+
+工具节点把 `render_html` 与文件变更一起纳入审批集合，但发送独立的预览确认协议：
+
+```json
+{
+  "kind": "html_preview_approval",
+  "tool": "render_html",
+  "title": "鼠标跟随动画",
+  "characters": 4231,
+  "byte_size": 4518,
+  "preview": "<!doctype html>...",
+  "tool_call_id": "call_xxx"
+}
+```
+
+`interrupt(payload)` 必须发生在 ArtifactStore 写入和 `artifact_ready` 事件之前。恢复时：
+
+- `approved=true`：执行 `render_html`，随后产生 artifact 与 SSE 事件。
+- `approved=false`：写入 error 状态的 ToolMessage，明确告知模型“仅查看代码”，不创建
+  artifact；模型继续生成 Markdown 回答。
+
+### 7.3 工具执行器
 
 现有工具执行器只调用 `selected.invoke(call["args"])`。应调整为接收 `RunnableConfig` 并传入完整 ToolCall：
 
@@ -294,7 +328,7 @@ ToolMessage(
 )
 ```
 
-### 7.3 Stream Mode
+### 7.4 Stream Mode
 
 将 LangGraph stream mode 从：
 
@@ -543,6 +577,7 @@ GRAPH_EXECUTION_FAILED
 - `checkpoint_project/graph.py`
   - 初始化 ArtifactStore。
   - 注册 `render_html`。
+  - 对 `render_html` 调用 `interrupt()`，区分批准与仅查看代码。
   - 工具节点接收 RunnableConfig。
   - 使用完整 ToolCall 调用工具。
   - 支持 `messages + custom` stream mode。
@@ -553,7 +588,7 @@ GRAPH_EXECUTION_FAILED
   - 将 custom stream 转换为 SSE `artifact_ready`。
   - 增加错误码和响应校验。
 - `checkpoint_project/test_api.py`
-  - 增加 artifact API、SSE、刷新与访问控制测试。
+  - 增加预览批准/拒绝、artifact API、SSE、刷新与访问控制测试。
 - `checkpoint_project/test_checkpoint_project.py`
   - 增加 retry 幂等、checkpoint 和 fork 测试。
 - `checkpoint_project/README.md`
@@ -562,9 +597,9 @@ GRAPH_EXECUTION_FAILED
 ## 15. 实施顺序
 
 1. 实现 Artifact 数据模型与 ArtifactStore。
-2. 实现 `render_html` 工具及参数校验。
-3. 接入 LangGraph 工具节点和 ToolMessage artifact。
-4. 增加 custom stream 和 `artifact_ready` SSE。
+2. 实现 `render_html` 工具、意图规则及参数校验。
+3. 接入 LangGraph `interrupt()` 与批准/拒绝分支。
+4. 接入工具节点、ToolMessage artifact、custom stream 和 `artifact_ready` SSE。
 5. 增加 artifact 查询 API。
 6. 完成 checkpoint、retry 和 fork 一致性处理。
 7. 补齐离线后端测试。
@@ -575,18 +610,24 @@ GRAPH_EXECUTION_FAILED
 后端完成时必须满足：
 
 1. 普通问答不会创建 artifact。
-2. HTML 教学代码不会自动创建 artifact。
-3. `render_html` 能创建一条可查询的数据库记录。
-4. SSE 包含一个可去重的 `artifact_ready` 事件和最终 `state`。
-5. 页面刷新后，session state 仍包含 artifact 引用。
-6. retry 同一工具调用不会产生重复记录。
-7. 超大或非法 HTML 返回工具错误。
-8. 其他会话不能读取未授权 artifact。
-9. 从生成前 checkpoint fork 时不包含 artifact。
-10. 从生成后 checkpoint fork 时可以读取对应 artifact。
-11. 分支修改 artifact 不影响源会话。
-12. 原有文件审批、故障恢复、checkpoint 和 SSE token 测试继续通过。
+2. 可视化前端需求即使未提到预览，也能触发 `html_preview_approval`。
+3. 用户批准前不会创建 artifact 或发送 `artifact_ready`。
+4. 用户拒绝后不创建 artifact，并继续得到 Markdown 代码。
+5. `render_html` 在批准后能创建一条可查询的数据库记录。
+6. 批准恢复的 SSE 包含一个可去重的 `artifact_ready` 事件和最终 `state`。
+7. 页面刷新后，session state 仍包含 artifact 引用。
+8. retry 同一工具调用不会产生重复记录。
+9. 超大或非法 HTML 返回工具错误。
+10. 其他会话不能读取未授权 artifact。
+11. 从生成前 checkpoint fork 时不包含 artifact。
+12. 从生成后 checkpoint fork 时可以读取对应 artifact。
+13. 分支修改 artifact 不影响源会话。
+14. 原有文件审批、故障恢复、checkpoint 和 SSE token 测试继续通过。
 
 ## 17. 最终结论
 
-`render_html` 工具负责明确模型意图，ArtifactStore 负责不可变持久化，ToolMessage 负责进入 LangGraph checkpoint，custom stream 负责实时通知，最终 state 负责断线和刷新恢复。该方案能够自然融入当前项目的 memory、retry、time travel 和 fork 机制，并为未来扩展更多可运行 artifact 类型保留空间。
+模型负责从自然语言识别可视化意图，`render_html` 工具负责提交完整页面候选，LangGraph
+`interrupt()` 负责把是否运行的最终决定交给用户。批准后 ArtifactStore 负责不可变持久化，
+ToolMessage 负责进入 checkpoint，custom stream 负责实时通知，最终 state 负责断线和刷新
+恢复；拒绝后则安全回退到 Markdown 代码。该方案能够自然融入当前项目的 memory、retry、
+time travel 和 fork 机制，并为未来扩展更多可运行 artifact 类型保留空间。

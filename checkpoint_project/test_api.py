@@ -199,17 +199,39 @@ class CheckpointApiTests(unittest.TestCase):
                     if line.startswith("data: ")
                 ]
 
-            artifact_events = [
-                event for event in events if event["type"] == "artifact_ready"
-            ]
             self.assertEqual(events[0]["protocol_version"], 2)
             self.assertTrue(events[0]["run_id"].startswith("run_"))
             self.assertTrue(
-                all(
-                    event.get("run_id") == events[0]["run_id"]
-                    for event in events
-                )
+                all(event.get("run_id") == events[0]["run_id"] for event in events)
             )
+            self.assertFalse(
+                [event for event in events if event["type"] == "artifact_ready"]
+            )
+            pending_state = events[-1]["state"]
+            self.assertEqual(pending_state["status"], "waiting_approval")
+            approval_payload = pending_state["pending_approvals"][0]["payload"]
+            self.assertEqual(approval_payload["kind"], "html_preview_approval")
+            self.assertEqual(approval_payload["tool"], "render_html")
+            self.assertEqual(approval_payload["title"], "交互页面")
+            self.assertEqual(
+                client.get("/api/sessions/artifact-api/artifacts").json(),
+                [],
+            )
+
+            with client.stream(
+                "POST",
+                "/api/sessions/artifact-api/approval/stream",
+                json={"approved": True},
+            ) as response:
+                approval_events = [
+                    json.loads(line.removeprefix("data: "))
+                    for line in response.iter_lines()
+                    if line.startswith("data: ")
+                ]
+
+            artifact_events = [
+                event for event in approval_events if event["type"] == "artifact_ready"
+            ]
             self.assertEqual(len(artifact_events), 1)
             reference = artifact_events[0]["artifact"]
             artifact_id = reference["artifact_id"]
@@ -219,7 +241,8 @@ class CheckpointApiTests(unittest.TestCase):
                 f"/api/sessions/artifact-api/artifacts/{artifact_id}",
             )
 
-            final_state = events[-1]["state"]
+            final_state = approval_events[-1]["state"]
+            self.assertEqual(final_state["status"], "idle")
             tool_message = next(
                 message
                 for message in final_state["messages"]
@@ -242,10 +265,53 @@ class CheckpointApiTests(unittest.TestCase):
             listed = client.get("/api/sessions/artifact-api/artifacts").json()
             self.assertEqual([item["artifact_id"] for item in listed], [artifact_id])
 
-            denied = client.get(
-                f"/api/sessions/other-session/artifacts/{artifact_id}"
-            )
+            denied = client.get(f"/api/sessions/other-session/artifacts/{artifact_id}")
             self.assertEqual(denied.status_code, 404)
+
+    def test_reject_html_preview_keeps_markdown_answer(self) -> None:
+        render_call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "render_html",
+                    "args": {
+                        "title": "鼠标跟随动画",
+                        "html": "<!doctype html><html><body>demo</body></html>",
+                    },
+                    "id": "api-reject-render",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        api = create_api(
+            model=ScriptedChatModel(
+                responses=[
+                    render_call,
+                    AIMessage(content="```html\n<div>仅查看代码</div>\n```"),
+                ]
+            ),
+            db_path=self.root / "reject-artifact.sqlite",
+            workspace=self.root / "reject-artifact-workspace",
+        )
+
+        with TestClient(api) as client:
+            client.post("/api/sessions", json={"thread_id": "reject-preview"})
+            pending = client.post(
+                "/api/sessions/reject-preview/messages",
+                json={"content": "介绍鼠标跟随动画，最好给出代码示例"},
+            )
+            self.assertEqual(pending.json()["status"], "waiting_approval")
+
+            rejected = client.post(
+                "/api/sessions/reject-preview/approval",
+                json={"approved": False},
+            )
+            self.assertEqual(rejected.json()["status"], "idle")
+            self.assertIn("```html", rejected.json()["messages"][-1]["content"])
+            self.assertEqual(
+                client.get("/api/sessions/reject-preview/artifacts").json(),
+                [],
+            )
 
 
 if __name__ == "__main__":

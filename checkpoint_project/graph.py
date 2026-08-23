@@ -16,20 +16,28 @@ from langgraph.graph.state import CompiledStateGraph
 from langgraph.types import Command, StateSnapshot, interrupt
 
 from checkpoint_project.artifact_store import ArtifactStore
-from checkpoint_project.artifact_tools import build_artifact_tools
+from checkpoint_project.artifact_tools import (
+    build_artifact_tools,
+    html_preview_approval,
+)
 from checkpoint_project.file_tools import WorkspaceFiles, approval_preview, tool_map
 from checkpoint_project.session_store import SessionStore
 
-SENSITIVE_TOOLS = {"write_file", "delete_file"}
+APPROVAL_TOOLS = {"write_file", "delete_file", "render_html"}
 
 SYSTEM_PROMPT = """你是一个具有持久记忆的终端文件助手和页面原型助手。
 你只能通过已提供的工具访问工作区。读取和列出文件可以直接执行；写入、覆盖、
 删除文件会由系统暂停并请求用户批准。不要声称未经工具确认的文件操作已经完成。
 结合消息历史回答，以简洁中文与用户交流。每轮尽量只发起一个文件变更工具调用。
-当用户明确要求生成、修改或预览可运行网页时，调用 render_html；不要把需要预览的
-HTML 仅放在 Markdown 代码块中。如果只是在解释 HTML 或提供教学示例，不要调用
-render_html。HTML 应尽量自包含，不依赖外部网络资源。工具成功后简短说明页面已经
-生成，不要再次输出完整 HTML。
+主动识别用户的真实意图，而不是等待用户说出工具名或“预览”：当用户请求前端页面、
+组件、视觉效果、动画、交互，并希望获得示例、代码、实现或演示时，完整可运行页面通常
+比静态代码更有帮助，应生成自包含 HTML/CSS/JavaScript 并调用 render_html。典型例子
+包括“介绍鼠标跟随动画，最好给出代码示例”。仅在用户只问语法/概念、明确不要运行，
+或答案不适合组成页面时，才只给 Markdown 代码。render_html 会由系统自动触发
+Human-in-the-loop 确认，不要先用普通文字追问用户，也不要要求用户提到 render_html。
+确认通过后简短说明页面已经生成，不要再次输出完整 HTML；用户拒绝实时预览后，继续
+提供解释和 Markdown 代码，不要再次调用 render_html。HTML 应尽量自包含且不依赖
+外部网络资源。
 """
 
 
@@ -108,10 +116,17 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
             # therefore no successful file operation is accidentally repeated.
             for call in calls:
                 name = call["name"]
-                if name not in SENSITIVE_TOOLS:
+                if name not in APPROVAL_TOOLS:
                     continue
                 try:
-                    payload = approval_preview(name, call["args"], self.files.resolve)
+                    if name == "render_html":
+                        payload = html_preview_approval(call["args"])
+                    else:
+                        payload = approval_preview(
+                            name,
+                            call["args"],
+                            self.files.resolve,
+                        )
                     payload["tool_call_id"] = call["id"]
                     decision = interrupt(payload)
                     approvals[call["id"]] = _is_approved(decision)
@@ -121,10 +136,17 @@ class CheckpointChatApp(AbstractContextManager["CheckpointChatApp"]):
             results: list[ToolMessage] = []
             for call in calls:
                 name = call["name"]
-                if name in SENSITIVE_TOOLS and not approvals.get(call["id"], False):
+                if name in APPROVAL_TOOLS and not approvals.get(call["id"], False):
+                    if name == "render_html":
+                        content = (
+                            "用户选择仅查看代码，未运行 HTML 实时预览，也未创建 "
+                            "artifact。请继续提供说明和 Markdown HTML 代码。"
+                        )
+                    else:
+                        content = f"用户拒绝执行 {name}，未产生文件变更。"
                     results.append(
                         ToolMessage(
-                            content=f"用户拒绝执行 {name}，未产生文件变更。",
+                            content=content,
                             tool_call_id=call["id"],
                             name=name,
                             status="error",
@@ -272,7 +294,7 @@ def _branch_values(values: dict[str, Any]) -> dict[str, Any]:
                 ToolMessage(
                     content=(
                         "从此 checkpoint 创建新会话时已取消原待执行工具调用；"
-                        "没有执行文件操作。"
+                        "没有执行该操作。"
                     ),
                     tool_call_id=call["id"],
                     name=call["name"],

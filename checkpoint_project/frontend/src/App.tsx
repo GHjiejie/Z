@@ -704,22 +704,46 @@ interface ApprovalCardProps {
 }
 
 function ApprovalCard({ payload, busy, onDecision }: ApprovalCardProps) {
+  const previewing = payload.tool === "render_html";
   const writing = payload.tool === "write_file";
+  const deleting = payload.tool === "delete_file";
+  const title = previewing
+    ? "运行这个 HTML 实时预览吗？"
+    : writing
+      ? "允许写入这个文件？"
+      : "允许删除这个文件？";
   return (
-    <section className="approval-wrap" aria-label="人工审批">
-      <div className="approval-card">
-        <div className="approval-icon"><ShieldIcon /></div>
+    <section className="approval-wrap" aria-label={previewing ? "实时预览确认" : "人工审批"}>
+      <div className={`approval-card ${previewing ? "preview-approval" : ""}`}>
+        <div className="approval-icon">{previewing ? <BrowserIcon /> : <ShieldIcon />}</div>
         <div className="approval-main">
           <div className="approval-heading">
             <div>
-              <span>HUMAN APPROVAL REQUIRED</span>
-              <h3>{writing ? "允许写入这个文件？" : "允许删除这个文件？"}</h3>
+              <span>{previewing ? "INTERACTIVE PREVIEW" : "HUMAN APPROVAL REQUIRED"}</span>
+              <h3>{title}</h3>
             </div>
-            <span className={`operation-badge ${writing ? "write" : "delete"}`}>
-              {writing ? "WRITE" : "DELETE"}
+            <span className={`operation-badge ${previewing ? "preview" : writing ? "write" : "delete"}`}>
+              {previewing ? "PREVIEW" : writing ? "WRITE" : "DELETE"}
             </span>
           </div>
-          <div className="approval-path"><FileIcon /><code>{payload.path}</code></div>
+          {previewing ? (
+            <div className="approval-path preview-title">
+              <BrowserIcon />
+              <strong>{payload.title || "未命名页面"}</strong>
+              <small>{formatBytes(payload.byte_size ?? 0)}</small>
+            </div>
+          ) : (
+            <div className="approval-path"><FileIcon /><code>{payload.path}</code></div>
+          )}
+          {previewing && (
+            <div className="approval-preview html-preview-summary">
+              <div>
+                <span>即将运行的 HTML</span>
+                <small>{payload.characters ?? 0} 字符 · 沙箱隔离</small>
+              </div>
+              <pre>{payload.preview || "（无可预览内容）"}</pre>
+            </div>
+          )}
           {writing && (
             <div className="approval-preview">
               <div>
@@ -729,14 +753,15 @@ function ApprovalCard({ payload, busy, onDecision }: ApprovalCardProps) {
               <pre>{payload.preview || "（空文件）"}</pre>
             </div>
           )}
-          {!writing && <p className="delete-warning">删除无法由 checkpoint 自动撤销，请确认文件路径。</p>}
+          {deleting && <p className="delete-warning">删除无法由 checkpoint 自动撤销，请确认文件路径。</p>}
+          {previewing && <p className="preview-note">确认后才会创建并在隔离沙箱中运行；选择仅查看代码不会创建预览。</p>}
           <div className="approval-actions">
             <button className="reject-button" onClick={() => onDecision(false)} disabled={Boolean(busy)}>
-              {busy === "reject" ? "正在拒绝…" : "拒绝"}
+              {busy === "reject" ? "正在处理…" : previewing ? "仅查看代码" : "拒绝"}
             </button>
             <button className="approve-button" onClick={() => onDecision(true)} disabled={Boolean(busy)}>
-              <ShieldIcon />
-              {busy === "approve" ? "正在执行…" : "批准并执行"}
+              {previewing ? <BrowserIcon /> : <ShieldIcon />}
+              {busy === "approve" ? "正在执行…" : previewing ? "运行实时预览" : "批准并执行"}
             </button>
           </div>
         </div>
@@ -769,7 +794,7 @@ function Composer({ value, disabled, waitingApproval, onChange, onSubmit }: Comp
           onKeyDown={handleKeyDown}
           disabled={disabled}
           rows={1}
-          placeholder={waitingApproval ? "请先处理上方的文件操作审批" : "发送消息、操作文件，或生成可预览页面…"}
+          placeholder={waitingApproval ? "请先处理上方的操作确认" : "发送消息、操作文件，或生成可预览页面…"}
           aria-label="消息内容"
         />
         <button type="submit" disabled={disabled || !value.trim()} aria-label="发送消息">
@@ -777,7 +802,7 @@ function Composer({ value, disabled, waitingApproval, onChange, onSubmit }: Comp
         </button>
       </div>
       <div className="composer-hint">
-        <span><ShieldIcon /> 文件写入与删除需要你的确认</span>
+        <span><ShieldIcon /> 文件变更与实时预览需要你的确认</span>
         <span>Enter 发送 · Shift + Enter 换行</span>
       </div>
     </form>

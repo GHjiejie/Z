@@ -249,7 +249,17 @@ class CheckpointProjectTests(unittest.TestCase):
             AIMessage(content="仍然是同一个页面。"),
         ]
         with self.app(responses) as app:
-            app.invoke("artifact-source", {"messages": [HumanMessage(content="生成页面")]})
+            app.invoke(
+                "artifact-source", {"messages": [HumanMessage(content="生成页面")]}
+            )
+            pending = list(iter_interrupts(app.state("artifact-source")))
+            self.assertEqual(len(pending), 1)
+            self.assertEqual(pending[0].value["kind"], "html_preview_approval")
+            self.assertEqual(pending[0].value["tool"], "render_html")
+            self.assertEqual(pending[0].value["title"], "Checkpoint Page")
+            self.assertEqual(app.artifacts.list_for_session("artifact-source"), [])
+
+            app.resume("artifact-source", True)
             artifact_checkpoint = checkpoint_id(app.state("artifact-source"))
             tool_message = next(
                 message
@@ -266,6 +276,8 @@ class CheckpointProjectTests(unittest.TestCase):
                 "artifact-source",
                 {"messages": [HumanMessage(content="重新生成同一个页面")]},
             )
+            self.assertTrue(list(iter_interrupts(app.state("artifact-source"))))
+            app.resume("artifact-source", True)
             self.assertEqual(
                 len(app.artifacts.list_for_session("artifact-source")),
                 1,
@@ -303,11 +315,15 @@ class CheckpointProjectTests(unittest.TestCase):
                 }
             ],
         )
-        with self.app([render_call, AIMessage(content="页面过大，未创建预览。")]) as app:
+        with self.app(
+            [render_call, AIMessage(content="页面过大，未创建预览。")]
+        ) as app:
             app.invoke(
                 "invalid-artifact",
                 {"messages": [HumanMessage(content="生成一个超大页面")]},
             )
+            self.assertTrue(list(iter_interrupts(app.state("invalid-artifact"))))
+            app.resume("invalid-artifact", True)
             tool_message = next(
                 message
                 for message in app.state("invalid-artifact").values["messages"]
@@ -338,7 +354,10 @@ class CheckpointProjectTests(unittest.TestCase):
             db_path=self.db_path,
             workspace=self.workspace,
         ) as app:
-            app.invoke("revision-source", {"messages": [HumanMessage(content="生成 v1")]})
+            app.invoke(
+                "revision-source", {"messages": [HumanMessage(content="生成 v1")]}
+            )
+            app.resume("revision-source", True)
             source_checkpoint = checkpoint_id(app.state("revision-source"))
             source_artifact = app.artifacts.list_for_session("revision-source")[0]
             app.fork("revision-source", source_checkpoint, "revision-branch")
@@ -368,6 +387,7 @@ class CheckpointProjectTests(unittest.TestCase):
                 "revision-branch",
                 {"messages": [HumanMessage(content="修改为 v2")]},
             )
+            app.resume("revision-branch", True)
 
             source_artifacts = app.artifacts.list_for_session("revision-source")
             branch_artifacts = app.artifacts.list_for_session("revision-branch")
@@ -388,6 +408,44 @@ class CheckpointProjectTests(unittest.TestCase):
                     "revision-source",
                     revision.artifact_id,
                 )
+            )
+
+    def test_rejected_html_preview_returns_code_without_artifact(self) -> None:
+        html = "<!doctype html><html><body><button>跟随</button></body></html>"
+        render_call = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "render_html",
+                    "args": {"title": "鼠标跟随动画", "html": html},
+                    "id": "render-rejected",
+                    "type": "tool_call",
+                }
+            ],
+        )
+        fallback = AIMessage(
+            content="你选择了仅查看代码：\n```html\n<button>跟随</button>\n```"
+        )
+        with self.app([render_call, fallback]) as app:
+            app.invoke(
+                "preview-rejected",
+                {"messages": [HumanMessage(content="介绍鼠标跟随动画，给出代码")]},
+            )
+            self.assertTrue(list(iter_interrupts(app.state("preview-rejected"))))
+
+            app.resume("preview-rejected", False)
+            state = app.state("preview-rejected")
+            denied = next(
+                message
+                for message in state.values["messages"]
+                if isinstance(message, ToolMessage)
+            )
+            self.assertEqual(denied.status, "error")
+            self.assertIn("仅查看代码", str(denied.content))
+            self.assertIn("```html", str(state.values["messages"][-1].content))
+            self.assertEqual(
+                app.artifacts.list_for_session("preview-rejected"),
+                [],
             )
 
 
