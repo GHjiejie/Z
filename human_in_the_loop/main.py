@@ -14,7 +14,7 @@ dp_path = "./human_in_the_loop/human_in_the_loop.sqlite"
 
 class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
-    approved: bool
+    approved: bool | None
 
 
 def llm_call(state: ChatState):
@@ -25,7 +25,7 @@ def llm_call(state: ChatState):
 def approve_node(state: ChatState):
 
     approved = interrupt(
-        "Please approve the response. Type 'yes' to approve or 'no' to reject."
+        "Please approve the model answer the question. Type 'yes' to approve or 'no' to reject."
     )
 
     if approved.lower() == "yes":
@@ -73,6 +73,8 @@ def main():
         while True:
             state = graph.get_state(config=config)
 
+            stream_input: ChatState | Command
+
             if state.next:
                 interrupt_msg = state.tasks[0].interrupts[0].value
 
@@ -84,7 +86,9 @@ def main():
                 user_input = input("\nuser: ")
                 if not user_input.strip():
                     continue
-                stream_input = {"messages": [HumanMessage(content=user_input)]}
+                stream_input = ChatState(
+                    messages=[HumanMessage(content=user_input)], approved=False
+                )
 
             for part in graph.stream(
                 stream_input,
