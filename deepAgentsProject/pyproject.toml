@@ -1,0 +1,23 @@
+[project]
+name = "deepagent-platform"
+version = "0.1.0"
+description = "Runnable Phase 1 implementation of the DeepAgent Platform architecture"
+requires-python = ">=3.9"
+dependencies = [
+  "fastapi>=0.116,<1",
+  "uvicorn[standard]>=0.35,<1",
+  "pydantic>=2.11,<3",
+]
+
+[project.optional-dependencies]
+dev = [
+  "httpx>=0.28,<1",
+  "pytest>=8.4,<9",
+  "pytest-asyncio>=1.1,<2",
+]
+
+[tool.pytest.ini_options]
+pythonpath = ["."]
+testpaths = ["tests"]
+asyncio_mode = "auto"
+
