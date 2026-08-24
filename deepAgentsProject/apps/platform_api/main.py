@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 
 from apps.platform_api.native_api.routes import router as native_router
 from packages.application.approval_service import ApprovalService
@@ -85,6 +86,19 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
         }
 
     application.include_router(native_router)
+
+    # A production web build can be served by the API process for the local
+    # reference deployment. Kubernetes deployments may serve it independently.
+    web_dist = root / "apps" / "web" / "dist"
+    if web_dist.exists():
+        application.mount("/assets", StaticFiles(directory=web_dist / "assets"), name="web-assets")
+
+        @application.get("/{spa_path:path}", include_in_schema=False)
+        async def web_console(spa_path: str):
+            candidate = web_dist / spa_path
+            if spa_path and candidate.is_file():
+                return FileResponse(candidate)
+            return FileResponse(web_dist / "index.html")
     return application
 
 

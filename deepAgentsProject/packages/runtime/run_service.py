@@ -149,7 +149,7 @@ class RunService:
         return result
 
     def list_runs(self, context: TenantContext, limit: int = 100) -> List[Dict[str, Any]]:
-        return self.db.fetch_all(
+        runs = self.db.fetch_all(
             """SELECT r.*, t.title AS thread_title, a.name AS agent_name,
                       d.environment AS environment
                FROM runs r JOIN threads t ON t.id=r.thread_id
@@ -159,6 +159,21 @@ class RunService:
                ORDER BY r.created_at DESC LIMIT ?""",
             (context.tenant_id, context.project_id, limit),
         )
+        for run in runs:
+            run["attempt_count"] = self.db.fetch_one(
+                "SELECT COUNT(*) AS count FROM run_attempts WHERE run_id=?", (run["id"],)
+            )["count"]
+            run["usage"] = self.db.fetch_one(
+                """SELECT COALESCE(SUM(input_tokens),0) AS input_tokens,
+                          COALESCE(SUM(output_tokens),0) AS output_tokens,
+                          COALESCE(SUM(model_calls),0) AS model_calls,
+                          COALESCE(SUM(tool_calls),0) AS tool_calls,
+                          COALESCE(SUM(subagent_calls),0) AS subagent_calls,
+                          COALESCE(SUM(cost),0) AS cost
+                   FROM usage_ledger WHERE run_id=?""",
+                (run["id"],),
+            )
+        return runs
 
     def get_run(self, run_id: str, context: TenantContext) -> Dict[str, Any]:
         run = self.db.fetch_one(
@@ -254,4 +269,3 @@ class RunService:
                 "UPDATE runs SET status=?, output=?, version=version+1, updated_at=? WHERE id=?",
                 (status, output, utc_now(), run_id),
             )
-

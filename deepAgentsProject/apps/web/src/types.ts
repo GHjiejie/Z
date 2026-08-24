@@ -95,6 +95,7 @@ export interface Run {
   output?: string | null
   resolved_plan_id: string
   current_attempt_id: string
+  attempt_count?: number
   metadata: Json
   checkpoint: Json
   attempts?: Array<Record<string, unknown>>
@@ -158,4 +159,3 @@ export interface Overview {
   recent_runs: Run[]
   runtime: { workers: number; queue_depth: number; event_lag_ms: number; status: string }
 }
-
