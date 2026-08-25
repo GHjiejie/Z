@@ -31,6 +31,7 @@ def main():
                 break
 
             # 原因是 LangGraph 的 stream_mode="messages" 返回的每一项不是消息对象本身，而是一个二元组：(message_chunk, metadata)
+            # 直接解包
             for message_chunk, _metadata in graph.stream(
                 {"messages": [{"role": "user", "content": user_input}]},
                 stream_mode="messages",
