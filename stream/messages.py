@@ -32,10 +32,13 @@ def main():
 
             # 原因是 LangGraph 的 stream_mode="messages" 返回的每一项不是消息对象本身，而是一个二元组：(message_chunk, metadata)
             # 直接解包
+            # 还有一点需要你注意的是，stream_mode也可以接受一个list，如果他是一个list的话，那么模型返回的数据结构第一个元素是mode，此时下方的代码就不再适用了
             for message_chunk, _metadata in graph.stream(
                 {"messages": [{"role": "user", "content": user_input}]},
+                # stream_mode="messages",
                 stream_mode="messages",
             ):
+                print(message_chunk, _metadata)
                 if isinstance(message_chunk, AIMessageChunk):
                     print(message_chunk.text, end="", flush=True)
             print()
