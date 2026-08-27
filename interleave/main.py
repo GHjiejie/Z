@@ -9,6 +9,8 @@ from langgraph.graph.message import add_messages
 
 from chat_models.chat import chat_model
 
+# test
+
 
 class ChatState(TypedDict):
     """add_messages 负责把每个节点产生的新消息合并到历史消息中。"""
