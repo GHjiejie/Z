@@ -1,12 +1,28 @@
-# LangGraph `interleave` 经典 demo
+# LangGraph streaming protocol v2 and v3 examples
 
-`interleave` 用于把多个事件投影合并到同一个循环中，并严格保留事件的真实到达顺序。
-这个示例调用项目在 `chat_models/chat.py` 中配置的真实模型，并同时消费：
+These examples run the same graph with two different LangGraph streaming
+protocols. Both entry points print the graph workflow in the terminal before
+processing user input:
 
-- `values`：每一步执行后的完整图状态；
-- `messages`：聊天模型产生的消息流。
+```text
++-----------+
+| __start__ |
++-----------+
+      *
++----------+
+| llm_call |
++----------+
+      *
+ +---------+
+ | __end__ |
+ +---------+
+```
 
-运行前需要在项目根目录的 `.env` 中配置：
+The graph calls the real chat model configured in `chat_models/chat.py`.
+
+## Configuration
+
+Add the following variables to `.env` in the project root:
 
 ```dotenv
 OPENAI_API_KEY=...
@@ -14,35 +30,47 @@ OPENAI_BASE_URL=...
 MODEL=...
 ```
 
-## 运行
-
-在项目根目录进入 `interleave` 包对应的 demo：
+## Run version v2
 
 ```bash
-uv run python -m interleave.main
+uv run python -m interleave.v2
 ```
 
-输入问题后回车，输入 `exit` 退出。也可以直接执行一次：
+The v2 example asynchronously consumes callback-style `on_*` events with
+`astream_events()` and prints graph, node, and chat-model lifecycle events in
+their actual execution order.
+
+To run it once without entering interactive mode:
 
 ```bash
-uv run python -m interleave.main "用一句话解释 LangGraph interleave"
+uv run python -m interleave.v2 "Explain LangGraph streaming in one sentence."
 ```
 
-核心代码是：
+## Run version v3
+
+```bash
+uv run python -m interleave.v3
+```
+
+The v3 example subscribes to the `messages` and `values` projections and uses
+`interleave` to consume both projections in their actual arrival order:
 
 ```python
+EVENT_CONSUMERS = {
+    "messages": message_event_consumer,
+    "values": values_event_consumer,
+}
+
 with graph.stream_events(input, version="v3") as stream:
-    for projection, item in stream.interleave("messages", "values"):
-        if projection == "messages":
-            for text in item.text:
-                print(text, end="", flush=True)
-        elif projection == "values":
-            print("状态更新", item)
+    for event_type, event in stream.interleave(*EVENT_CONSUMERS):
+        EVENT_CONSUMERS[event_type](event)
 ```
 
-与 `event_stream_v3/main.py` 中依次调用 `message_comsumer(stream)`、
-`values_comsumer(stream)` 不同，`interleave` 会预先订阅两个投影，避免第一个消费者
-排空底层事件流后，第二个消费者收不到内容。
+To run it once without entering interactive mode:
 
-当前项目使用的 LangGraph 版本可能提示 v3 streaming protocol 仍为 experimental，
-这不影响示例运行。
+```bash
+uv run python -m interleave.v3 "Explain LangGraph streaming in one sentence."
+```
+
+The original `python -m interleave.main` entry point is still available and
+runs the v3 example.

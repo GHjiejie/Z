@@ -1,4 +1,4 @@
-"""使用真实聊天模型演示 LangGraph 的 stream.interleave。"""
+"""Use a real chat model to demonstrate LangGraph stream interleaving."""
 
 import sys
 from typing import Annotated, TypedDict
@@ -13,13 +13,13 @@ from chat_models.chat import chat_model
 
 
 class ChatState(TypedDict):
-    """add_messages 负责把每个节点产生的新消息合并到历史消息中。"""
+    """Merge new messages from every node into the conversation history."""
 
     messages: Annotated[list[BaseMessage], add_messages]
 
 
 def llm_call(state: ChatState) -> dict[str, list[BaseMessage]]:
-    """调用聊天模型，并把模型回复写回图状态。"""
+    """Call the chat model and append its response to the graph state."""
 
     reply = chat_model.invoke(state["messages"])
     return {"messages": [reply]}
@@ -33,32 +33,51 @@ def build_graph():
     return builder.compile(name="interleave_demo")
 
 
-def run_once(graph, user_input: str) -> None:
-    """执行一次图，并在一个循环中同时消费消息流和状态流。"""
+def message_event_consumer(event) -> None:
+    """Consume one event from the messages projection."""
 
-    # 单独先消费 stream.messages，再消费 stream.values，后者可能已经错过事件。
-    # interleave 会订阅所有指定投影，并按它们的真实到达顺序统一输出。
+    print(f"[messages/{event.node}] ", end="", flush=True)
+    for text in event.text:
+        print(text, end="", flush=True)
+    print()
+
+
+def values_event_consumer(event: ChatState) -> None:
+    """Consume one event from the values projection."""
+
+    history = " -> ".join(message.type for message in event["messages"])
+    print(f"[values] Message history: {history}")
+
+
+EVENT_CONSUMERS = {
+    "messages": message_event_consumer,
+    "values": values_event_consumer,
+}
+
+
+def run_once(graph, user_input: str) -> None:
+    """Run the graph once and dispatch interleaved projection events."""
+
+    # Interleave subscribes to every requested projection before consuming any
+    # events, then yields all events in their actual arrival order.
     with graph.stream_events(
         {"messages": [{"role": "user", "content": user_input}]},
         version="v3",
     ) as stream:
-        for projection, item in stream.interleave("messages", "values"):
-            if projection == "messages":
-                print(f"[messages/{item.node}] ", end="", flush=True)
-                for text in item.text:
-                    print(text, end="", flush=True)
-                print()
-            elif projection == "values":
-                history = " -> ".join(message.type for message in item["messages"])
-                print(f"[values] 消息历史: {history}")
+        for event_type, event in stream.interleave(*EVENT_CONSUMERS):
+            EVENT_CONSUMERS[event_type](event)
 
-        print(f"[output] 最终回复: {stream.output['messages'][-1].text}")
+        print(f"[output] Final response: {stream.output['messages'][-1].text}")
 
 
 def main() -> None:
     graph = build_graph()
+    print("\nGraph workflow")
+    print("==============")
+    print(graph.get_graph().draw_ascii())
+    print('Streaming protocol: version="v3"\n')
 
-    # 传入命令行参数时只执行一次，便于快速体验和自动化测试。
+    # A command-line argument runs the graph once for quick checks and scripts.
     if len(sys.argv) > 1:
         run_once(graph, " ".join(sys.argv[1:]))
         return
@@ -71,7 +90,7 @@ def main() -> None:
             if user_input:
                 run_once(graph, user_input)
     except (EOFError, KeyboardInterrupt):
-        print("\n服务已终止。")
+        print("\nThe service has stopped.")
 
 
 if __name__ == "__main__":
