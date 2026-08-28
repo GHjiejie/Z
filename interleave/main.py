@@ -3,11 +3,10 @@
 import sys
 from typing import Annotated, TypedDict
 
+from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import BaseMessage
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
-
-from chat_models.chat import chat_model
 
 # test
 
@@ -18,14 +17,20 @@ class ChatState(TypedDict):
     messages: Annotated[list[BaseMessage], add_messages]
 
 
-def llm_call(state: ChatState) -> dict[str, list[BaseMessage]]:
-    """Call the chat model and append its response to the graph state."""
+def build_graph(model: BaseChatModel | None = None):
+    """Build the demo graph, optionally with an injected model for tests."""
 
-    reply = chat_model.invoke(state["messages"])
-    return {"messages": [reply]}
+    if model is None:
+        from chat_models.chat import chat_model
 
+        model = chat_model
 
-def build_graph():
+    def llm_call(state: ChatState) -> dict[str, list[BaseMessage]]:
+        """Call the chat model and append its response to the graph state."""
+
+        reply = model.invoke(state["messages"])
+        return {"messages": [reply]}
+
     builder = StateGraph(ChatState)
     builder.add_node("llm_call", llm_call)
     builder.add_edge(START, "llm_call")
