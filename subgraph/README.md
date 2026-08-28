@@ -1,49 +1,50 @@
-# LangGraph Subgraph 真实模型 Demo
+# LangGraph subgraph streaming demos
 
-这个 demo 参考 [LangGraph 官方 Subgraphs 文档](https://docs.langchain.com/oss/python/langgraph/use-subgraphs)，使用项目已有的真实模型：
+Both examples run the same parent graph and reusable research subgraph with the
+real chat model configured in `chat_models/chat.py`.
 
-```python
-from chat_models.chat import chat_model
-```
-
-## 工作流
+## Workflows
 
 ```text
-父图：START -> normalize_topic -> research_subgraph -> END
-                                  |
-子图：                  research_topic
-                                  |
-                         write_learning_note
-                                  |
-                                 END
+Parent: START -> normalize_topic -> research_subgraph -> END
+                                      |
+Child:                         research_topic
+                                      |
+                              write_learning_note
+                                      |
+                                     END
 ```
 
-- `normalize_topic`：父图节点，清理输入主题。
-- `research_topic`：子图节点，第一次调用模型，提炼 3 个知识点。
-- `write_learning_note`：子图节点，第二次调用模型，将结果整理为 Markdown 笔记。
-- `research_result`：只在子图内部流转的私有字段。
-- `topic`、`learning_note`：父图与子图的共享字段。
+The programs print ASCII diagrams for both workflows in the terminal before
+execution. `topic` and `learning_note` are shared state fields, while
+`research_result` is private to the subgraph.
 
-父图与子图存在共享状态字段，因此编译后的子图可以直接作为父图节点：
-
-```python
-parent_builder.add_node("research_subgraph", research_subgraph)
-```
-
-## 运行
-
-确保项目根目录的 `.env` 已配置：
-
-```dotenv
-OPENAI_API_KEY=你的密钥
-OPENAI_BASE_URL=接口地址
-MODEL=模型名称
-```
-
-然后在项目根目录执行：
+## Version 2: `graph.stream`
 
 ```bash
-uv run python -m subgraph.main
+uv run python -m subgraph.v2 "LangGraph subgraphs"
 ```
 
-程序会真实调用模型两次，因此会产生相应的 API 用量。
+This version uses:
+
+```python
+graph.stream(
+    input,
+    stream_mode=["updates", "messages", "values"],
+    subgraphs=True,
+    version="v2",
+)
+```
+
+## Version 3: `graph.stream_events`
+
+```bash
+uv run python -m subgraph.v3 "LangGraph subgraphs"
+```
+
+This version uses `graph.stream_events(input, version="v3")` and consumes the
+dedicated `stream.subgraphs` projection. Each discovered subgraph exposes its
+own message stream.
+
+The old `uv run python -m subgraph.main` command remains available and runs the
+v2 example.
