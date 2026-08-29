@@ -333,6 +333,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .folder-picker-body { padding: 16px 20px; }
 .folder-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
 .folder-path-row input { font-family: "SFMono-Regular", Consolas, monospace; font-size: 8.5px; }
+.folder-picker-error { margin-top: 8px; padding: 8px 10px; display: flex; align-items: flex-start; gap: 7px; color: #b43d50; background: #fff2f4; border: 1px solid #f1c5cd; border-radius: 7px; font-size: 8.5px; line-height: 1.4; }
+.folder-picker-error svg { flex: 0 0 auto; margin-top: 1px; }
 .folder-roots { min-height: 29px; padding: 7px 0; display: flex; gap: 5px; overflow-x: auto; }
 .folder-roots button { padding: 4px 7px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: #6d648f; background: #f7f5ff; border: 1px solid #e2def7; border-radius: 5px; font: 7.5px "SFMono-Regular", Consolas, monospace; cursor: pointer; }
 .folder-browser-list { height: 260px; padding: 5px; overflow: auto; background: #fafbfc; border: 1px solid var(--border); border-radius: 8px; }

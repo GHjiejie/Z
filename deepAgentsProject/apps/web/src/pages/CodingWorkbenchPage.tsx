@@ -69,6 +69,7 @@ export function CodingWorkbenchPage() {
   const [folderRepositoryName, setFolderRepositoryName] = useState('')
   const [folderBranch, setFolderBranch] = useState('main')
   const [folderBusy, setFolderBusy] = useState(false)
+  const [folderError, setFolderError] = useState('')
   const streamRef = useRef<EventSource | null>(null)
 
   const loadCatalog = async () => {
@@ -92,17 +93,22 @@ export function CodingWorkbenchPage() {
   }, [])
 
   const browseFolders = async (path?: string) => {
-    setFolderBusy(true); setError('')
+    setFolderBusy(true); setFolderError(''); setFolderListing(null)
     try {
       const listing = await api.localRepositoryFolders(path)
       setFolderListing(listing)
       setFolderPath(listing.current_path)
       setFolderRepositoryName(listing.current.name)
       setFolderBranch(listing.current.default_branch || 'working-directory')
-    } catch (nextError) { setError((nextError as Error).message) } finally { setFolderBusy(false) }
+    } catch (nextError) {
+      setFolderRepositoryName('')
+      setFolderBranch('working-directory')
+      setFolderError((nextError as Error).message)
+    } finally { setFolderBusy(false) }
   }
 
   const openFolderPicker = () => {
+    setFolderError('')
     setFolderPickerOpen(true)
     void browseFolders()
   }
@@ -115,7 +121,7 @@ export function CodingWorkbenchPage() {
       setRepositoryId(existing.id); setBaseRef(existing.default_branch); setFolderPickerOpen(false)
       return
     }
-    setFolderBusy(true); setError('')
+    setFolderBusy(true); setFolderError('')
     try {
       const repository = await api.createRepository({
         name: folderRepositoryName.trim(),
@@ -125,7 +131,7 @@ export function CodingWorkbenchPage() {
       })
       await loadCatalog()
       setRepositoryId(repository.id); setBaseRef(repository.default_branch); setFolderPickerOpen(false)
-    } catch (nextError) { setError((nextError as Error).message) } finally { setFolderBusy(false) }
+    } catch (nextError) { setFolderError((nextError as Error).message) } finally { setFolderBusy(false) }
   }
 
   const refreshRun = async (runId: string) => {
@@ -263,6 +269,7 @@ export function CodingWorkbenchPage() {
       <div className="modal-heading"><div><span className="page-eyebrow">LOCAL WORKSPACE</span><h3>Choose a folder</h3><p>Git is optional. Browse only within administrator-approved local roots.</p></div><button aria-label="Close" className="icon-button" onClick={() => setFolderPickerOpen(false)}><X size={18} /></button></div>
       <div className="folder-picker-body">
         <div className="folder-path-row"><input aria-label="Local folder path" value={folderPath} onChange={(event) => setFolderPath(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter') void browseFolders(folderPath) }} /><button className="button secondary" disabled={folderBusy || !folderPath.trim()} onClick={() => void browseFolders(folderPath)}>Go</button></div>
+        {folderError && <div className="folder-picker-error" role="alert"><ShieldAlert size={15} /><span>{folderError}</span></div>}
         <div className="folder-roots">{folderListing?.roots.map((root) => <button key={root} onClick={() => void browseFolders(root)}><FolderOpen size={13} />{root}</button>)}</div>
         <div className="folder-browser-list">
           {folderListing?.parent_path && <button onClick={() => void browseFolders(folderListing.parent_path!)}><ArrowUp size={14} /><span>..</span><small>Parent folder</small></button>}
