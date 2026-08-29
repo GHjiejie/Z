@@ -16,7 +16,7 @@
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
 - Knowledge/RAG：内置 `builtin_rag` Agent 自动判断知识检索或模型直答，支持 OSS 直传授权、持久摄取、不可变索引、混合检索、ACL 与可验证 Citation。
-- Coding Agent：真实 `create_deep_agent()` / LangGraph Tool Loop、内容寻址源码快照、Thread-scoped Workspace、Docker Sandbox、HITL、平台重算 Patch/Diff/Verification 和 Coding Workbench。
+- Coding Agent：启动时幂等预置并部署 `Built-in Coding Agent`，使用真实 `create_deep_agent()` / LangGraph Tool Loop、内容寻址源码快照、Thread-scoped Workspace、Docker Sandbox、HITL、平台重算 Patch/Diff/Verification 和 Coding Workbench。
 
 ## 快速启动
 
@@ -50,7 +50,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
 6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，内置 RAG Agent 会对事实型请求检索，对创作等无需知识库的请求自动走模型直答。
-7. 在 **Agents** 选择 `Coding Agent starter`，发布并部署后进入 **Coding**，注册允许范围内的 Repository、选择 Base Ref 并启动任务；Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
+7. 启动后直接进入 **Coding** 使用已发布、已部署的 `Built-in Coding Agent`；注册允许范围内的 Repository、选择 Base Ref 并启动任务。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
 
 ## 测试与构建
 

@@ -32,6 +32,22 @@ def client_for(tmp_path):
     )
 
 
+def reference_agent(client: TestClient):
+    return next(
+        item
+        for item in client.get("/api/v1/agents").json()["items"]
+        if item["name"] == "Release Sentinel"
+    )
+
+
+def reference_deployment(client: TestClient):
+    return next(
+        item
+        for item in client.get("/api/v1/agent-deployments").json()["items"]
+        if not item["coding_enabled"]
+    )
+
+
 def wait_for_job(client: TestClient, job_id: str, timeout: float = 5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
@@ -108,7 +124,7 @@ def create_indexed_knowledge(client: TestClient, *, allowed_roles=None):
 
 
 def create_thread_with_knowledge(client: TestClient, revision_id: str, title: str = "RAG"):
-    agent = client.get("/api/v1/agents").json()["items"][0]
+    agent = reference_agent(client)
     detail = client.get(f"/api/v1/agents/{agent['id']}").json()
     detail["draft"]["capabilities"]["knowledge_bases"] = [revision_id]
     updated = client.patch(
@@ -217,7 +233,7 @@ def test_knowledge_is_tenant_and_role_scoped(tmp_path):
 def test_agent_plan_pins_knowledge_revision_and_runtime_returns_citations(tmp_path):
     with client_for(tmp_path) as client:
         knowledge_base, _, _ = create_indexed_knowledge(client)
-        agent = client.get("/api/v1/agents").json()["items"][0]
+        agent = reference_agent(client)
         detail = client.get(f"/api/v1/agents/{agent['id']}").json()
         detail["draft"]["capabilities"]["knowledge_bases"] = [
             knowledge_base["current_revision_id"]
@@ -321,7 +337,7 @@ def job_chunk_count(client: TestClient, knowledge_base_id: str) -> int:
 
 def test_run_metadata_cannot_override_authenticated_principal(tmp_path):
     with client_for(tmp_path) as client:
-        deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
+        deployment = reference_deployment(client)
         thread = client.post(
             "/api/v1/threads",
             json={"agent_deployment_id": deployment["id"], "title": "principal"},
@@ -410,7 +426,7 @@ def test_builtin_rag_agent_falls_back_when_knowledge_is_irrelevant(tmp_path):
 def test_tool_binding_and_zero_budget_prevent_rag_execution(tmp_path):
     with client_for(tmp_path) as client:
         knowledge_base, _, _ = create_indexed_knowledge(client)
-        agent = client.get("/api/v1/agents").json()["items"][0]
+        agent = reference_agent(client)
         detail = client.get(f"/api/v1/agents/{agent['id']}").json()
         detail["draft"]["capabilities"]["knowledge_bases"] = [
             knowledge_base["current_revision_id"]

@@ -82,15 +82,17 @@ export function PlaygroundPage() {
 
   const loadThreads = async () => {
     const result = await api.threads()
-    setThreads(result.items)
-    return result.items
+    const conversationalThreads = result.items.filter((item) => !item.repository_id)
+    setThreads(conversationalThreads)
+    return conversationalThreads
   }
 
   useEffect(() => {
     Promise.all([api.deployments(), api.threads()]).then(([deploymentResult, threadResult]) => {
-      setDeployments(deploymentResult.items)
-      setThreads(threadResult.items)
-      if (deploymentResult.items[0]) setDeploymentId(deploymentResult.items[0].id)
+      const conversationalDeployments = deploymentResult.items.filter((item) => !item.coding_enabled)
+      setDeployments(conversationalDeployments)
+      setThreads(threadResult.items.filter((item) => !item.repository_id))
+      if (conversationalDeployments[0]) setDeploymentId(conversationalDeployments[0].id)
     }).catch((nextError) => setError(nextError.message))
     return () => streamRef.current?.close()
   }, [])

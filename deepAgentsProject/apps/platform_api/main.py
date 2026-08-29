@@ -32,6 +32,7 @@ from packages.coding.errors import (
     SandboxUnavailableError,
 )
 from packages.coding.service import CodingService
+from packages.coding.models import SandboxProfileSpec
 from packages.knowledge.embedding import create_embedding_provider
 from packages.knowledge.errors import (
     KnowledgeConflictError,
@@ -145,7 +146,25 @@ def create_app(
             sandbox_image_resolver=resolve_sandbox_image,
         )
         if seed:
-            seed_reference_data(db, compiler)
+            seed_provider = providers[0]
+            if seed_provider.name == "docker":
+                coding_sandbox = SandboxProfileSpec(
+                    provider="docker",
+                    image=str(getattr(seed_provider, "image", "deepagent/coding-runtime:0.1.0")),
+                )
+            elif seed_provider.name == "fake" and not load_env:
+                coding_sandbox = SandboxProfileSpec(
+                    provider="fake",
+                    image="deepagent/coding-runtime:test",
+                    image_digest="sha256:" + ("0" * 64),
+                    cpu_limit=1,
+                    memory_mb=512,
+                    disk_mb=1024,
+                    pids_limit=64,
+                )
+            else:
+                coding_sandbox = SandboxProfileSpec()
+            seed_reference_data(db, compiler, coding_sandbox=coding_sandbox)
         object_storage = create_object_storage(Path(db_path).parent / "knowledge_objects")
         knowledge = KnowledgeService(db, object_storage, create_embedding_provider())
         events = EventEmitter(db)

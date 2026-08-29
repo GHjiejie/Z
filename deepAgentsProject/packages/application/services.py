@@ -11,9 +11,12 @@ from packages.domain.models import (
     AgentDraftUpdate,
     CapabilityBindings,
     DeploymentCreate,
+    PolicyBindings,
+    RunLimits,
     TenantContext,
     utc_now,
 )
+from packages.coding.models import CodingProfileSpec, SandboxProfileSpec
 from packages.persistence import Database
 
 
@@ -284,42 +287,65 @@ class AgentService:
         )
 
 
-def seed_reference_data(db: Database, compiler: AgentPlanCompiler) -> None:
-    if db.fetch_one("SELECT id FROM model_deployments LIMIT 1"):
-        return
+def seed_reference_data(
+    db: Database,
+    compiler: AgentPlanCompiler,
+    *,
+    coding_sandbox: SandboxProfileSpec | None = None,
+) -> Dict[str, Any]:
+    """Idempotently install the built-in demo catalog, including Coding Agent.
+
+    This intentionally checks each resource instead of treating a non-empty database
+    as fully seeded. That lets upgrades add newly built-in agents to existing local
+    installations without duplicating earlier seed data.
+    """
     now = utc_now()
-    db.execute_many(
-        """INSERT INTO model_deployments
-           (id, tenant_id, project_id, name, provider, model, endpoint_region, status,
-            capabilities_json, pricing_json, created_at)
-           VALUES (?, 'tenant_demo', 'project_atlas', ?, ?, ?, ?, 'healthy', ?, ?, ?)""",
-        [
+    models = [
+        (
+            "model_qwen_prod_v1",
+            "Qwen Production",
+            "OpenAI Compatible",
+            "qwen3-235b-a22b",
+            "cn-shanghai",
+            ["tool_calling", "streaming", "structured_output", "reasoning"],
+            {"input_per_million": 0.8, "output_per_million": 3.2},
+        ),
+        (
+            "model_deepseek_fast_v1",
+            "DeepSeek Fast",
+            "OpenAI Compatible",
+            "deepseek-v3",
+            "cn-beijing",
+            ["tool_calling", "streaming"],
+            {"input_per_million": 0.27, "output_per_million": 1.1},
+        ),
+    ]
+    for model_id, name, provider, model, region, capabilities, pricing in models:
+        if db.fetch_one("SELECT id FROM model_deployments WHERE id=?", (model_id,)):
+            continue
+        db.execute(
+            """INSERT INTO model_deployments
+               (id, tenant_id, project_id, name, provider, model, endpoint_region, status,
+                capabilities_json, pricing_json, created_at)
+               VALUES (?, 'tenant_demo', 'project_atlas', ?, ?, ?, ?, 'healthy', ?, ?, ?)""",
             (
-                "model_qwen_prod_v1",
-                "Qwen Production",
-                "OpenAI Compatible",
-                "qwen3-235b-a22b",
-                "cn-shanghai",
-                db.encode(["tool_calling", "streaming", "structured_output", "reasoning"]),
-                db.encode({"input_per_million": 0.8, "output_per_million": 3.2}),
+                model_id,
+                name,
+                provider,
+                model,
+                region,
+                db.encode(capabilities),
+                db.encode(pricing),
                 now,
             ),
-            (
-                "model_deepseek_fast_v1",
-                "DeepSeek Fast",
-                "OpenAI Compatible",
-                "deepseek-v3",
-                "cn-beijing",
-                db.encode(["tool_calling", "streaming"]),
-                db.encode({"input_per_million": 0.27, "output_per_million": 1.1}),
-                now,
-            ),
-        ],
-    )
+        )
 
     context = TenantContext(tenant_id="tenant_demo", project_id="project_atlas")
     service = AgentService(db, compiler)
-    created = service.create_agent(
+    reference = _ensure_seed_agent(
+        db,
+        service,
+        context,
         AgentCreate(
             name="Release Sentinel",
             description="Plans releases, inspects risk, and pauses production changes for human approval.",
@@ -327,14 +353,94 @@ def seed_reference_data(db: Database, compiler: AgentPlanCompiler) -> None:
                 capabilities=CapabilityBindings(skills=["task-planning", "release-safety"])
             ),
         ),
-        context,
+        deployment_name="release-sentinel-dev",
     )
-    published = service.publish(created["id"], context)
-    service.deploy(
+    coding = _ensure_seed_agent(
+        db,
+        service,
+        context,
+        AgentCreate(
+            name="Built-in Coding Agent",
+            description=(
+                "Inspects repositories, makes isolated code changes, runs verification, "
+                "and delivers reviewable patches from a governed sandbox."
+            ),
+            draft=AgentDraftSpec(
+                harness_profile_revision_id="coding-agent-v1",
+                system_prompt=(
+                    "You are a careful coding agent. Inspect first, preserve unrelated "
+                    "work, make minimal changes, run real verification, and deliver a "
+                    "reviewable patch."
+                ),
+                capabilities=CapabilityBindings(
+                    tools=[],
+                    skills=[
+                        "coding-workflow",
+                        "repository-safety",
+                        "test-and-verification",
+                        "change-delivery",
+                    ],
+                    subagents=[
+                        "codebase-explorer",
+                        "code-reviewer",
+                        "test-diagnostician",
+                    ],
+                    filesystem=True,
+                ),
+                policies=PolicyBindings(
+                    permission_policy="coding-project-default-v1",
+                    approval_mode="high_risk",
+                    audit_level="strict",
+                ),
+                limits=RunLimits(
+                    max_duration_seconds=1800,
+                    max_model_calls=40,
+                    max_tool_calls=100,
+                    max_subagent_depth=2,
+                    max_subagent_concurrency=3,
+                    max_sandbox_cpu_seconds=900,
+                    max_output_bytes=1_000_000,
+                    max_cost=5,
+                ),
+                coding=CodingProfileSpec(
+                    enabled=True,
+                    sandbox=coding_sandbox or SandboxProfileSpec(),
+                ),
+            ),
+        ),
+        deployment_name="builtin-coding-dev",
+    )
+    return {"reference_agent": reference, "coding_agent": coding}
+
+
+def _ensure_seed_agent(
+    db: Database,
+    service: AgentService,
+    context: TenantContext,
+    payload: AgentCreate,
+    *,
+    deployment_name: str,
+) -> Dict[str, Any]:
+    agent = db.fetch_one(
+        """SELECT * FROM agents
+           WHERE tenant_id=? AND project_id=? AND name=? ORDER BY created_at LIMIT 1""",
+        (context.tenant_id, context.project_id, payload.name),
+    )
+    if agent is None:
+        agent = service.create_agent(payload, context)
+    revision = db.fetch_one(
+        """SELECT * FROM agent_revisions
+           WHERE agent_id=? ORDER BY revision_number DESC LIMIT 1""",
+        (agent["id"],),
+    )
+    if revision is None:
+        revision = service.publish(agent["id"], context)["revision"]
+    deployment = service.deploy(
         DeploymentCreate(
-            agent_revision_id=published["revision"]["id"],
+            agent_revision_id=revision["id"],
             environment="development",
-            name="release-sentinel-dev",
+            name=deployment_name,
         ),
         context,
     )
+    return {"agent_id": agent["id"], "deployment_id": deployment["id"]}

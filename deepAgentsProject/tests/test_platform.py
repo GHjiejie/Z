@@ -40,8 +40,24 @@ def client_for(tmp_path):
     )
 
 
+def reference_agent(client: TestClient):
+    return next(
+        item
+        for item in client.get("/api/v1/agents").json()["items"]
+        if item["name"] == "Release Sentinel"
+    )
+
+
+def reference_deployment(client: TestClient):
+    return next(
+        item
+        for item in client.get("/api/v1/agent-deployments").json()["items"]
+        if not item["coding_enabled"]
+    )
+
+
 def create_run_waiting_for_approval(client: TestClient, title: str = "HITL test"):
-    deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
+    deployment = reference_deployment(client)
     thread = client.post(
         "/api/v1/threads",
         json={"agent_deployment_id": deployment["id"], "title": title},
@@ -150,7 +166,7 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
         plugin_ids = {plugin["id"] for plugin in plugins}
         skill_slugs = {skill["slug"] for skill in skills}
 
-        agent = client.get("/api/v1/agents").json()["items"][0]
+        agent = reference_agent(client)
         detail = client.get(f"/api/v1/agents/{agent['id']}").json()
         plan = detail["revisions"][0]
         resolved = client.get(f"/api/v1/agent-revisions/{plan['id']}").json()["resolved_plan"]["plan"]
@@ -178,7 +194,7 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
 
 def test_unknown_skill_blocks_publish(tmp_path):
     with client_for(tmp_path) as client:
-        agent = client.get("/api/v1/agents").json()["items"][0]
+        agent = reference_agent(client)
         detail = client.get(f"/api/v1/agents/{agent['id']}").json()
         detail["draft"]["capabilities"]["skills"].append("missing-skill")
         saved = client.patch(
@@ -199,7 +215,7 @@ def test_unknown_skill_blocks_publish(tmp_path):
 
 def test_publish_creates_immutable_revision_and_plan(tmp_path):
     with client_for(tmp_path) as client:
-        agent = client.get("/api/v1/agents").json()["items"][0]
+        agent = reference_agent(client)
         detail = client.get(f"/api/v1/agents/{agent['id']}").json()
         original_revision = detail["revisions"][0]
 
@@ -229,7 +245,7 @@ def test_publish_creates_immutable_revision_and_plan(tmp_path):
 
 def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
     with client_for(tmp_path) as client:
-        deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
+        deployment = reference_deployment(client)
         thread = client.post(
             "/api/v1/threads",
             json={"agent_deployment_id": deployment["id"], "title": "Idempotency test"},
@@ -319,7 +335,7 @@ def test_second_run_sends_prior_successful_turns_to_model(tmp_path):
             load_env=False,
         )
     ) as client:
-        deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
+        deployment = reference_deployment(client)
         thread = client.post(
             "/api/v1/threads",
             json={"agent_deployment_id": deployment["id"], "title": "History test"},
@@ -450,7 +466,7 @@ def test_requesting_changes_waits_for_input_without_executing_tool(tmp_path):
 
 def test_tenant_scope_prevents_cross_tenant_access(tmp_path):
     with client_for(tmp_path) as client:
-        agent = client.get("/api/v1/agents").json()["items"][0]
+        agent = reference_agent(client)
         foreign_headers = {
             "X-Tenant-ID": "tenant_other",
             "X-Project-ID": "project_other",

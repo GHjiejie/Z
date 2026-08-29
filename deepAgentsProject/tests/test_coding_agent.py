@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage
 
 from apps.platform_api.main import create_app
 from deepagents.backends.protocol import ExecuteResponse
+from packages.persistence import Database
 from packages.runtime.model_gateway import DeterministicModelGateway
 from packages.sandbox.docker_provider import DockerSandboxProvider
 from packages.sandbox.fake_provider import FakeSandboxProvider
@@ -185,6 +186,79 @@ def _create_coding_thread(
     )
     assert thread.status_code == 201, thread.text
     return thread.json()
+
+
+def test_builtin_coding_agent_is_published_deployed_idempotent_and_backfilled(
+    tmp_path,
+):
+    database_path = str(tmp_path / "platform.db")
+
+    def read_seeded_agent():
+        with TestClient(
+            create_app(
+                database_path,
+                seed=True,
+                model_gateway=DeterministicModelGateway(),
+                sandbox_providers=[FakeSandboxProvider(_command_result)],
+                load_env=False,
+            )
+        ) as client:
+            agents = client.get("/api/v1/agents").json()["items"]
+            builtins = [
+                item for item in agents if item["name"] == "Built-in Coding Agent"
+            ]
+            assert len(builtins) == 1
+            agent = builtins[0]
+            assert agent["status"] == "PUBLISHED"
+            assert agent["revision_count"] == 1
+            detail = client.get(f"/api/v1/agents/{agent['id']}").json()
+            assert detail["draft"]["harness_profile_revision_id"] == "coding-agent-v1"
+            assert detail["draft"]["coding"]["enabled"] is True
+            assert detail["draft"]["coding"]["delivery_mode"] == "patch_only"
+            deployments = client.get("/api/v1/agent-deployments").json()["items"]
+            deployment = next(
+                item for item in deployments if item["agent_id"] == agent["id"]
+            )
+            assert deployment["status"] == "ACTIVE"
+            assert deployment["coding_enabled"] is True
+            assert deployment["coding_profile"]["sandbox"]["provider"] == "fake"
+            revision = detail["revisions"][0]
+            plan = client.get(
+                f"/api/v1/agent-revisions/{revision['id']}"
+            ).json()["resolved_plan"]
+            assert plan["runtime_image_digest"].endswith("sha256:" + ("0" * 64))
+            assert {
+                item["slug"] for item in plan["plan"]["skill_versions"]
+            } == {
+                "coding-workflow",
+                "repository-safety",
+                "test-and-verification",
+                "change-delivery",
+            }
+            return agent["id"], deployment["id"]
+
+    first_ids = read_seeded_agent()
+    assert read_seeded_agent() == first_ids
+
+    database = Database(database_path)
+    database.initialize()
+    database.execute(
+        "DELETE FROM agent_deployments WHERE agent_id=?", (first_ids[0],)
+    )
+    revisions = database.fetch_all(
+        "SELECT id FROM agent_revisions WHERE agent_id=?", (first_ids[0],)
+    )
+    for revision in revisions:
+        database.execute(
+            "DELETE FROM resolved_execution_plans WHERE agent_revision_id=?",
+            (revision["id"],),
+        )
+    database.execute("DELETE FROM agent_revisions WHERE agent_id=?", (first_ids[0],))
+    database.execute("DELETE FROM agents WHERE id=?", (first_ids[0],))
+    database.close()
+
+    backfilled_ids = read_seeded_agent()
+    assert backfilled_ids[0] != first_ids[0]
 
 
 def test_real_deepagents_loop_builds_audited_changeset(tmp_path):

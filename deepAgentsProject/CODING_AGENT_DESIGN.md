@@ -3,7 +3,7 @@
 > 状态：Approved v1.0；Docker `patch_only` MVP 已实现
 > 日期：2026-08-29
 > 范围：在现有 `deepAgentsProject` 中增加一个可以读取代码、修改代码、运行构建与测试、输出可审阅变更集的 Coding Agent
-> 当前阶段：Phase A–C 的本地/CI 实现已落地；Kubernetes 与受控 Git 交付按原方案后续实施
+> 当前阶段：Phase A–C 的本地/CI 实现已落地，并默认预置 Development Coding Agent；Kubernetes 与受控 Git 交付按原方案后续实施
 
 ## 1. 结论与推荐方案
 
