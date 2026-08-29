@@ -64,6 +64,7 @@ def test_platform_context_reports_authoritative_scope_and_capabilities(tmp_path)
                 "X-Project-ID": "project_console",
                 "X-Environment-ID": "env_staging",
                 "X-User-ID": "reviewer_1",
+                "X-Roles": "viewer",
             },
         )
         assert response.status_code == 200
@@ -74,6 +75,53 @@ def test_platform_context_reports_authoritative_scope_and_capabilities(tmp_path)
         assert context["user"]["id"] == "reviewer_1"
         assert context["runtime"]["event_lag_ms"] is None
         assert context["features"]["notifications"] is False
+
+
+def test_untrusted_deployment_rejects_caller_supplied_identity_headers(tmp_path):
+    with TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            load_env=False,
+            trust_identity_headers=False,
+            allow_demo_identity=False,
+        )
+    ) as client:
+        assert client.get("/api/v1/context").status_code == 401
+        rejected = client.get(
+            "/api/v1/context", headers={"X-Roles": "owner", "X-User-ID": "attacker"}
+        )
+        assert rejected.status_code == 401
+
+
+def test_trusted_identity_adapter_requires_complete_principal(tmp_path):
+    with TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            load_env=False,
+            trust_identity_headers=True,
+            allow_demo_identity=False,
+        )
+    ) as client:
+        assert (
+            client.get("/api/v1/context", headers={"X-User-ID": "partial"}).status_code
+            == 401
+        )
+        accepted = client.get(
+            "/api/v1/context",
+            headers={
+                "X-Tenant-ID": "tenant_review",
+                "X-Project-ID": "project_console",
+                "X-Environment-ID": "env_staging",
+                "X-User-ID": "reviewer_1",
+                "X-Roles": "viewer",
+            },
+        )
+        assert accepted.status_code == 200
+        assert accepted.json()["user"]["id"] == "reviewer_1"
 
 
 def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
@@ -87,19 +135,20 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
         )
     ) as client:
         health = client.get("/health").json()
-        assert health["plugins_loaded"] == 1
-        assert health["skills_loaded"] == 3
-
         plugins = client.get("/api/v1/plugins").json()["items"]
         skills = client.get("/api/v1/skills").json()["items"]
-        assert [(plugin["id"], plugin["skill_count"]) for plugin in plugins] == [
-            ("deepagent-core", 3)
-        ]
-        assert {skill["slug"] for skill in skills} == {
+        assert health["plugins_loaded"] == len(plugins)
+        assert health["skills_loaded"] == len(skills)
+        core = next(plugin for plugin in plugins if plugin["id"] == "deepagent-core")
+        assert core["skill_count"] == 3
+        core_skills = {
             "task-planning",
             "evidence-research",
             "release-safety",
         }
+        assert core_skills.issubset({skill["slug"] for skill in skills})
+        plugin_ids = {plugin["id"] for plugin in plugins}
+        skill_slugs = {skill["slug"] for skill in skills}
 
         agent = client.get("/api/v1/agents").json()["items"][0]
         detail = client.get(f"/api/v1/agents/{agent['id']}").json()
@@ -118,8 +167,13 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
             load_env=False,
         )
     ) as client:
-        assert len(client.get("/api/v1/plugins").json()["items"]) == 1
-        assert len(client.get("/api/v1/skills").json()["items"]) == 3
+        assert {
+            plugin["id"]
+            for plugin in client.get("/api/v1/plugins").json()["items"]
+        } == plugin_ids
+        assert {
+            skill["slug"] for skill in client.get("/api/v1/skills").json()["items"]
+        } == skill_slugs
 
 
 def test_unknown_skill_blocks_publish(tmp_path):
@@ -197,6 +251,7 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
 
         run = wait_for_status(client, first.json()["id"], {"SUCCEEDED"})
         assert run["usage"]["model_calls"] == 1
+        assert run["usage"]["tool_calls"] == 0
         events = client.get(f"/api/v1/runs/{run['id']}/events").json()["items"]
         assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
         assert {
@@ -209,7 +264,7 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
             "model.reasoning.started",
             "model.reasoning.delta",
             "model.reasoning.completed",
-            "tool.completed",
+            "rag.agent.routed",
             "subagent.completed",
             "artifact.created",
             "graph.completed",
@@ -217,6 +272,8 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
         }.issubset(
             {event["type"] for event in events}
         )
+        route = next(event for event in events if event["type"] == "rag.agent.routed")
+        assert route["payload"]["route"] == "model_only"
         loaded_skills = [event for event in events if event["type"] == "skill.loaded"]
         assert {event["payload"]["slug"] for event in loaded_skills} == {
             "task-planning",
@@ -394,7 +451,13 @@ def test_requesting_changes_waits_for_input_without_executing_tool(tmp_path):
 def test_tenant_scope_prevents_cross_tenant_access(tmp_path):
     with client_for(tmp_path) as client:
         agent = client.get("/api/v1/agents").json()["items"][0]
-        foreign_headers = {"X-Tenant-ID": "tenant_other", "X-Project-ID": "project_other"}
+        foreign_headers = {
+            "X-Tenant-ID": "tenant_other",
+            "X-Project-ID": "project_other",
+            "X-Environment-ID": "env_development",
+            "X-User-ID": "foreign_user",
+            "X-Roles": "viewer",
+        }
         assert client.get(f"/api/v1/agents/{agent['id']}", headers=foreign_headers).status_code == 404
         assert client.get("/api/v1/agents", headers=foreign_headers).json()["items"] == []
         assert client.get("/api/v1/agent-deployments", headers=foreign_headers).json()["items"] == []

@@ -13,7 +13,7 @@ FastAPI Knowledge API
         ├── ObjectStorage port ── Local adapter / Alibaba Cloud OSS V2
         ├── Ingestion queue ───── Parse → Chunk → Embed → Index → Publish revision
         ├── SQLite repository ─── Metadata, chunks, immutable revisions, jobs, audit
-        └── knowledge_search ──── Revision pin → ACL → Hybrid RRF → Citation
+        └── builtin_rag Agent ─── Auto route → Revision pin → ACL → Hybrid RRF → Citation
                                       │
                                       ▼
                               Agent runtime events/output
@@ -24,6 +24,7 @@ FastAPI Knowledge API
 - `storage/`：稳定 object key、默认凭据链、短期 PUT/GET 签名、本地等价适配；
 - `ingestion/`：PDF、DOCX、Markdown、HTML、JSON、CSV、纯文本解析和结构化分块；
 - `embedding.py`：确定性本地 Embedding 与 OpenAI-compatible 模型网关适配；
+- `agent.py`：内置 RAG Agent，按请求类型和可靠证据自动选择 `knowledge` 或 `model_only`；
 - `service.py`：知识库、文档、摄取任务、不可变版本、混合检索、ACL、审计和领域事件；
 - `tool.py`：只从 `ResolvedExecutionPlan` 读取已锁定 Revision 的 `knowledge_search`；
 - `models.py` / `ports.py`：API 输入模型和可替换基础设施接口。
@@ -38,7 +39,7 @@ FastAPI Knowledge API
 - ETag、SHA-256、Content-Type、大小和存储类型；
 - Parser、Chunker、Embedding 版本及索引完成时间。
 
-浏览器上传前，API 生成有效期 15 分钟的 PUT URL。上传后浏览器调用 complete，服务端通过 HeadObject 校验对象大小和 ETag，再创建持久摄取任务。下载时才生成短期 GET URL。AK/SK、STS Token 和签名 URL 都不会进入数据库、Execution Plan、Checkpoint 或事件。
+浏览器先计算强制 SHA-256，API 再生成有效期 15 分钟的 PUT URL。上传后浏览器调用 complete，服务端通过 HeadObject 校验对象大小、类型和可选 ETag，摄取时强制复核 SHA-256。下载时才生成短期 GET URL。AK/SK、STS Token 和签名 URL 都不会进入数据库、Execution Plan、Checkpoint 或事件。
 
 Object key 格式：
 
@@ -65,22 +66,24 @@ PENDING_UPLOAD
 
 - Manifest 固定所有 `document_version_id`；
 - 固定 Parser、Chunker、Embedding 模型/维度和 Retrieval Profile；
-- 通过规范化 JSON 生成 `index_hash`；
+- 通过文档 SHA、Chunk 内容哈希、向量哈希和规范化配置生成 `index_hash`；
 - 新版本激活时旧版本标为 `DEPRECATED`，但已发布 Agent 仍可使用旧 Revision；
 - Agent 发布时只允许选择当前 `ACTIVE` Revision，并把完整检索快照锁入执行计划。
 
-任务在进程重启后会把 `QUEUED/RUNNING` 状态恢复到队列。失败任务保留错误码和错误消息，可通过 retry API 重试。
+Worker 通过原子 compare-and-set 独占 `QUEUED` 任务；只有超过租期的 `RUNNING` 任务会在重启后恢复。Chunk 写入、版本 READY、Revision 发布和 Job 完成位于同一事务中。
 
 ## 检索与 Citation
 
 检索流程：
 
-1. 校验 Revision 的 Tenant / Project 和 Embedding 维度；
+1. 校验 Revision 的 Tenant / Project、Embedding 模型/维度、Retrieval Profile、Plan Binding 和索引哈希；
 2. 通过 `visibility`、`created_by`、`allowed_roles` 做文档级 ACL；
 3. 同时计算向量相似度和词法匹配；
 4. 用 Reciprocal Rank Fusion 合并候选，每份文档限制最多 3 个 Chunk；
 5. 返回 `citation_id`、Chunk、文档版本、结构定位、内容哈希、稳定 URI 和授权下载入口；
 6. 审计只保存 query SHA-256、Revision、命中 Chunk 与耗时，不记录原始查询内容。
+
+运行时仅在 Plan 同时绑定 Knowledge Revision、`knowledge_search` 工具且预算允许时启动内置 RAG Agent。创作、改写等模型原生请求直接选择 `model_only`；事实型请求进行证据探测，只有达到锁定 Profile 阈值时才选择 `knowledge`。HITL 恢复会重新执行相同的锁定检索并再次检查 ACL。
 
 Reference 实现把向量保存在 SQLite JSON 中，适合本地开发和契约测试。数据量增长后，`EmbeddingProvider` 和 Repository 边界可替换为模型网关与 PostgreSQL/pgvector，而 API、Agent Plan 和 Citation 契约不变。
 

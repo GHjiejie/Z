@@ -45,12 +45,32 @@ def create_app(
     seed: bool = True,
     model_gateway: ModelGateway | None = None,
     load_env: bool = True,
+    trust_identity_headers: bool | None = None,
+    allow_demo_identity: bool | None = None,
 ) -> FastAPI:
     root = Path(__file__).resolve().parents[2]
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
         loaded_environment_files = load_environment(root) if load_env else []
+        application.state.trust_identity_headers = (
+            trust_identity_headers
+            if trust_identity_headers is not None
+            else (
+                not load_env
+                or os.getenv("DEEPAGENT_TRUST_IDENTITY_HEADERS", "false").lower()
+                in {"1", "true", "yes"}
+            )
+        )
+        application.state.allow_demo_identity = (
+            allow_demo_identity
+            if allow_demo_identity is not None
+            else (
+                not load_env
+                or os.getenv("DEEPAGENT_ALLOW_DEMO_IDENTITY", "false").lower()
+                in {"1", "true", "yes"}
+            )
+        )
         db_path = database_path or os.getenv(
             "DEEPAGENT_DB_PATH", str(root / "data" / "deepagent.db")
         )
@@ -73,7 +93,7 @@ def create_app(
         compiler = AgentPlanCompiler(skill_registry)
         if seed:
             seed_reference_data(db, compiler)
-        object_storage = create_object_storage(root / "data" / "knowledge_objects")
+        object_storage = create_object_storage(Path(db_path).parent / "knowledge_objects")
         knowledge = KnowledgeService(db, object_storage, create_embedding_provider())
         events = EventEmitter(db)
         active_model_gateway = model_gateway or OpenAICompatibleModelGateway.from_environment()

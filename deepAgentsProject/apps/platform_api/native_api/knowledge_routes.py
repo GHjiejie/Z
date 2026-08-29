@@ -119,6 +119,23 @@ def download_knowledge_document(
     )
 
 
+@router.get("/knowledge-document-versions/{version_id}/download")
+def download_knowledge_document_version(
+    version_id: str,
+    context: TenantContext = Depends(tenant_context),
+    container=Depends(services),
+):
+    result = container.knowledge.download_document_version(version_id, context)
+    if result["url"]:
+        return RedirectResponse(result["url"], status_code=302)
+    filename = quote(result["filename"], safe="")
+    return Response(
+        result["content"],
+        media_type=result["content_type"],
+        headers={"Content-Disposition": f"attachment; filename*=UTF-8''{filename}"},
+    )
+
+
 @router.get("/knowledge-ingestion-jobs/{job_id}")
 def get_knowledge_ingestion_job(
     job_id: str,

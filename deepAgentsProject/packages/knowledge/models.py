@@ -14,7 +14,7 @@ class UploadPrepare(BaseModel):
     filename: str = Field(min_length=1, max_length=255)
     content_type: str = Field(min_length=1, max_length=160)
     size_bytes: int = Field(gt=0, le=100 * 1024 * 1024)
-    sha256: Optional[str] = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    sha256: str = Field(pattern=r"^[a-fA-F0-9]{64}$")
     description: str = Field(default="", max_length=1000)
     visibility: Literal["private", "project"] = "project"
     allowed_roles: List[str] = Field(default_factory=list)
@@ -67,4 +67,3 @@ class SearchHit(BaseModel):
     text: str
     score: float
     source: Dict[str, Any]
-

@@ -7,6 +7,7 @@ import math
 import secrets
 import time
 from collections import defaultdict
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from packages.domain.models import TenantContext, utc_now
@@ -34,6 +35,7 @@ def _new_id(prefix: str) -> str:
 
 
 DEFAULT_RETRIEVAL_PROFILE = {
+    "profile_version": "hybrid-rrf-2.1",
     "strategy": "hybrid_rrf",
     "dense_candidates": 50,
     "lexical_candidates": 50,
@@ -41,6 +43,10 @@ DEFAULT_RETRIEVAL_PROFILE = {
     "rerank_candidates": 20,
     "default_top_k": 8,
     "max_chunks_per_document": 3,
+    "min_dense_score": 0.05,
+    "max_context_characters": 24_000,
+    "routing_min_score": 0.04,
+    "require_lexical_overlap": False,
 }
 
 
@@ -56,6 +62,14 @@ class KnowledgeService:
         self.db = db
         self.storage = storage
         self.embedding = embedding
+        self.retrieval_profile = {
+            **DEFAULT_RETRIEVAL_PROFILE,
+            # The deterministic reference embedding is a lexical hash, not a
+            # semantic model. Dense-only matches can therefore be collisions.
+            "require_lexical_overlap": embedding.model_revision.startswith(
+                "deepagent-hash-embedding-"
+            ),
+        }
         self.parser = DocumentParser()
         self.chunker = StructureAwareChunker()
         self.queue: asyncio.Queue[str] = asyncio.Queue()
@@ -63,17 +77,31 @@ class KnowledgeService:
         self.task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
-        if self.task is None:
-            self.task = asyncio.create_task(self._worker_loop())
-        recoverable = self.db.fetch_all(
-            "SELECT id FROM knowledge_ingestion_jobs WHERE status IN ('QUEUED','RUNNING')"
+        stale_before = datetime.now(timezone.utc) - timedelta(minutes=5)
+        running = self.db.fetch_all(
+            "SELECT id, heartbeat_at FROM knowledge_ingestion_jobs WHERE status='RUNNING'"
         )
-        for job in recoverable:
+        for job in running:
+            heartbeat = job.get("heartbeat_at")
+            try:
+                stale = not heartbeat or datetime.fromisoformat(heartbeat) < stale_before
+            except ValueError:
+                stale = True
+            if not stale:
+                continue
             self.db.execute(
                 """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
-                   worker_id=NULL, lease_token=NULL, updated_at=? WHERE id=?""",
-                (utc_now(), job["id"]),
+                   worker_id=NULL, lease_token=NULL, updated_at=?
+                   WHERE id=? AND status='RUNNING'
+                     AND (heartbeat_at IS NULL OR heartbeat_at=?)""",
+                (utc_now(), job["id"], heartbeat),
             )
+        recoverable = self.db.fetch_all(
+            "SELECT id FROM knowledge_ingestion_jobs WHERE status='QUEUED'"
+        )
+        if self.task is None:
+            self.task = asyncio.create_task(self._worker_loop())
+        for job in recoverable:
             await self.queue.put(job["id"])
 
     async def stop(self) -> None:
@@ -145,7 +173,7 @@ class KnowledgeService:
 
     def list_documents(self, knowledge_base_id: str, context: TenantContext) -> List[Dict[str, Any]]:
         self._require_knowledge_base(knowledge_base_id, context)
-        return self.db.fetch_all(
+        items = self.db.fetch_all(
             """SELECT d.*, v.content_type, v.size_bytes, v.content_sha256, v.canonical_uri,
                       v.status AS version_status, v.indexed_at
                FROM knowledge_documents d
@@ -154,6 +182,7 @@ class KnowledgeService:
                ORDER BY d.updated_at DESC""",
             (knowledge_base_id, context.tenant_id, context.project_id),
         )
+        return [item for item in items if self._document_allowed(item, context)]
 
     def list_revisions(self, knowledge_base_id: str, context: TenantContext) -> List[Dict[str, Any]]:
         self._require_knowledge_base(knowledge_base_id, context)
@@ -219,7 +248,7 @@ class KnowledgeService:
                 self.storage.region,
                 object_key,
                 self.storage.canonical_uri(object_key),
-                payload.sha256.lower() if payload.sha256 else None,
+                payload.sha256.lower(),
                 payload.content_type,
                 payload.size_bytes,
                 now,
@@ -266,6 +295,12 @@ class KnowledgeService:
             raise KnowledgeValidationError(
                 f"Uploaded size {len(content)} does not match expected {version['expected_size_bytes']}"
             )
+        expected_type = version["content_type"].split(";", 1)[0].strip().lower()
+        actual_type = content_type.split(";", 1)[0].strip().lower()
+        if actual_type != expected_type:
+            raise KnowledgeValidationError(
+                f"Uploaded content type {actual_type} does not match expected {expected_type}"
+            )
         metadata = self.storage.put_content(version["object_key"], content, content_type)
         return {
             "status": "UPLOADED",
@@ -282,10 +317,22 @@ class KnowledgeService:
         )
         if existing_job and existing_job["status"] != "FAILED":
             return existing_job
-        metadata = self.storage.head_object(version["object_key"], payload.object_version_id)
+        if version["status"] not in {"PENDING_UPLOAD", "UPLOADED", "FAILED"}:
+            raise KnowledgeConflictError(
+                f"Document version cannot be completed from {version['status']}"
+            )
+        metadata = await asyncio.to_thread(
+            self.storage.head_object, version["object_key"], payload.object_version_id
+        )
         if metadata.size_bytes != version["expected_size_bytes"]:
             raise KnowledgeValidationError(
                 f"OSS object size {metadata.size_bytes} does not match expected {version['expected_size_bytes']}"
+            )
+        expected_type = version["content_type"].split(";", 1)[0].strip().lower()
+        actual_type = metadata.content_type.split(";", 1)[0].strip().lower()
+        if actual_type != expected_type:
+            raise KnowledgeValidationError(
+                f"Stored content type {actual_type} does not match expected {expected_type}"
             )
         if payload.etag and metadata.etag and payload.etag.strip('"') != metadata.etag.strip('"'):
             raise KnowledgeValidationError("OSS object ETag does not match the upload completion request")
@@ -313,12 +360,13 @@ class KnowledgeService:
         if existing_job:
             self.db.execute(
                 """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
-                   error_code=NULL, error_message=NULL, updated_at=? WHERE id=?""",
+                   worker_id=NULL, lease_token=NULL, error_code=NULL, error_message=NULL,
+                   updated_at=? WHERE id=?""",
                 (now, job_id),
             )
         else:
             self.db.execute(
-                """INSERT INTO knowledge_ingestion_jobs
+                """INSERT OR IGNORE INTO knowledge_ingestion_jobs
                    (id, tenant_id, project_id, knowledge_base_id, document_version_id,
                     status, stage, attempts, created_at, updated_at)
                    VALUES (?, ?, ?, ?, ?, 'QUEUED', 'QUEUED', 0, ?, ?)""",
@@ -332,6 +380,11 @@ class KnowledgeService:
                     now,
                 ),
             )
+            actual_job = self.db.fetch_one(
+                "SELECT id FROM knowledge_ingestion_jobs WHERE document_version_id=?",
+                (version_id,),
+            )
+            job_id = actual_job["id"]
         self._append_event(
             context,
             "knowledge.ingestion.queued",
@@ -350,7 +403,8 @@ class KnowledgeService:
         now = utc_now()
         self.db.execute(
             """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
-               error_code=NULL, error_message=NULL, updated_at=? WHERE id=?""",
+               worker_id=NULL, lease_token=NULL, error_code=NULL, error_message=NULL,
+               updated_at=? WHERE id=?""",
             (now, job_id),
         )
         self.db.execute(
@@ -379,6 +433,8 @@ class KnowledgeService:
         )
         if not document:
             raise KnowledgeNotFoundError("Knowledge document not found")
+        if not self._document_allowed(document, context):
+            raise KnowledgeNotFoundError("Knowledge document not found")
         document["versions"] = self.db.fetch_all(
             "SELECT * FROM knowledge_document_versions WHERE document_id=? ORDER BY revision_number DESC",
             (document_id,),
@@ -391,7 +447,19 @@ class KnowledgeService:
             raise KnowledgeNotFoundError("Knowledge document not found")
         if not document.get("current_version_id"):
             raise KnowledgeConflictError("Knowledge document is not ready")
-        version = self._require_version(document["current_version_id"], context)
+        return self.download_document_version(document["current_version_id"], context)
+
+    def download_document_version(
+        self, version_id: str, context: TenantContext
+    ) -> Dict[str, Any]:
+        version = self._require_version(version_id, context)
+        document = self.db.fetch_one(
+            """SELECT * FROM knowledge_documents
+               WHERE id=? AND tenant_id=? AND project_id=?""",
+            (version["document_id"], context.tenant_id, context.project_id),
+        )
+        if not document or not self._document_allowed(document, context):
+            raise KnowledgeNotFoundError("Knowledge document not found")
         signed_url = self.storage.create_download_url(
             version["object_key"], version.get("object_version_id"), expires_seconds=300
         )
@@ -410,6 +478,7 @@ class KnowledgeService:
         context: TenantContext,
         *,
         run_id: Optional[str] = None,
+        expected_bindings: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         started = time.perf_counter()
         revision_ids = list(dict.fromkeys(payload.revision_ids))
@@ -435,7 +504,15 @@ class KnowledgeService:
                 "audit_id": audit_id,
                 "latency_ms": latency_ms,
             }
-        revisions = self._require_revisions(revision_ids, context)
+        revisions = self._require_revisions(
+            revision_ids, context, expected_bindings=expected_bindings
+        )
+        profiles = [revision["retrieval_profile"] for revision in revisions]
+        profile = profiles[0]
+        if any(candidate != profile for candidate in profiles[1:]):
+            raise KnowledgeConflictError(
+                "Knowledge revisions use incompatible retrieval profiles"
+            )
         rows = self._candidate_rows(revision_ids, payload.filters, context)
         rows = [row for row in rows if self._document_allowed(row, context)]
         query_vector = self.embedding.embed_query(payload.query)
@@ -457,27 +534,36 @@ class KnowledgeService:
                 "dense": dense_score,
                 "lexical": lexical_score,
             }
-        dense_ranked = sorted(scored.values(), key=lambda item: item["dense"], reverse=True)[:50]
-        lexical_ranked = sorted(scored.values(), key=lambda item: item["lexical"], reverse=True)[:50]
+        dense_ranked = sorted(scored.values(), key=lambda item: item["dense"], reverse=True)[
+            : int(profile["dense_candidates"])
+        ]
+        lexical_ranked = sorted(
+            scored.values(), key=lambda item: item["lexical"], reverse=True
+        )[: int(profile["lexical_candidates"])]
         fused: Dict[str, float] = defaultdict(float)
+        fusion_k = int(profile["fusion_k"])
         for rank, item in enumerate(dense_ranked, start=1):
-            fused[item["row"]["id"]] += 1.0 / (60 + rank)
+            fused[item["row"]["id"]] += 1.0 / (fusion_k + rank)
         for rank, item in enumerate(lexical_ranked, start=1):
-            fused[item["row"]["id"]] += 1.0 / (60 + rank)
+            fused[item["row"]["id"]] += 1.0 / (fusion_k + rank)
         ranked = sorted(
             scored.values(),
             key=lambda item: fused[item["row"]["id"]]
             + max(0.0, item["dense"]) * 0.15
             + item["lexical"] * 0.1,
             reverse=True,
-        )
+        )[: int(profile["rerank_candidates"])]
         hits = []
         per_document: Dict[str, int] = defaultdict(int)
+        min_dense_score = float(profile["min_dense_score"])
+        max_chunks_per_document = int(profile["max_chunks_per_document"])
         for item in ranked:
             row = item["row"]
-            if item["lexical"] <= 0 and item["dense"] <= 0.05:
+            if item["lexical"] <= 0 and item["dense"] <= min_dense_score:
                 continue
-            if per_document[row["document_id"]] >= 3:
+            if profile.get("require_lexical_overlap") and item["lexical"] <= 0:
+                continue
+            if per_document[row["document_id"]] >= max_chunks_per_document:
                 continue
             per_document[row["document_id"]] += 1
             score = (
@@ -499,7 +585,10 @@ class KnowledgeService:
                         "section": (row.get("locator") or {}).get("section"),
                         "content_hash": row["content_hash"],
                         "canonical_uri": row["canonical_uri"],
-                        "download_url": f"/api/v1/knowledge-documents/{row['document_id']}/download",
+                        "download_url": (
+                            "/api/v1/knowledge-document-versions/"
+                            f"{row['document_version_id']}/download"
+                        ),
                     },
                 }
             )
@@ -540,8 +629,11 @@ class KnowledgeService:
                 self.queue.task_done()
 
     async def _process_job(self, job_id: str) -> None:
+        lease_token = _new_id("lease")
+        if not self._claim_job(job_id, lease_token):
+            return
         job = self.db.fetch_one("SELECT * FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
-        if not job or job["status"] == "SUCCEEDED":
+        if not job:
             return
         version = self.db.fetch_one(
             """SELECT v.*, d.display_name, d.id AS document_id, d.knowledge_base_id
@@ -551,14 +643,6 @@ class KnowledgeService:
         )
         if not version:
             raise KnowledgeNotFoundError("Document version for ingestion job is missing")
-        lease_token = _new_id("lease")
-        now = utc_now()
-        self.db.execute(
-            """UPDATE knowledge_ingestion_jobs SET status='RUNNING', stage='DOWNLOADING',
-               attempts=attempts+1, worker_id=?, lease_token=?, heartbeat_at=?, updated_at=?
-               WHERE id=?""",
-            (self.worker_id, lease_token, now, now, job_id),
-        )
         context = TenantContext(
             tenant_id=job["tenant_id"],
             project_id=job["project_id"],
@@ -579,7 +663,7 @@ class KnowledgeService:
             version.get("object_version_id"),
         )
         digest = hashlib.sha256(content).hexdigest()
-        if version.get("expected_sha256") and digest != version["expected_sha256"]:
+        if digest != version.get("expected_sha256"):
             raise KnowledgeValidationError("Document SHA-256 does not match the upload declaration")
         self._set_job_stage(job_id, "PARSING")
         blocks = await asyncio.to_thread(
@@ -599,8 +683,11 @@ class KnowledgeService:
             )
         if len(vectors) != len(chunks):
             raise KnowledgeValidationError("Embedding provider returned an invalid result count")
+        if any(len(vector) != self.embedding.dimensions for vector in vectors):
+            raise KnowledgeValidationError(
+                "Embedding provider returned an invalid vector dimension"
+            )
         self._set_job_stage(job_id, "INDEXING")
-        self.db.execute("DELETE FROM knowledge_chunks WHERE document_version_id=?", (version["id"],))
         rows = []
         created_at = utc_now()
         for chunk, vector in zip(chunks, vectors):
@@ -621,39 +708,16 @@ class KnowledgeService:
                     created_at,
                 )
             )
-        self.db.execute_many(
-            """INSERT INTO knowledge_chunks
-               (id, tenant_id, project_id, knowledge_base_id, document_id,
-                document_version_id, position, text, token_count, content_hash,
-                locator_json, embedding_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            rows,
-        )
         indexed_at = utc_now()
-        self.db.execute(
-            """UPDATE knowledge_document_versions
-               SET status='READY', content_sha256=?, parser_version=?, chunker_version=?,
-                   embedding_revision_id=?, indexed_at=?, error_code=NULL, error_message=NULL
-               WHERE id=?""",
-            (
-                digest,
-                self.parser.version,
-                self.chunker.version,
-                self.embedding.model_revision,
-                indexed_at,
-                version["id"],
-            ),
-        )
-        self.db.execute(
-            """UPDATE knowledge_documents SET current_version_id=?, status='READY', updated_at=?
-               WHERE id=?""",
-            (version["id"], indexed_at, version["document_id"]),
-        )
-        revision = self._publish_revision(job["knowledge_base_id"], context)
-        self.db.execute(
-            """UPDATE knowledge_ingestion_jobs SET status='SUCCEEDED', stage='COMPLETED',
-               chunk_count=?, heartbeat_at=?, updated_at=? WHERE id=?""",
-            (len(chunks), indexed_at, indexed_at, job_id),
+        revision = self._commit_ingestion(
+            job,
+            version,
+            rows,
+            digest,
+            indexed_at,
+            len(chunks),
+            lease_token,
+            context,
         )
         self._append_event(
             context,
@@ -669,112 +733,319 @@ class KnowledgeService:
             ingestion_job_id=job_id,
         )
 
+    def _claim_job(self, job_id: str, lease_token: str) -> bool:
+        now = utc_now()
+        with self.db.lock:
+            cursor = self.db.connection.execute(
+                """UPDATE knowledge_ingestion_jobs SET status='RUNNING', stage='DOWNLOADING',
+                   attempts=attempts+1, worker_id=?, lease_token=?, heartbeat_at=?, updated_at=?
+                   WHERE id=? AND status='QUEUED'""",
+                (self.worker_id, lease_token, now, now, job_id),
+            )
+            self.db.connection.commit()
+            return cursor.rowcount == 1
+
+    def _commit_ingestion(
+        self,
+        job: Dict[str, Any],
+        version: Dict[str, Any],
+        rows: List[tuple],
+        digest: str,
+        indexed_at: str,
+        chunk_count: int,
+        lease_token: str,
+        context: TenantContext,
+    ) -> Dict[str, Any]:
+        with self.db.lock:
+            connection = self.db.connection
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                claimed = connection.execute(
+                    """SELECT status, worker_id, lease_token FROM knowledge_ingestion_jobs
+                       WHERE id=?""",
+                    (job["id"],),
+                ).fetchone()
+                if (
+                    not claimed
+                    or claimed["status"] != "RUNNING"
+                    or claimed["worker_id"] != self.worker_id
+                    or claimed["lease_token"] != lease_token
+                ):
+                    raise KnowledgeConflictError("Ingestion job lease is no longer owned")
+                published = connection.execute(
+                    """SELECT 1 FROM knowledge_revision_documents
+                       WHERE document_version_id=? LIMIT 1""",
+                    (version["id"],),
+                ).fetchone()
+                if published:
+                    raise KnowledgeConflictError(
+                        "Published document versions cannot be re-indexed"
+                    )
+                connection.execute(
+                    "DELETE FROM knowledge_chunks WHERE document_version_id=?",
+                    (version["id"],),
+                )
+                connection.executemany(
+                    """INSERT INTO knowledge_chunks
+                       (id, tenant_id, project_id, knowledge_base_id, document_id,
+                        document_version_id, position, text, token_count, content_hash,
+                        locator_json, embedding_json, created_at)
+                       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    rows,
+                )
+                connection.execute(
+                    """UPDATE knowledge_document_versions
+                       SET status='READY', content_sha256=?, parser_version=?, chunker_version=?,
+                           embedding_revision_id=?, indexed_at=?, error_code=NULL,
+                           error_message=NULL WHERE id=?""",
+                    (
+                        digest,
+                        self.parser.version,
+                        self.chunker.version,
+                        self.embedding.model_revision,
+                        indexed_at,
+                        version["id"],
+                    ),
+                )
+                connection.execute(
+                    """UPDATE knowledge_documents SET current_version_id=?, status='READY',
+                       updated_at=? WHERE id=?""",
+                    (version["id"], indexed_at, version["document_id"]),
+                )
+                revision = self._publish_revision_in_connection(
+                    connection, job["knowledge_base_id"], context
+                )
+                completed = connection.execute(
+                    """UPDATE knowledge_ingestion_jobs SET status='SUCCEEDED', stage='COMPLETED',
+                       chunk_count=?, heartbeat_at=?, updated_at=?
+                       WHERE id=? AND status='RUNNING' AND worker_id=? AND lease_token=?""",
+                    (
+                        chunk_count,
+                        indexed_at,
+                        indexed_at,
+                        job["id"],
+                        self.worker_id,
+                        lease_token,
+                    ),
+                )
+                if completed.rowcount != 1:
+                    raise KnowledgeConflictError("Ingestion job lease was lost during commit")
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
     def _publish_revision(
         self, knowledge_base_id: str, context: TenantContext
     ) -> Dict[str, Any]:
-        document_versions = self.db.fetch_all(
-            """SELECT v.id, v.content_sha256, v.parser_version, v.chunker_version
+        with self.db.lock:
+            connection = self.db.connection
+            try:
+                connection.execute("BEGIN IMMEDIATE")
+                revision = self._publish_revision_in_connection(
+                    connection, knowledge_base_id, context
+                )
+                connection.commit()
+                return revision
+            except Exception:
+                connection.rollback()
+                raise
+
+    def _publish_revision_in_connection(
+        self, connection: Any, knowledge_base_id: str, context: TenantContext
+    ) -> Dict[str, Any]:
+        rows = connection.execute(
+            """SELECT v.id, v.content_sha256, v.parser_version, v.chunker_version,
+                      v.embedding_revision_id
                FROM knowledge_documents d
                JOIN knowledge_document_versions v ON v.id=d.current_version_id
                WHERE d.knowledge_base_id=? AND d.tenant_id=? AND d.project_id=?
                  AND d.status='READY' AND v.status='READY'
                ORDER BY d.id""",
             (knowledge_base_id, context.tenant_id, context.project_id),
-        )
+        ).fetchall()
+        document_versions = [self.db._decode(row) for row in rows]
         if not document_versions:
             raise KnowledgeConflictError("Cannot publish an empty knowledge base revision")
-        manifest = {
-            "document_versions": [item["id"] for item in document_versions],
-            "parser_versions": sorted({item["parser_version"] for item in document_versions}),
-            "chunker_versions": sorted({item["chunker_version"] for item in document_versions}),
-        }
+        manifest = self._build_index_manifest(document_versions)
+        index_hash = self._calculate_index_hash(
+            manifest,
+            self.embedding.model_revision,
+            self.embedding.dimensions,
+            self.retrieval_profile,
+        )
+        existing_row = connection.execute(
+            """SELECT * FROM knowledge_base_revisions
+               WHERE knowledge_base_id=? AND index_hash=?""",
+            (knowledge_base_id, index_hash),
+        ).fetchone()
+        if existing_row:
+            return self.db._decode(existing_row)
+        latest = connection.execute(
+            """SELECT MAX(revision_number) AS value FROM knowledge_base_revisions
+               WHERE knowledge_base_id=?""",
+            (knowledge_base_id,),
+        ).fetchone()
+        revision_id = _new_id("kbrev")
+        revision_number = (latest["value"] or 0) + 1
+        now = utc_now()
+        connection.execute(
+            """UPDATE knowledge_base_revisions SET status='DEPRECATED', deprecated_at=?
+               WHERE knowledge_base_id=? AND status='ACTIVE'""",
+            (now, knowledge_base_id),
+        )
+        connection.execute(
+            """INSERT INTO knowledge_base_revisions
+               (id, knowledge_base_id, tenant_id, project_id, revision_number,
+                status, manifest_json, retrieval_profile_json, embedding_model,
+                embedding_dimensions, index_hash, created_at, activated_at)
+               VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)""",
+            (
+                revision_id,
+                knowledge_base_id,
+                context.tenant_id,
+                context.project_id,
+                revision_number,
+                self.db.encode(manifest),
+                self.db.encode(self.retrieval_profile),
+                self.embedding.model_revision,
+                self.embedding.dimensions,
+                index_hash,
+                now,
+                now,
+            ),
+        )
+        connection.executemany(
+            """INSERT INTO knowledge_revision_documents
+               (revision_id, document_version_id) VALUES (?, ?)""",
+            [(revision_id, item["id"]) for item in document_versions],
+        )
+        connection.execute(
+            "UPDATE knowledge_bases SET current_revision_id=?, updated_at=? WHERE id=?",
+            (revision_id, now, knowledge_base_id),
+        )
+        row = connection.execute(
+            "SELECT * FROM knowledge_base_revisions WHERE id=?", (revision_id,)
+        ).fetchone()
+        return self.db._decode(row)
+
+    def _build_index_manifest(
+        self, document_versions: List[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        documents = []
+        for version in sorted(document_versions, key=lambda item: item["id"]):
+            chunks = self.db.fetch_all(
+                """SELECT position, text, content_hash, embedding_json
+                   FROM knowledge_chunks WHERE document_version_id=? ORDER BY position""",
+                (version["id"],),
+            )
+            for chunk in chunks:
+                actual_content_hash = hashlib.sha256(
+                    chunk["text"].encode("utf-8")
+                ).hexdigest()
+                if actual_content_hash != chunk["content_hash"]:
+                    raise KnowledgeConflictError(
+                        f"Chunk content integrity check failed for {version['id']}"
+                    )
+            documents.append(
+                {
+                    "document_version_id": version["id"],
+                    "content_sha256": version["content_sha256"],
+                    "parser_version": version["parser_version"],
+                    "chunker_version": version["chunker_version"],
+                    "embedding_revision_id": version["embedding_revision_id"],
+                    "chunks": [
+                        {
+                            "position": chunk["position"],
+                            "content_hash": chunk["content_hash"],
+                            "embedding_hash": hashlib.sha256(
+                                self.db.encode(chunk["embedding"]).encode("utf-8")
+                            ).hexdigest(),
+                        }
+                        for chunk in chunks
+                    ],
+                }
+            )
+        return {"schema_version": 2, "documents": documents}
+
+    @staticmethod
+    def _calculate_index_hash(
+        manifest: Dict[str, Any],
+        embedding_model: str,
+        embedding_dimensions: int,
+        retrieval_profile: Dict[str, Any],
+    ) -> str:
         canonical = json.dumps(
             {
                 "manifest": manifest,
-                "embedding_model": self.embedding.model_revision,
-                "embedding_dimensions": self.embedding.dimensions,
-                "retrieval_profile": DEFAULT_RETRIEVAL_PROFILE,
+                "embedding_model": embedding_model,
+                "embedding_dimensions": embedding_dimensions,
+                "retrieval_profile": retrieval_profile,
             },
             sort_keys=True,
             ensure_ascii=False,
             separators=(",", ":"),
         )
-        index_hash = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        existing = self.db.fetch_one(
-            """SELECT * FROM knowledge_base_revisions
-               WHERE knowledge_base_id=? AND index_hash=?""",
-            (knowledge_base_id, index_hash),
+        return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+    def _verify_revision_index(self, revision: Dict[str, Any]) -> None:
+        manifest = revision.get("manifest") or {}
+        if manifest.get("schema_version") != 2:
+            raise KnowledgeConflictError(
+                f"Knowledge revision {revision['id']} uses an unverifiable legacy index; re-index it"
+            )
+        versions = self.db.fetch_all(
+            """SELECT v.id, v.content_sha256, v.parser_version, v.chunker_version,
+                      v.embedding_revision_id
+               FROM knowledge_document_versions v
+               JOIN knowledge_revision_documents rd ON rd.document_version_id=v.id
+               WHERE rd.revision_id=? ORDER BY v.id""",
+            (revision["id"],),
         )
-        if existing:
-            return existing
-        latest = self.db.fetch_one(
-            """SELECT MAX(revision_number) AS value FROM knowledge_base_revisions
-               WHERE knowledge_base_id=?""",
-            (knowledge_base_id,),
+        actual_manifest = self._build_index_manifest(versions)
+        actual_hash = self._calculate_index_hash(
+            actual_manifest,
+            revision["embedding_model"],
+            revision["embedding_dimensions"],
+            revision["retrieval_profile"],
         )
-        revision_id = _new_id("kbrev")
-        revision_number = (latest["value"] or 0) + 1
-        now = utc_now()
-        with self.db.lock:
-            connection = self.db.connection
-            try:
-                connection.execute("BEGIN")
-                connection.execute(
-                    """UPDATE knowledge_base_revisions SET status='DEPRECATED', deprecated_at=?
-                       WHERE knowledge_base_id=? AND status='ACTIVE'""",
-                    (now, knowledge_base_id),
-                )
-                connection.execute(
-                    """INSERT INTO knowledge_base_revisions
-                       (id, knowledge_base_id, tenant_id, project_id, revision_number,
-                        status, manifest_json, retrieval_profile_json, embedding_model,
-                        embedding_dimensions, index_hash, created_at, activated_at)
-                       VALUES (?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?, ?, ?, ?, ?)""",
-                    (
-                        revision_id,
-                        knowledge_base_id,
-                        context.tenant_id,
-                        context.project_id,
-                        revision_number,
-                        self.db.encode(manifest),
-                        self.db.encode(DEFAULT_RETRIEVAL_PROFILE),
-                        self.embedding.model_revision,
-                        self.embedding.dimensions,
-                        index_hash,
-                        now,
-                        now,
-                    ),
-                )
-                connection.executemany(
-                    """INSERT INTO knowledge_revision_documents
-                       (revision_id, document_version_id) VALUES (?, ?)""",
-                    [(revision_id, item["id"]) for item in document_versions],
-                )
-                connection.execute(
-                    """UPDATE knowledge_bases SET current_revision_id=?, updated_at=? WHERE id=?""",
-                    (revision_id, now, knowledge_base_id),
-                )
-                connection.commit()
-            except Exception:
-                connection.rollback()
-                raise
-        return self.db.fetch_one("SELECT * FROM knowledge_base_revisions WHERE id=?", (revision_id,))
+        if actual_manifest != manifest or actual_hash != revision["index_hash"]:
+            raise KnowledgeConflictError(
+                f"Knowledge revision index integrity check failed for {revision['id']}"
+            )
 
     def _fail_job(self, job_id: str, exc: Exception) -> None:
         job = self.db.fetch_one("SELECT * FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
-        if not job:
+        if not job or job["status"] != "RUNNING" or job.get("worker_id") != self.worker_id:
             return
         code = getattr(exc, "code", "KNOWLEDGE_INGESTION_FAILED")
         message = str(exc)[:2000]
         now = utc_now()
-        self.db.execute(
-            """UPDATE knowledge_ingestion_jobs SET status='FAILED', stage='FAILED',
-               error_code=?, error_message=?, heartbeat_at=?, updated_at=? WHERE id=?""",
-            (code, message, now, now, job_id),
-        )
+        with self.db.lock:
+            cursor = self.db.connection.execute(
+                """UPDATE knowledge_ingestion_jobs SET status='FAILED', stage='FAILED',
+                   error_code=?, error_message=?, heartbeat_at=?, updated_at=?
+                   WHERE id=? AND status='RUNNING' AND worker_id=? AND lease_token=?""",
+                (
+                    code,
+                    message,
+                    now,
+                    now,
+                    job_id,
+                    self.worker_id,
+                    job.get("lease_token"),
+                ),
+            )
+            self.db.connection.commit()
+        if cursor.rowcount != 1:
+            return
         self.db.execute(
             """UPDATE knowledge_document_versions SET status='FAILED', error_code=?,
-               error_message=? WHERE id=?""",
+               error_message=? WHERE id=? AND NOT EXISTS (
+                 SELECT 1 FROM knowledge_revision_documents rd
+                 WHERE rd.document_version_id=knowledge_document_versions.id
+               )""",
             (code, message, job["document_version_id"]),
         )
         version = self.db.fetch_one(
@@ -804,8 +1075,9 @@ class KnowledgeService:
     def _set_job_stage(self, job_id: str, stage: str) -> None:
         now = utc_now()
         self.db.execute(
-            """UPDATE knowledge_ingestion_jobs SET stage=?, heartbeat_at=?, updated_at=? WHERE id=?""",
-            (stage, now, now, job_id),
+            """UPDATE knowledge_ingestion_jobs SET stage=?, heartbeat_at=?, updated_at=?
+               WHERE id=? AND status='RUNNING' AND worker_id=?""",
+            (stage, now, now, job_id, self.worker_id),
         )
 
     def _candidate_rows(
@@ -840,7 +1112,11 @@ class KnowledgeService:
         )
 
     def _require_revisions(
-        self, revision_ids: Iterable[str], context: TenantContext
+        self,
+        revision_ids: Iterable[str],
+        context: TenantContext,
+        *,
+        expected_bindings: Optional[List[Dict[str, Any]]] = None,
     ) -> List[Dict[str, Any]]:
         ids = list(revision_ids)
         placeholders = ",".join("?" for _ in ids)
@@ -854,8 +1130,35 @@ class KnowledgeService:
         missing = [revision_id for revision_id in ids if revision_id not in found]
         if missing:
             raise KnowledgeNotFoundError("One or more knowledge revisions are unavailable")
-        if any(revision["embedding_dimensions"] != self.embedding.dimensions for revision in revisions):
-            raise KnowledgeConflictError("Knowledge revision embedding dimensions are incompatible")
+        if any(
+            revision["embedding_dimensions"] != self.embedding.dimensions
+            or revision["embedding_model"] != self.embedding.model_revision
+            for revision in revisions
+        ):
+            raise KnowledgeConflictError(
+                "Knowledge revision embedding model is unavailable in this runtime"
+            )
+        if expected_bindings is not None:
+            expected = {binding["revision_id"]: binding for binding in expected_bindings}
+            if set(expected) != set(ids):
+                raise KnowledgeConflictError(
+                    "Runtime knowledge bindings do not match requested revisions"
+                )
+            for revision in revisions:
+                binding = expected[revision["id"]]
+                if (
+                    binding.get("index_hash") != revision["index_hash"]
+                    or binding.get("embedding_model") != revision["embedding_model"]
+                    or binding.get("embedding_dimensions")
+                    != revision["embedding_dimensions"]
+                    or binding.get("retrieval_profile")
+                    != revision["retrieval_profile"]
+                ):
+                    raise KnowledgeConflictError(
+                        f"Knowledge binding integrity check failed for {revision['id']}"
+                    )
+        for revision in revisions:
+            self._verify_revision_index(revision)
         return revisions
 
     def _require_knowledge_base(

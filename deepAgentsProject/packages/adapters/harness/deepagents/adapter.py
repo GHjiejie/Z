@@ -54,7 +54,12 @@ class DeepAgentsHarnessAdapter:
                     }
                 ]
                 if plan.get("knowledge_bindings")
+                and any(
+                    binding.get("name") == "knowledge_search"
+                    for binding in plan.get("tool_bindings", [])
+                )
                 else [],
+                "builtin_agents": plan.get("builtin_agent_bindings", []),
                 "skill_context": "\n\n".join(
                     f"## Skill: {skill['name']} ({skill['version']})\n{skill['instructions']}"
                     for skill in loaded_skills

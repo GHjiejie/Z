@@ -21,18 +21,15 @@ import type {
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
 
-const tenantHeaders = {
-  'X-Tenant-ID': 'tenant_demo',
-  'X-Project-ID': 'project_atlas',
-  'X-Environment-ID': 'env_development',
-  'X-User-ID': 'user_demo',
+async function sha256(file: File) {
+  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
-      ...tenantHeaders,
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
     },
@@ -72,13 +69,14 @@ export const api = {
     request<KnowledgeBase>('/api/v1/knowledge-bases', { method: 'POST', body: JSON.stringify(body) }),
   knowledgeRevisions: (knowledgeBaseId: string) =>
     request<{ items: KnowledgeRevision[] }>(`/api/v1/knowledge-bases/${knowledgeBaseId}/revisions`),
-  prepareKnowledgeUpload: (knowledgeBaseId: string, file: File) =>
+  prepareKnowledgeUpload: async (knowledgeBaseId: string, file: File) =>
     request<KnowledgeUploadPreparation>(`/api/v1/knowledge-bases/${knowledgeBaseId}/documents:prepare-upload`, {
       method: 'POST',
       body: JSON.stringify({
         filename: file.name,
         content_type: file.type || 'application/octet-stream',
         size_bytes: file.size,
+        sha256: await sha256(file),
         visibility: 'project',
         allowed_roles: [],
       }),
@@ -89,7 +87,6 @@ export const api = {
       method: preparation.upload.method,
       body: file,
       headers: {
-        ...(platformUpload ? tenantHeaders : {}),
         'Content-Type': file.type || 'application/octet-stream',
         ...preparation.upload.required_headers,
       },

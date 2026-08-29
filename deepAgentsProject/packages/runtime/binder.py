@@ -13,6 +13,12 @@ class RuntimeBinder:
     """
 
     def bind(self, run: Dict[str, Any], plan: Dict[str, Any]) -> Dict[str, Any]:
+        if run.get("principal_verified") != 1 or not run.get("principal_user_id"):
+            raise RuntimeError("Run has no verified runtime principal")
+        user_id = run["principal_user_id"]
+        roles = run.get("principal_roles")
+        if not isinstance(roles, list):
+            raise RuntimeError("Run principal roles are invalid")
         return {
             "tenant_id": run["tenant_id"],
             "project_id": run["project_id"],
@@ -20,12 +26,12 @@ class RuntimeBinder:
             "run_id": run["id"],
             "attempt_id": run["current_attempt_id"],
             "resolved_plan_id": run["resolved_plan_id"],
-            "environment_id": (run.get("metadata") or {}).get("environment_id", "env_development"),
-            "user_id": (run.get("metadata") or {}).get("user_id", "user_demo"),
-            "roles": (run.get("metadata") or {}).get("roles", ["owner"]),
+            "environment_id": run.get("principal_environment_id") or "env_development",
+            "user_id": user_id,
+            "roles": roles,
             "credential_handle": f"cred_ephemeral_{secrets.token_hex(4)}",
             "checkpoint_namespace": f"{run['tenant_id']}/{run['project_id']}/{run['thread_id']}",
-            "store_namespace": f"{run['tenant_id']}/{run['project_id']}/user_demo/{plan['agent_revision_id']}/memory",
+            "store_namespace": f"{run['tenant_id']}/{run['project_id']}/{user_id}/{plan['agent_revision_id']}/memory",
             "model_endpoint_id": plan["model_deployment_revision_id"],
             "knowledge_handles": [
                 {

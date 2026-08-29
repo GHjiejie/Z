@@ -84,6 +84,19 @@ class AgentPlanCompiler:
                     "limits.max_subagent_concurrency",
                 )
             )
+        if (
+            draft.capabilities.knowledge_bases
+            and "knowledge_search" in draft.capabilities.tools
+            and draft.limits.max_tool_calls == 0
+        ):
+            issues.append(
+                ValidationIssue(
+                    "error",
+                    "KNOWLEDGE_TOOL_BUDGET_CONFLICT",
+                    "The built-in RAG agent requires at least one tool call",
+                    "limits.max_tool_calls",
+                )
+            )
         if draft.capabilities.skills:
             if not self.skill_registry:
                 issues.append(
@@ -170,6 +183,16 @@ class AgentPlanCompiler:
                 }
                 for item in (knowledge_snapshots or [])
             ],
+            "builtin_agent_bindings": [
+                {
+                    "name": "builtin_rag",
+                    "version": "1.0.0",
+                    "routing": "auto_evidence",
+                    "tool": "knowledge_search",
+                }
+            ]
+            if knowledge_snapshots and "knowledge_search" in draft.capabilities.tools
+            else [],
             "subagent_bindings": [
                 {
                     "name": name,

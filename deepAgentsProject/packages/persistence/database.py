@@ -82,6 +82,10 @@ CREATE TABLE IF NOT EXISTS runs (
   input TEXT NOT NULL,
   output TEXT,
   metadata_json TEXT NOT NULL DEFAULT '{}',
+  principal_user_id TEXT NOT NULL DEFAULT 'user_demo',
+  principal_roles_json TEXT NOT NULL DEFAULT '[]',
+  principal_environment_id TEXT NOT NULL DEFAULT 'env_development',
+  principal_verified INTEGER NOT NULL DEFAULT 0,
   checkpoint_json TEXT NOT NULL DEFAULT '{}',
   current_attempt_id TEXT,
   version INTEGER NOT NULL DEFAULT 1,
@@ -388,6 +392,7 @@ JSON_COLUMNS = {
     "spec_json": "spec",
     "plan_json": "plan",
     "metadata_json": "metadata",
+    "principal_roles_json": "principal_roles",
     "checkpoint_json": "checkpoint",
     "actions_json": "actions",
     "decision_json": "decision",
@@ -424,6 +429,20 @@ class Database:
             self.connection.executescript(SCHEMA)
             self._ensure_column("knowledge_base_revisions", "deprecated_at", "TEXT")
             self._ensure_column("knowledge_ingestion_jobs", "chunk_count", "INTEGER")
+            self._ensure_column(
+                "runs", "principal_user_id", "TEXT NOT NULL DEFAULT 'user_demo'"
+            )
+            self._ensure_column(
+                "runs", "principal_roles_json", "TEXT NOT NULL DEFAULT '[]'"
+            )
+            self._ensure_column(
+                "runs",
+                "principal_environment_id",
+                "TEXT NOT NULL DEFAULT 'env_development'",
+            )
+            self._ensure_column(
+                "runs", "principal_verified", "INTEGER NOT NULL DEFAULT 0"
+            )
             self.connection.commit()
 
     def close(self) -> None:

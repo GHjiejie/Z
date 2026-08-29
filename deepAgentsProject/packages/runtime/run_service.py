@@ -9,6 +9,16 @@ from packages.persistence import Database
 from packages.runtime.event_emitter import EventEmitter
 
 
+RESERVED_RUN_METADATA = {
+    "tenant_id",
+    "project_id",
+    "environment_id",
+    "user_id",
+    "roles",
+    "principal",
+}
+
+
 class RunService:
     def __init__(self, db: Database, events: EventEmitter, orchestrator: Any = None):
         self.db = db
@@ -100,14 +110,17 @@ class RunService:
         run_id = new_id("run")
         attempt_id = new_id("att")
         now = utc_now()
+        self._validate_metadata(payload.metadata)
         metadata = dict(payload.metadata)
         metadata["request_id"] = metadata.get("request_id", new_id("req"))
         metadata["trace_id"] = metadata.get("trace_id", new_id("trace"))
         self.db.execute(
             """INSERT INTO runs
                (id, tenant_id, project_id, thread_id, agent_deployment_id, resolved_plan_id,
-                status, input, metadata_json, checkpoint_json, current_attempt_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, '{}', ?, ?, ?)""",
+                status, input, metadata_json, principal_user_id, principal_roles_json,
+                principal_environment_id, principal_verified, checkpoint_json,
+                current_attempt_id, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, 1, '{}', ?, ?, ?)""",
             (
                 run_id,
                 context.tenant_id,
@@ -117,6 +130,9 @@ class RunService:
                 deployment["resolved_plan_id"],
                 payload.input,
                 self.db.encode(metadata),
+                context.user_id,
+                self.db.encode(context.roles),
+                context.environment_id,
                 attempt_id,
                 now,
                 now,
@@ -169,6 +185,7 @@ class RunService:
         checkpoint.setdefault("responses", []).append(
             {"input": payload.input, "actor": context.user_id, "received_at": now}
         )
+        self._validate_metadata(payload.metadata)
         metadata = run.get("metadata") or {}
         metadata.update(payload.metadata)
         metadata["resume_input"] = payload.input
@@ -338,4 +355,12 @@ class RunService:
             self.db.execute(
                 "UPDATE runs SET status=?, output=?, version=version+1, updated_at=? WHERE id=?",
                 (status, output, utc_now(), run_id),
+            )
+
+    @staticmethod
+    def _validate_metadata(metadata: Dict[str, Any]) -> None:
+        reserved = sorted(RESERVED_RUN_METADATA.intersection(metadata))
+        if reserved:
+            raise ConflictError(
+                "Run metadata contains reserved identity fields: " + ", ".join(reserved)
             )

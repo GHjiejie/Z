@@ -15,7 +15,7 @@
 - 无模型密钥即可运行的确定性 Reference Harness，便于验证平台契约；
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
-- Knowledge/RAG：OSS 直传授权、持久摄取任务、PDF/DOCX/Markdown 等解析、不可变知识库版本、混合检索、ACL 与 Citation。
+- Knowledge/RAG：内置 `builtin_rag` Agent 自动判断知识检索或模型直答，支持 OSS 直传授权、持久摄取、不可变索引、混合检索、ACL 与可验证 Citation。
 
 ## 快速启动
 
@@ -27,6 +27,8 @@ make api
 ```
 
 打开 [http://localhost:8000](http://localhost:8000)。API 文档位于 [http://localhost:8000/docs](http://localhost:8000/docs)。
+
+如果本机没有认证代理，仅用于本地演示时以 `DEEPAGENT_ALLOW_DEMO_IDENTITY=true make api` 启动；生产环境不得启用该开关。
 
 开发模式可分别启动：
 
@@ -44,7 +46,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 3. 输入含有 `deploy to production` 或“部署到生产”的任务，Run 会进入 `WAITING_FOR_APPROVAL`。
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
-6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，Run 会执行真实 `knowledge_search`。
+6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，内置 RAG Agent 会对事实型请求检索，对创作等无需知识库的请求自动走模型直答。
 
 ## 测试与构建
 
@@ -142,6 +144,10 @@ POST /api/v1/knowledge:search
 
 `KNOWLEDGE_EMBEDDING_PROVIDER=hash` 是无需外部凭据的确定性参考实现。生产环境应配置 `openai_compatible` 并通过模型网关提供 Embedding endpoint、模型与维度；这些参数会被锁入 Knowledge Revision。
 
+上传准备请求必须携带文件 SHA-256。每个新 Knowledge Revision 的 `index_hash` 覆盖文档摘要、Chunk 内容摘要和向量摘要；运行时会校验 Plan 中锁定的模型、维度、Retrieval Profile 与索引哈希。旧版不可验证索引必须重新摄取后才能使用。
+
+运行时身份不会从用户提交的 Run metadata 读取。默认部署既拒绝匿名 demo owner，也拒绝调用者自带的 `X-Tenant-ID`、`X-Project-ID`、`X-User-ID` 和 `X-Roles`；只有在受信认证代理会清理并完整重新注入这些头时，才可显式设置 `DEEPAGENT_TRUST_IDENTITY_HEADERS=true`。纯本地演示可单独设置 `DEEPAGENT_ALLOW_DEMO_IDENTITY=true`，不得用于生产环境。
+
 ## 真实对话模型
 
 Playground 通过统一模型适配层调用真实模型，支持 OpenAI-compatible Chat Completions、OpenAI Responses 和 Anthropic Messages 三种流式接口。服务启动时按“进程环境变量 → 显式 `DEEPAGENT_ENV_FILE` → 项目 `.env` → 工作区上级 `.env`”的优先关系解析以下配置，密钥只保留在运行时内存中，不写入数据库、Execution Plan、事件或 Artifact：
@@ -160,7 +166,7 @@ MODEL_ANTHROPIC_THINKING_BUDGET_TOKENS=2048
 
 `MODEL_API_STYLE` 可设为 `chat_completions`、`responses` 或 `anthropic_messages`。标准 Anthropic 地址会自动使用 `x-api-key`，兼容网关默认使用 Bearer；特殊网关可通过 `MODEL_AUTH_STYLE=bearer|anthropic` 显式覆盖。完整参数见 `.env.example`。
 
-每个会话会把同一 Thread 中最近的成功轮次、当前 Agent system prompt、锁定的 Skill 指令和可用的 Knowledge 引用一起发送给模型。适配层把 `reasoning_details` / `reasoning_content`、Responses reasoning 事件和 Anthropic `thinking_delta` 统一映射为 `model.reasoning.started`、`model.reasoning.delta`、`model.reasoning.completed`，普通回答映射为 `model.delta`。Playground 会实时 Markdown 渲染思考面板和最终回答，完整原始事件仍可在 Live Execution 中查看。供应商返回的 token 使用量会写入 Usage Ledger。正式运行缺少模型配置时会拒绝启动，不会静默回退到固定模拟回复。
+每个会话会把同一 Thread 中受字符预算约束的最近成功轮次、当前 Agent system prompt、锁定的 Skill 指令和可用的 Knowledge 引用一起发送给模型。知识引用以低权限、不可信 JSON 数据传入，最终 Citation 会与本次召回 ID 校验。适配层把 `reasoning_details` / `reasoning_content`、Responses reasoning 事件和 Anthropic `thinking_delta` 统一映射为 `model.reasoning.started`、`model.reasoning.delta`、`model.reasoning.completed`，普通回答映射为 `model.delta`。Playground 会实时 Markdown 渲染思考面板和最终回答，完整原始事件仍可在 Live Execution 中查看。供应商返回的 token 使用量会写入 Usage Ledger。正式运行缺少模型配置时会拒绝启动，不会静默回退到固定模拟回复。
 
 ## 当前边界
 

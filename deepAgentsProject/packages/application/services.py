@@ -152,12 +152,15 @@ class AgentService:
         knowledge_snapshots = self._resolve_knowledge_revisions(
             agent["draft"]["capabilities"].get("knowledge_bases", []), context
         )
-        plan = self.compiler.compile(
-            revision_id,
-            agent["draft"],
-            model,
-            knowledge_snapshots=knowledge_snapshots,
-        )
+        try:
+            plan = self.compiler.compile(
+                revision_id,
+                agent["draft"],
+                model,
+                knowledge_snapshots=knowledge_snapshots,
+            )
+        except ValueError as exc:
+            raise ConflictError(str(exc)) from exc
         plan_id = new_id("plan")
         plan["id"] = plan_id
         self.db.execute(
