@@ -192,6 +192,22 @@ export interface Repository {
   updated_at: string
 }
 
+export interface LocalRepositoryFolder {
+  name: string
+  path: string
+  is_git_repository: boolean
+  default_branch?: string | null
+}
+
+export interface LocalRepositoryFolderListing {
+  roots: string[]
+  current_path: string
+  parent_path?: string | null
+  current: LocalRepositoryFolder
+  items: LocalRepositoryFolder[]
+  truncated: boolean
+}
+
 export interface CodingWorkspace {
   id: string
   thread_id: string

@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends
+from typing import Optional
+
+from fastapi import APIRouter, Depends, Query
 
 from apps.platform_api.dependencies import services, tenant_context
 from packages.coding.models import RepositoryCreate, RepositorySnapshotCreate
@@ -8,6 +10,15 @@ from packages.domain.models import TenantContext
 
 
 router = APIRouter(prefix="/api/v1", tags=["repositories"])
+
+
+@router.get("/local-repository-folders")
+def browse_local_repository_folders(
+    path: Optional[str] = Query(default=None, max_length=4096),
+    _: TenantContext = Depends(tenant_context),
+    container=Depends(services),
+):
+    return container.repositories.browse_local_folders(path)
 
 
 @router.post("/repositories", status_code=201)

@@ -50,7 +50,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
 6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，内置 RAG Agent 会对事实型请求检索，对创作等无需知识库的请求自动走模型直答。
-7. 启动后直接进入 **Coding** 使用已发布、已部署的 `Built-in Coding Agent`；注册允许范围内的 Repository、选择 Base Ref 并启动任务。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
+7. 启动后直接进入 **Coding** 使用已发布、已部署的 `Built-in Coding Agent`；点击 `Choose folder` 在允许的本地根目录内选择 Git 仓库或其中的项目子目录，确认 Base Ref 后启动任务。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
 
 ## 测试与构建
 

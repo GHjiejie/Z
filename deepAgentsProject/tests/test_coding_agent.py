@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
+import tarfile
 import time
 from pathlib import Path
 
@@ -448,6 +450,118 @@ def test_repository_registration_rejects_paths_outside_allowed_roots(tmp_path):
             },
         )
         assert internal_remote.status_code == 422
+
+
+def test_local_folder_picker_browses_git_repositories_without_root_escape(
+    tmp_path, monkeypatch
+):
+    allowed_root = tmp_path / "allowed"
+    repository = allowed_root / "selectable-repository"
+    repository.mkdir(parents=True)
+    subprocess.run(
+        ["git", "init", "-b", "main", str(repository)],
+        check=True,
+        capture_output=True,
+    )
+    project_folder = repository / "nested-project"
+    project_folder.mkdir()
+    (project_folder / "inside.txt").write_text("inside\n")
+    (repository / "root-only.txt").write_text("outside selected folder\n")
+    subprocess.run(
+        ["git", "-C", str(repository), "add", "-A"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repository),
+            "-c",
+            "user.name=Folder Picker Test",
+            "-c",
+            "user.email=folder-picker@example.invalid",
+            "commit",
+            "-m",
+            "seed",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    (allowed_root / "ordinary-folder").mkdir()
+    (allowed_root / "node_modules").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (allowed_root / "escape-link").symlink_to(outside, target_is_directory=True)
+    monkeypatch.setenv("DEEPAGENT_REPOSITORY_ROOTS", str(allowed_root))
+
+    with TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            sandbox_providers=[FakeSandboxProvider(_command_result)],
+            load_env=False,
+        )
+    ) as client:
+        root = client.get("/api/v1/local-repository-folders")
+        assert root.status_code == 200, root.text
+        listing = root.json()
+        assert listing["current_path"] == str(allowed_root.resolve())
+        assert listing["parent_path"] is None
+        assert listing["roots"] == [str(allowed_root.resolve())]
+        children = {item["name"]: item for item in listing["items"]}
+        assert children["selectable-repository"]["is_git_repository"] is True
+        assert children["ordinary-folder"]["is_git_repository"] is False
+        assert "node_modules" not in children
+        assert "escape-link" not in children
+
+        selected = client.get(
+            "/api/v1/local-repository-folders", params={"path": str(repository)}
+        )
+        assert selected.status_code == 200, selected.text
+        assert selected.json()["current"] == {
+            "name": "selectable-repository",
+            "path": str(repository.resolve()),
+            "is_git_repository": True,
+            "default_branch": "main",
+        }
+        assert selected.json()["parent_path"] == str(allowed_root.resolve())
+        nested = client.get(
+            "/api/v1/local-repository-folders",
+            params={"path": str(project_folder)},
+        )
+        assert nested.status_code == 200, nested.text
+        assert nested.json()["current"]["is_git_repository"] is True
+        assert nested.json()["current"]["default_branch"] == "main"
+
+        registered = client.post(
+            "/api/v1/repositories",
+            json={
+                "name": "nested-project",
+                "provider": "local_snapshot",
+                "canonical_uri": str(project_folder),
+                "default_branch": "main",
+            },
+        )
+        assert registered.status_code == 201, registered.text
+        snapshot = client.post(
+            f"/api/v1/repositories/{registered.json()['id']}/snapshots",
+            json={"requested_ref": "main", "source_mode": "committed_ref"},
+        )
+        assert snapshot.status_code == 201, snapshot.text
+        snapshot_record = client.app.state.services.db.fetch_one(
+            "SELECT * FROM repository_snapshots WHERE id=?", (snapshot.json()["id"],)
+        )
+        with tarfile.open(snapshot_record["archive_path"], mode="r:gz") as archive:
+            assert archive.getnames() == ["inside.txt"]
+        assert client.get(
+            "/api/v1/local-repository-folders", params={"path": str(outside)}
+        ).status_code == 422
+        assert client.get(
+            "/api/v1/local-repository-folders",
+            params={"path": str(allowed_root / "escape-link")},
+        ).status_code == 422
 
 
 def test_coding_starter_builds_all_read_only_subagents(tmp_path):

@@ -265,6 +265,8 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .coding-launch h2 { margin: 3px 0 5px; font-size: 20px; }
 .coding-launch p { margin: 0; color: var(--muted); font-size: 10px; line-height: 1.5; }
 .coding-launch-fields { display: grid; grid-template-columns: 1.2fr 1fr .72fr; gap: 8px; }
+.repository-select { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 5px; }
+.repository-select button { min-width: 104px; padding: 0 9px; display: inline-flex; align-items: center; justify-content: center; gap: 5px; color: #5d53a3; background: #f7f5ff; border: 1px solid #ded9fa; border-radius: 6px; font-size: 8px; font-weight: 700; cursor: pointer; }
 .coding-task-row { grid-column: 1 / -1; display: grid; grid-template-columns: 220px minmax(280px, 1fr) auto auto; gap: 8px; align-items: stretch; }
 .coding-task-row textarea { min-height: 48px; resize: none; }
 .coding-task-row > input { height: auto; }
@@ -327,6 +329,26 @@ select { appearance: none; background-image: linear-gradient(45deg, transparent 
 .changeset-card > span, .changeset-card > code { display: block; margin-top: 7px; color: #778193; font-size: 8px; }
 .changeset-actions { display: flex; gap: 8px; margin-top: 7px; }
 .changeset-actions .button { flex: 1; justify-content: center; }
+.folder-picker-modal { width: min(720px, calc(100vw - 30px)); }
+.folder-picker-body { padding: 16px 20px; }
+.folder-path-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 7px; }
+.folder-path-row input { font-family: "SFMono-Regular", Consolas, monospace; font-size: 8.5px; }
+.folder-roots { min-height: 29px; padding: 7px 0; display: flex; gap: 5px; overflow-x: auto; }
+.folder-roots button { padding: 4px 7px; display: inline-flex; align-items: center; gap: 5px; flex: 0 0 auto; color: #6d648f; background: #f7f5ff; border: 1px solid #e2def7; border-radius: 5px; font: 7.5px "SFMono-Regular", Consolas, monospace; cursor: pointer; }
+.folder-browser-list { height: 260px; padding: 5px; overflow: auto; background: #fafbfc; border: 1px solid var(--border); border-radius: 8px; }
+.folder-browser-list button { width: 100%; min-height: 34px; padding: 0 9px; display: grid; grid-template-columns: 18px minmax(0, 1fr) auto; align-items: center; gap: 5px; color: #596577; background: transparent; border: 0; border-radius: 5px; text-align: left; cursor: pointer; }
+.folder-browser-list button:hover { color: #5547bd; background: #f1efff; }
+.folder-browser-list button > span { overflow: hidden; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+.folder-browser-list button small { display: inline-flex; align-items: center; gap: 3px; color: #8c84bc; font-size: 7.5px; }
+.folder-browser-empty { height: 100%; display: flex; align-items: center; justify-content: center; gap: 7px; color: #949daa; font-size: 8.5px; }
+.folder-selection { margin-top: 10px; padding: 10px; color: #377762; background: #f2fbf7; border: 1px solid #cdeade; border-radius: 8px; }
+.folder-selection > div:first-child, .folder-selection.unavailable { display: flex; align-items: flex-start; gap: 8px; }
+.folder-selection span { min-width: 0; display: flex; flex-direction: column; gap: 3px; }
+.folder-selection strong { overflow: hidden; font: 8px "SFMono-Regular", Consolas, monospace; text-overflow: ellipsis; white-space: nowrap; }
+.folder-selection small { color: #709485; font-size: 7.5px; }
+.folder-selection .form-row { margin-top: 9px; }
+.folder-selection.unavailable { color: #956313; background: #fff8ea; border-color: #f1e0b8; }
+.folder-selection.unavailable small { color: #a48855; }
 
 @media (max-width: 1180px) {
   .coding-launch { grid-template-columns: 1fr; }

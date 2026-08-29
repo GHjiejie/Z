@@ -62,6 +62,57 @@ class RepositoryService:
             )["count"]
         return items
 
+    def browse_local_folders(self, value: Optional[str] = None) -> Dict[str, Any]:
+        """Browse selectable Git folders without escaping configured local roots."""
+        if not self.allowed_local_roots:
+            raise RepositoryAccessError("No local repository roots are configured")
+        current = self._resolve_local_path(value or str(self.allowed_local_roots[0]))
+        current_root = next(
+            root
+            for root in self.allowed_local_roots
+            if current == root or root in current.parents
+        )
+        parent = current.parent if current != current_root else None
+        items: List[Dict[str, Any]] = []
+        try:
+            children = sorted(current.iterdir(), key=lambda item: item.name.casefold())
+        except OSError as exc:
+            raise RepositoryAccessError("Local folder cannot be read") from exc
+        for child in children:
+            if len(items) >= 500 or child.name in _EXCLUDED_NAMES or child.is_symlink():
+                continue
+            try:
+                resolved = child.resolve()
+                if not resolved.is_dir() or not (
+                    resolved == current_root or current_root in resolved.parents
+                ):
+                    continue
+                items.append(
+                    {
+                        "name": child.name,
+                        "path": str(resolved),
+                        "is_git_repository": self._has_git_root_within(
+                            resolved, current_root
+                        ),
+                    }
+                )
+            except OSError:
+                continue
+        is_git_repository, default_branch = self._git_metadata(current)
+        return {
+            "roots": [str(root) for root in self.allowed_local_roots],
+            "current_path": str(current),
+            "parent_path": str(parent) if parent is not None else None,
+            "current": {
+                "name": current.name or str(current),
+                "path": str(current),
+                "is_git_repository": is_git_repository,
+                "default_branch": default_branch,
+            },
+            "items": items,
+            "truncated": len(items) >= 500,
+        }
+
     def create_repository(
         self, payload: RepositoryCreate, context: TenantContext
     ) -> Dict[str, Any]:
@@ -221,6 +272,68 @@ class RepositoryService:
             raise RepositoryAccessError("Local repository path is outside configured roots")
         return path
 
+    def _git_metadata(self, path: Path) -> tuple[bool, Optional[str]]:
+        env = {
+            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
+            "GIT_TERMINAL_PROMPT": "0",
+            "HOME": tempfile.gettempdir(),
+            "LANG": "C.UTF-8",
+        }
+        try:
+            root = subprocess.run(
+                ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                env=env,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return False, None
+        if root.returncode:
+            return False, None
+        git_root = Path(root.stdout.strip()).resolve()
+        if not any(
+            git_root == allowed or allowed in git_root.parents
+            for allowed in self.allowed_local_roots
+        ):
+            return False, None
+        try:
+            branch = subprocess.run(
+                ["git", "-C", str(path), "branch", "--show-current"],
+                capture_output=True,
+                text=True,
+                timeout=3,
+                env=env,
+                check=False,
+            )
+        except (OSError, subprocess.SubprocessError):
+            return True, "main"
+        return True, branch.stdout.strip() or "main"
+
+    @staticmethod
+    def _has_git_root_within(path: Path, allowed_root: Path) -> bool:
+        candidate = path
+        while candidate == allowed_root or allowed_root in candidate.parents:
+            if (candidate / ".git").exists():
+                return True
+            if candidate == allowed_root:
+                break
+            candidate = candidate.parent
+        return False
+
+    def _git_context(self, path: Path) -> tuple[Path, Optional[PurePosixPath]]:
+        git_root = Path(self._git(path, "rev-parse", "--show-toplevel").strip()).resolve()
+        if not any(
+            git_root == allowed or allowed in git_root.parents
+            for allowed in self.allowed_local_roots
+        ):
+            raise RepositoryAccessError("Git repository root is outside configured roots")
+        prefix = None
+        if path != git_root:
+            prefix = PurePosixPath(path.relative_to(git_root).as_posix())
+        return git_root, prefix
+
     @staticmethod
     def _validate_remote_uri(value: str) -> None:
         parsed = urlparse(value)
@@ -319,8 +432,12 @@ class RepositoryService:
         return result.stdout
 
     def _archive_committed(self, path: Path, commit: str) -> tuple[bytes, List[Dict[str, Any]]]:
+        git_root, prefix = self._git_context(path)
+        command = ["git", "-C", str(git_root), "archive", "--format=tar", commit]
+        if prefix is not None:
+            command.extend(["--", str(prefix)])
         result = subprocess.run(
-            ["git", "-C", str(path), "archive", "--format=tar", commit],
+            command,
             capture_output=True,
             timeout=180,
             check=False,
@@ -331,20 +448,24 @@ class RepositoryService:
             )
         if len(result.stdout) > _MAX_SNAPSHOT_BYTES:
             raise CodingConflictError("Committed repository snapshot exceeds 512 MiB")
-        archive = self._normalize_tar(result.stdout)
+        archive = self._normalize_tar(result.stdout, strip_prefix=prefix)
         return archive, self._manifest_from_archive(archive)
 
     def _archive_working_tree(self, path: Path) -> tuple[bytes, List[Dict[str, Any]]]:
+        git_root, prefix = self._git_context(path)
+        pathspec = str(prefix) if prefix is not None else "."
         result = subprocess.run(
             [
                 "git",
                 "-C",
-                str(path),
+                str(git_root),
                 "ls-files",
                 "-z",
                 "--cached",
                 "--others",
                 "--exclude-standard",
+                "--",
+                pathspec,
             ],
             capture_output=True,
             timeout=120,
@@ -359,10 +480,20 @@ class RepositoryService:
         with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as zipped:
             with tarfile.open(fileobj=zipped, mode="w") as tar:
                 for raw_name in sorted(names):
-                    relative = PurePosixPath(raw_name.decode("utf-8", errors="strict"))
+                    repository_relative = PurePosixPath(
+                        raw_name.decode("utf-8", errors="strict")
+                    )
+                    try:
+                        relative = (
+                            repository_relative.relative_to(prefix)
+                            if prefix is not None
+                            else repository_relative
+                        )
+                    except ValueError:
+                        continue
                     if self._excluded(relative):
                         continue
-                    source = (path / Path(*relative.parts)).resolve()
+                    source = (git_root / Path(*repository_relative.parts)).resolve()
                     if not source.is_file() or not (source == path or path in source.parents):
                         continue
                     content = source.read_bytes()
@@ -380,7 +511,9 @@ class RepositoryService:
         return buffer.getvalue(), manifest
 
     @staticmethod
-    def _normalize_tar(raw_tar: bytes) -> bytes:
+    def _normalize_tar(
+        raw_tar: bytes, strip_prefix: Optional[PurePosixPath] = None
+    ) -> bytes:
         source = io.BytesIO(raw_tar)
         target = io.BytesIO()
         with tarfile.open(fileobj=source, mode="r:") as incoming:
@@ -389,7 +522,16 @@ class RepositoryService:
                     total = 0
                     for member in incoming.getmembers():
                         path = PurePosixPath(member.name)
-                        if member.isdir() or RepositoryService._excluded(path):
+                        if strip_prefix is not None:
+                            try:
+                                path = path.relative_to(strip_prefix)
+                            except ValueError:
+                                continue
+                        if (
+                            member.isdir()
+                            or str(path) in {"", "."}
+                            or RepositoryService._excluded(path)
+                        ):
                             continue
                         if not member.isfile():
                             continue

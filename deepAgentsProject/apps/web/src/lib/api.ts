@@ -18,6 +18,7 @@ import type {
   Skill,
   ThreadSummary,
   Repository,
+  LocalRepositoryFolderListing,
   CodingWorkspace,
   WorkspaceTreeItem,
   VerificationReport,
@@ -128,6 +129,8 @@ export const api = {
       body: JSON.stringify({ agent_deployment_id: deploymentId, title }),
     }),
   repositories: () => request<{ items: Repository[] }>('/api/v1/repositories'),
+  localRepositoryFolders: (path?: string) =>
+    request<LocalRepositoryFolderListing>(`/api/v1/local-repository-folders${path ? `?path=${encodeURIComponent(path)}` : ''}`),
   createRepository: (body: { name: string; provider: Repository['provider']; canonical_uri: string; default_branch: string }) =>
     request<Repository>('/api/v1/repositories', { method: 'POST', body: JSON.stringify(body) }),
   probeRepository: (id: string) => request<Record<string, unknown>>(`/api/v1/repositories/${id}:probe`, { method: 'POST' }),
