@@ -10,14 +10,17 @@ import {
   Layers3,
   LoaderCircle,
   Plus,
+  RotateCcw,
   Search,
   ShieldCheck,
   Sparkles,
 } from 'lucide-react'
 import { useCallback, useEffect, useRef, useState } from 'react'
 import type { FormEvent } from 'react'
+import { useSearchParams } from 'react-router-dom'
 import { EmptyState, ErrorBanner, LoadingBlock, PageHeader, StatusPill, formatRelative } from '../components/UI'
 import { api } from '../lib/api'
+import { usePlatform } from '../context/PlatformContext'
 import type {
   KnowledgeBase,
   KnowledgeIngestionJob,
@@ -48,9 +51,12 @@ export function KnowledgePage() {
   const [description, setDescription] = useState('')
   const [job, setJob] = useState<KnowledgeIngestionJob | null>(null)
   const [query, setQuery] = useState('')
+  const [topK, setTopK] = useState(8)
   const [searchResult, setSearchResult] = useState<KnowledgeSearchResult | null>(null)
   const [searching, setSearching] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
+  const [searchParams, setSearchParams] = useSearchParams()
+  const { context } = usePlatform()
 
   const loadBases = useCallback(async (preferredId?: string) => {
     const result = await api.knowledgeBases()
@@ -71,7 +77,9 @@ export function KnowledgePage() {
     api.knowledgeBases()
       .then((result) => {
         setBases(result.items)
-        if (result.items[0]) setSelectedId(result.items[0].id)
+        const requestedId = searchParams.get('base')
+        const initial = result.items.find((base) => base.id === requestedId) ?? result.items[0]
+        if (initial) setSelectedId(initial.id)
       })
       .catch((err) => setError(err.message))
       .finally(() => setLoaded(true))
@@ -83,6 +91,8 @@ export function KnowledgePage() {
       return
     }
     setSearchResult(null)
+    const next = new URLSearchParams(searchParams)
+    if (next.get('base') !== selectedId) { next.set('base', selectedId); setSearchParams(next, { replace: true }) }
     loadSelected(selectedId).catch((err) => setError(err.message))
   }, [selectedId, loadSelected])
 
@@ -148,7 +158,7 @@ export function KnowledgePage() {
     setSearching(true)
     setError('')
     try {
-      setSearchResult(await api.searchKnowledge(selectedId, query.trim()))
+      setSearchResult(await api.searchKnowledge(selectedId, query.trim(), topK))
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -176,6 +186,7 @@ export function KnowledgePage() {
       <div className="ingestion-icon">{job.status === 'SUCCEEDED' ? <CheckCircle2 size={18} /> : job.status === 'FAILED' ? <Clock3 size={18} /> : <LoaderCircle className="spin" size={18} />}</div>
       <div><strong>Document ingestion · {job.stage.replaceAll('_', ' ')}</strong><span>{job.status === 'FAILED' ? job.error_message : `${job.chunk_count ?? 0} chunks · attempt ${job.attempts}`}</span></div>
       <StatusPill status={job.status} />
+      {job.status === 'FAILED' && <button className="button secondary" disabled={busy} onClick={async () => { setBusy(true); try { setJob(await api.retryKnowledgeJob(job.id)) } catch (nextError) { setError((nextError as Error).message) } finally { setBusy(false) } }}><RotateCcw size={14} /> Retry</button>}
     </div>}
 
     <div className="knowledge-layout">
@@ -189,7 +200,7 @@ export function KnowledgePage() {
           </button>)}
           {!bases.length && <div className="knowledge-sidebar-empty"><Database size={22} /><span>Create a knowledge base to begin.</span></div>}
         </div>
-        <div className="knowledge-boundary"><ShieldCheck size={15} /><div><strong>Project isolated</strong><span>tenant_demo / project_atlas</span></div></div>
+        <div className="knowledge-boundary"><ShieldCheck size={15} /><div><strong>Project isolated</strong><span>{context ? `${context.tenant.id} / ${context.project.id}` : 'Context unavailable'}</span></div></div>
       </aside>
 
       <div className="knowledge-main">
@@ -200,7 +211,7 @@ export function KnowledgePage() {
               <div><span>Total documents</span><strong>{selected.documents?.length ?? 0}</strong><small>source objects</small></div>
               <div><span>Ready to retrieve</span><strong>{selected.documents?.filter((item) => item.status === 'READY').length ?? 0}</strong><small>ACL-filtered</small></div>
               <div><span>Immutable revisions</span><strong>{selected.revisions?.length ?? 0}</strong><small>publishable snapshots</small></div>
-              <div><span>Storage</span><strong className="storage-value">OSS</strong><small>cn-beijing</small></div>
+              <div><span>Storage</span><strong className="storage-value">{selected.documents?.[0]?.canonical_uri?.split(':')[0]?.toUpperCase() ?? '—'}</strong><small>{selected.documents?.length ? 'Authoritative source objects' : 'No source uploaded'}</small></div>
             </div>
           </section>
 
@@ -211,13 +222,13 @@ export function KnowledgePage() {
               <td><StatusPill status={document.status} /></td>
               <td>{formatBytes(document.size_bytes)}</td>
               <td>{document.indexed_at ? formatRelative(document.indexed_at) : '—'}</td>
-              <td><a className={document.current_version_id ? 'download-link' : 'download-link disabled'} href={document.current_version_id ? `/api/v1/knowledge-documents/${document.id}/download` : undefined}><Download size={14} /> OSS</a></td>
+              <td><a className={document.current_version_id ? 'download-link' : 'download-link disabled'} href={document.current_version_id ? `/api/v1/knowledge-documents/${document.id}/download` : undefined}><Download size={14} /> Download</a></td>
             </tr>)}</tbody></table></div> : <EmptyState icon={FileText} title="No source documents yet" description="Upload PDF, DOCX, Markdown, text, HTML, JSON, or CSV. The worker will parse, chunk, embed, and publish a revision." />}
           </section>
 
           <section className="panel retrieval-lab">
             <div className="panel-heading"><div><h3>Retrieval lab</h3><p>Exercise the same hybrid retriever and citation contract used by knowledge_search</p></div><Sparkles size={18} /></div>
-            <form className="retrieval-form" onSubmit={search}><div className="retrieval-query"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask a question grounded in this knowledge base…" /></div><button className="button primary" disabled={searching || !query.trim()}>{searching ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Retrieve</button></form>
+            <form className="retrieval-form" onSubmit={search}><div className="retrieval-query"><Search size={17} /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Ask a question grounded in this knowledge base…" /></div><label className="top-k-field"><span>Top K</span><input type="number" min={1} max={20} value={topK} onChange={(event) => setTopK(Math.max(1, Math.min(20, Number(event.target.value))))} /></label><button className="button primary" disabled={searching || !query.trim()}>{searching ? <LoaderCircle className="spin" size={15} /> : <Search size={15} />} Retrieve</button></form>
             {searchResult && <div className="retrieval-results">
               <div className="retrieval-summary"><span><strong>{searchResult.hits.length}</strong> evidence chunks</span><span>{searchResult.latency_ms} ms</span><StatusPill status={searchResult.status} /></div>
               {searchResult.hits.map((hit) => <article className="retrieval-hit" key={hit.chunk_id}><div className="citation-badge">{hit.citation_id}</div><div><div className="retrieval-hit-head"><strong>{hit.source.title}</strong><span>{locatorLabel(hit.source.locator)} · score {hit.score.toFixed(3)}</span></div><p>{hit.text}</p><code>{hit.source.canonical_uri}</code></div></article>)}

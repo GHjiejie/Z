@@ -1,15 +1,14 @@
 import {
   Bot,
-  Box,
   CheckCircle2,
   CircleDot,
+  Copy,
   FileText,
   GitBranch,
   Hammer,
   PauseCircle,
   Play,
   Sparkles,
-  TerminalSquare,
   XCircle,
 } from 'lucide-react'
 import type { RuntimeEvent } from '../types'
@@ -20,9 +19,9 @@ function eventMeta(type: string) {
   if (type.startsWith('tool.')) return { icon: Hammer, label: 'Tool', tone: 'amber' }
   if (type.startsWith('subagent.')) return { icon: Bot, label: 'SubAgent', tone: 'cyan' }
   if (type.startsWith('artifact.')) return { icon: FileText, label: 'Artifact', tone: 'green' }
-  if (type.startsWith('interrupt.') || type.includes('approval')) return { icon: PauseCircle, label: 'HITL', tone: 'rose' }
+  if (type.startsWith('interrupt.') || type.includes('approval')) return { icon: PauseCircle, label: 'Approval', tone: 'rose' }
   if (type.startsWith('todo.')) return { icon: CheckCircle2, label: 'Plan', tone: 'blue' }
-  if (type.includes('failed') || type.includes('cancel')) return { icon: XCircle, label: 'Runtime', tone: 'rose' }
+  if (type.includes('failed') || type.includes('cancel')) return { icon: XCircle, label: 'Error', tone: 'rose' }
   if (type.includes('started') || type.includes('resumed')) return { icon: Play, label: 'Runtime', tone: 'green' }
   return { icon: CircleDot, label: 'Runtime', tone: 'slate' }
 }
@@ -43,26 +42,23 @@ function eventSummary(event: RuntimeEvent) {
   return p.message ?? p.reason ?? p.status ?? p.queue ?? ''
 }
 
-export function EventTimeline({ events, compact = false }: { events: RuntimeEvent[]; compact?: boolean }) {
-  return (
-    <div className={`event-timeline ${compact ? 'compact' : ''}`}>
-      {events.map((event) => {
-        const meta = eventMeta(event.type)
-        const Icon = meta.icon
-        const summary = eventSummary(event)
-        return (
-          <div className="event-row" key={event.event_id}>
-            <div className={`event-node tone-${meta.tone}`}><Icon size={14} /></div>
-            <div className="event-copy">
-              <div className="event-heading"><strong>{event.type}</strong><span>{formatRelative(event.occurred_at)}</span></div>
-              {summary && <p>{String(summary)}</p>}
-              {!compact && event.execution_path?.length > 1 && <span className="event-path"><GitBranch size={12} />{event.execution_path.join(' / ')}</span>}
-            </div>
-            <span className="event-sequence">#{event.sequence}</span>
-          </div>
-        )
-      })}
-    </div>
-  )
+export function eventCategory(event: RuntimeEvent) {
+  return eventMeta(event.type).label
 }
 
+export function EventTimeline({ events, compact = false }: { events: RuntimeEvent[]; compact?: boolean }) {
+  return <div className={`event-timeline ${compact ? 'compact' : ''}`}>
+    {events.map((event) => {
+      const meta = eventMeta(event.type)
+      const Icon = meta.icon
+      const summary = eventSummary(event)
+      const body = <>
+        <div className="event-node-wrap"><div className={`event-node tone-${meta.tone}`}><Icon size={14} /></div><span>{meta.label}</span></div>
+        <div className="event-copy"><div className="event-heading"><strong>{event.type}</strong><time title={new Date(event.occurred_at).toLocaleString()} dateTime={event.occurred_at}>{formatRelative(event.occurred_at)}</time></div>{summary && <p>{String(summary)}</p>}{event.execution_path?.length > 1 && <span className="event-path"><GitBranch size={12} />{event.execution_path.join(' / ')}</span>}</div>
+        <span className="event-sequence">#{event.sequence}</span>
+      </>
+      if (compact) return <div className="event-row" key={event.event_id}>{body}</div>
+      return <details className={`event-row event-details ${meta.label === 'Error' ? 'error-event' : ''}`} key={event.event_id} open={meta.label === 'Error'}><summary>{body}</summary><div className="event-payload"><div><span>EVENT ID</span><code>{event.event_id}</code><button aria-label={`Copy event ${event.sequence} JSON`} onClick={() => navigator.clipboard.writeText(JSON.stringify(event, null, 2))}><Copy size={14} /> Copy JSON</button></div><pre>{JSON.stringify(event.payload, null, 2)}</pre></div></details>
+    })}
+  </div>
+}

@@ -6,7 +6,7 @@ import secrets
 from typing import Optional
 
 from fastapi import APIRouter, Depends, Header, Query, Request
-from fastapi.responses import StreamingResponse
+from fastapi.responses import Response, StreamingResponse
 
 from apps.platform_api.dependencies import services, tenant_context
 from packages.application.services import NotFoundError
@@ -19,10 +19,60 @@ from packages.domain.models import (
     TenantContext,
     ThreadCreate,
     TERMINAL_RUN_STATUSES,
+    utc_now,
 )
 
 
 router = APIRouter(prefix="/api/v1")
+
+
+def _display_name(value: str) -> str:
+    return value.replace("-", " ").replace("_", " ").title()
+
+
+@router.get("/context")
+def platform_context(
+    context: TenantContext = Depends(tenant_context), container=Depends(services)
+):
+    """Return the authoritative request scope and capabilities of this deployment.
+
+    The reference platform deliberately reports unavailable product features as
+    unavailable instead of rendering controls that cannot complete an action.
+    """
+    worker_online = bool(
+        container.orchestrator.task and not container.orchestrator.task.done()
+    )
+    return {
+        "user": {
+            "id": context.user_id,
+            "name": _display_name(context.user_id),
+            "role": context.roles[0] if context.roles else "member",
+        },
+        "tenant": {"id": context.tenant_id, "name": _display_name(context.tenant_id)},
+        "project": {"id": context.project_id, "name": _display_name(context.project_id)},
+        "environment": {
+            "id": context.environment_id,
+            "name": _display_name(context.environment_id.removeprefix("env_")),
+        },
+        "runtime": {
+            "status": "healthy" if worker_online else "unavailable",
+            "workers_online": 1 if worker_online else 0,
+            "workers_total": 1,
+            "queue_depth": container.orchestrator.queue.qsize(),
+            "event_lag_ms": None,
+            "updated_at": utc_now(),
+        },
+        "features": {
+            "global_search": True,
+            "notifications": False,
+            "workspace_switching": False,
+            "environment_switching": False,
+            "resource_registration": False,
+            "routing_management": False,
+            "attachments": False,
+            "code_context": False,
+        },
+    }
 
 
 @router.get("/overview")
@@ -63,17 +113,22 @@ def overview(context: TenantContext = Depends(tenant_context), container=Depends
         "usage": usage,
         "recent_runs": recent_runs,
         "runtime": {
-            "workers": 1,
+            "workers": 1
+            if container.orchestrator.task and not container.orchestrator.task.done()
+            else 0,
             "queue_depth": container.orchestrator.queue.qsize(),
-            "event_lag_ms": 18,
-            "status": "healthy",
+            "event_lag_ms": None,
+            "status": "healthy"
+            if container.orchestrator.task and not container.orchestrator.task.done()
+            else "unavailable",
+            "updated_at": utc_now(),
         },
     }
 
 
 def _success_rate(statuses):
     completed = statuses.get("SUCCEEDED", 0) + statuses.get("FAILED", 0)
-    return round(statuses.get("SUCCEEDED", 0) / completed * 100, 1) if completed else 100.0
+    return round(statuses.get("SUCCEEDED", 0) / completed * 100, 1) if completed else None
 
 
 @router.get("/agents")
@@ -286,6 +341,16 @@ async def retry_run(
     return await container.runs.retry(run_id, context)
 
 
+@router.post("/runs/{run_id}/input", status_code=202)
+async def provide_run_input(
+    run_id: str,
+    payload: RunCreate,
+    context: TenantContext = Depends(tenant_context),
+    container=Depends(services),
+):
+    return await container.runs.provide_input(run_id, payload, context)
+
+
 @router.get("/runs/{run_id}/events")
 def list_run_events(
     run_id: str,
@@ -323,7 +388,10 @@ async def stream_run_events(
             else:
                 idle_ticks += 1
                 run = container.db.fetch_one("SELECT status FROM runs WHERE id=?", (run_id,))
-                if run and (run["status"] in TERMINAL_RUN_STATUSES or run["status"] == "WAITING_FOR_APPROVAL"):
+                if run and (
+                    run["status"] in TERMINAL_RUN_STATUSES
+                    or run["status"] in {"WAITING_FOR_APPROVAL", "WAITING_FOR_INPUT"}
+                ):
                     yield f"event: stream.idle\ndata: {{\"status\":\"{run['status']}\"}}\n\n"
                     break
                 if idle_ticks % 40 == 0:
@@ -343,7 +411,38 @@ def list_artifacts(
     context: TenantContext = Depends(tenant_context),
     container=Depends(services),
 ):
-    return {"items": container.runs.artifacts(run_id, context)}
+    items = container.runs.artifacts(run_id, context)
+    return {
+        "items": [
+            {
+                **{key: value for key, value in item.items() if key != "content"},
+                "uri": f"/api/v1/runs/{run_id}/artifacts/{item['id']}",
+            }
+            for item in items
+        ]
+    }
+
+
+@router.get("/runs/{run_id}/artifacts/{artifact_id}")
+def get_artifact(
+    run_id: str,
+    artifact_id: str,
+    context: TenantContext = Depends(tenant_context),
+    container=Depends(services),
+):
+    container.runs.get_run(run_id, context)
+    artifact = container.db.fetch_one(
+        "SELECT * FROM artifacts WHERE id=? AND run_id=?",
+        (artifact_id, run_id),
+    )
+    if not artifact:
+        raise NotFoundError("Artifact not found")
+    filename = artifact["name"].replace('"', "").replace("\n", "")
+    return Response(
+        content=artifact["content"],
+        media_type=artifact["media_type"],
+        headers={"Content-Disposition": f'inline; filename="{filename}"'},
+    )
 
 
 @router.get("/runs/{run_id}/spans")

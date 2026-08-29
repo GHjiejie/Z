@@ -10,10 +10,13 @@ import type {
   KnowledgeUploadPreparation,
   ModelDeployment,
   Overview,
+  PlatformContext,
   Plugin,
   Run,
+  RunArtifact,
   RuntimeEvent,
   Skill,
+  ThreadSummary,
 } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -42,6 +45,7 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  context: () => request<PlatformContext>('/api/v1/context'),
   overview: () => request<Overview>('/api/v1/overview'),
   agents: () => request<{ items: Agent[] }>('/api/v1/agents'),
   agent: (id: string) => request<Agent>(`/api/v1/agents/${id}`),
@@ -102,18 +106,22 @@ export const api = {
       body: JSON.stringify({ etag }),
     }),
   knowledgeJob: (id: string) => request<KnowledgeIngestionJob>(`/api/v1/knowledge-ingestion-jobs/${id}`),
+  retryKnowledgeJob: (id: string) => request<KnowledgeIngestionJob>(`/api/v1/knowledge-ingestion-jobs/${id}:retry`, { method: 'POST' }),
   searchKnowledge: (knowledgeBaseId: string, query: string, topK = 8) =>
     request<KnowledgeSearchResult>('/api/v1/knowledge:search', {
       method: 'POST',
       body: JSON.stringify({ knowledge_base_id: knowledgeBaseId, query, top_k: topK }),
     }),
+  threads: () => request<{ items: ThreadSummary[] }>('/api/v1/threads'),
+  thread: (id: string) => request<ThreadSummary>(`/api/v1/threads/${id}`),
   runs: () => request<{ items: Run[] }>('/api/v1/runs'),
   run: (id: string) => request<Run>(`/api/v1/runs/${id}`),
   runEvents: (id: string, after = 0) =>
     request<{ items: RuntimeEvent[] }>(`/api/v1/runs/${id}/events?after_sequence=${after}`),
-  runArtifacts: (id: string) => request<{ items: Array<Record<string, any>> }>(`/api/v1/runs/${id}/artifacts`),
+  runArtifacts: (id: string) => request<{ items: RunArtifact[] }>(`/api/v1/runs/${id}/artifacts`),
+  runSpans: (id: string) => request<{ items: Array<Record<string, unknown>> }>(`/api/v1/runs/${id}/spans`),
   createThread: (deploymentId: string, title: string) =>
-    request<{ id: string }>('/api/v1/threads', {
+    request<ThreadSummary>('/api/v1/threads', {
       method: 'POST',
       body: JSON.stringify({ agent_deployment_id: deploymentId, title }),
     }),
@@ -124,14 +132,19 @@ export const api = {
       body: JSON.stringify({ input }),
     }),
   cancelRun: (id: string) => request<Run>(`/api/v1/runs/${id}:cancel`, { method: 'POST' }),
+  retryRun: (id: string) => request<Run>(`/api/v1/runs/${id}:retry`, { method: 'POST' }),
+  provideRunInput: (id: string, input: string) => request<Run>(`/api/v1/runs/${id}/input`, {
+    method: 'POST',
+    body: JSON.stringify({ input }),
+  }),
   interrupts: (status?: string) =>
     request<{ items: Interrupt[] }>(`/api/v1/interrupts${status ? `?status=${status}` : ''}`),
-  decide: (interrupt: Interrupt, type: 'approve' | 'edit' | 'reject' | 'respond', message?: string) =>
+  decide: (interrupt: Interrupt, type: 'approve' | 'edit' | 'reject' | 'respond', message?: string, editedArguments?: Record<string, unknown>) =>
     request<Interrupt>(`/api/v1/interrupts/${interrupt.id}/decisions`, {
       method: 'POST',
       headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': String(interrupt.version) },
       body: JSON.stringify({
-        decisions: [{ action_id: interrupt.actions[0].action_id, type, message }],
+        decisions: [{ action_id: interrupt.actions[0].action_id, type, message, edited_arguments: editedArguments }],
       }),
     }),
 }

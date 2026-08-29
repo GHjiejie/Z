@@ -23,6 +23,42 @@ def client_for(tmp_path):
     return TestClient(create_app(str(tmp_path / "platform.db"), seed=True))
 
 
+def create_run_waiting_for_approval(client: TestClient, title: str = "HITL test"):
+    deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
+    thread = client.post(
+        "/api/v1/threads",
+        json={"agent_deployment_id": deployment["id"], "title": title},
+    ).json()
+    created = client.post(
+        f"/api/v1/threads/{thread['id']}/runs",
+        json={"input": "Deploy the build to production and write the release artifact."},
+    ).json()
+    wait_for_status(client, created["id"], {"WAITING_FOR_APPROVAL"})
+    interrupt = client.get("/api/v1/interrupts?status=PENDING").json()["items"][0]
+    return created, interrupt
+
+
+def test_platform_context_reports_authoritative_scope_and_capabilities(tmp_path):
+    with client_for(tmp_path) as client:
+        response = client.get(
+            "/api/v1/context",
+            headers={
+                "X-Tenant-ID": "tenant_review",
+                "X-Project-ID": "project_console",
+                "X-Environment-ID": "env_staging",
+                "X-User-ID": "reviewer_1",
+            },
+        )
+        assert response.status_code == 200
+        context = response.json()
+        assert context["tenant"]["id"] == "tenant_review"
+        assert context["project"]["id"] == "project_console"
+        assert context["environment"]["name"] == "Staging"
+        assert context["user"]["id"] == "reviewer_1"
+        assert context["runtime"]["event_lag_ms"] is None
+        assert context["features"]["notifications"] is False
+
+
 def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
     database_path = str(tmp_path / "platform.db")
     with TestClient(create_app(database_path, seed=True)) as client:
@@ -145,23 +181,22 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
         ).json()["items"]
         assert len(resumed) == 1
         assert resumed[0]["type"] == "run.completed"
+        artifacts = client.get(f"/api/v1/runs/{run['id']}/artifacts").json()["items"]
+        assert artifacts
+        assert "content" not in artifacts[0]
+        assert artifacts[0]["uri"].endswith(artifacts[0]["id"])
+        artifact = client.get(artifacts[0]["uri"])
+        assert artifact.status_code == 200
+        assert artifact.headers["content-type"].startswith("text/markdown")
+        assert "Release recommendation" in artifact.text
 
 
 def test_hitl_checkpoint_decision_and_new_attempt_resume(tmp_path):
     with client_for(tmp_path) as client:
-        deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
-        thread = client.post(
-            "/api/v1/threads",
-            json={"agent_deployment_id": deployment["id"], "title": "HITL test"},
-        ).json()
-        created = client.post(
-            f"/api/v1/threads/{thread['id']}/runs",
-            json={"input": "Deploy the build to production and write the release artifact."},
-        ).json()
-        waiting = wait_for_status(client, created["id"], {"WAITING_FOR_APPROVAL"})
+        created, interrupt = create_run_waiting_for_approval(client)
+        waiting = client.get(f"/api/v1/runs/{created['id']}").json()
         assert waiting["checkpoint"]["stage"] == "awaiting_approval"
 
-        interrupt = client.get("/api/v1/interrupts?status=PENDING").json()["items"][0]
         action = interrupt["actions"][0]
         decision_headers = {"If-Match": str(interrupt["version"]), "Idempotency-Key": "approve-once"}
         payload = {"decisions": [{"action_id": action["action_id"], "type": "approve"}]}
@@ -186,6 +221,72 @@ def test_hitl_checkpoint_decision_and_new_attempt_resume(tmp_path):
         assert "interrupt.resolved" in types
         assert "run.resumed" in types
         assert types[-1] == "run.completed"
+
+
+def test_rejecting_approval_cancels_without_creating_an_attempt(tmp_path):
+    with client_for(tmp_path) as client:
+        created, interrupt = create_run_waiting_for_approval(client, "Reject test")
+        action = interrupt["actions"][0]
+        response = client.post(
+            f"/api/v1/interrupts/{interrupt['id']}/decisions",
+            headers={"If-Match": str(interrupt["version"])},
+            json={
+                "decisions": [
+                    {
+                        "action_id": action["action_id"],
+                        "type": "reject",
+                        "message": "Production window is closed.",
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+        run = client.get(f"/api/v1/runs/{created['id']}").json()
+        assert run["status"] == "CANCELLED"
+        assert run["checkpoint"]["stage"] == "approval_rejected"
+        assert len(run["attempts"]) == 1
+        events = client.get(f"/api/v1/runs/{created['id']}/events").json()["items"]
+        assert events[-1]["type"] == "run.cancelled"
+
+
+def test_requesting_changes_waits_for_input_without_executing_tool(tmp_path):
+    with client_for(tmp_path) as client:
+        created, interrupt = create_run_waiting_for_approval(client, "Changes test")
+        action = interrupt["actions"][0]
+        response = client.post(
+            f"/api/v1/interrupts/{interrupt['id']}/decisions",
+            headers={"If-Match": str(interrupt["version"])},
+            json={
+                "decisions": [
+                    {
+                        "action_id": action["action_id"],
+                        "type": "respond",
+                        "message": "Use the staging environment and request approval again.",
+                    }
+                ]
+            },
+        )
+        assert response.status_code == 200
+        run = client.get(f"/api/v1/runs/{created['id']}").json()
+        assert run["status"] == "WAITING_FOR_INPUT"
+        assert run["checkpoint"]["stage"] == "waiting_for_input"
+        assert len(run["attempts"]) == 1
+        events = client.get(f"/api/v1/runs/{created['id']}/events").json()["items"]
+        assert events[-1]["type"] == "run.waiting_for_input"
+
+        resumed = client.post(
+            f"/api/v1/runs/{created['id']}/input",
+            json={"input": "Prepare a revised read-only recommendation for the staging review."},
+        )
+        assert resumed.status_code == 202
+        finished = wait_for_status(client, created["id"], {"SUCCEEDED"})
+        assert len(finished["attempts"]) == 2
+        assert finished["checkpoint"]["stage"] == "input_received"
+        resumed_events = client.get(
+            f"/api/v1/runs/{created['id']}/events"
+        ).json()["items"]
+        assert "run.input_received" in {event["type"] for event in resumed_events}
+        assert resumed_events[-1]["type"] == "run.completed"
 
 
 def test_tenant_scope_prevents_cross_tenant_access(tmp_path):

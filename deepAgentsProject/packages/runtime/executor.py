@@ -171,10 +171,11 @@ class ReferenceRuntimeExecutor:
                 execution_path=["main", subagent["name"]],
             )
 
+        effective_input = (run.get("metadata") or {}).get("resume_input") or run["input"]
         self.events.append(
             run_id,
             "tool.requested",
-            {"tool_name": "knowledge_search", "arguments": {"query": run["input"][:160]}, "risk_level": "low"},
+            {"tool_name": "knowledge_search", "arguments": {"query": effective_input[:160]}, "risk_level": "low"},
             span_id="span_tool_search",
             parent_span_id="span_main",
         )
@@ -194,7 +195,7 @@ class ReferenceRuntimeExecutor:
         try:
             if self.knowledge_tool:
                 search_result = self.knowledge_tool.invoke(
-                    run["input"], plan, runtime_context, top_k=8
+                    effective_input, plan, runtime_context, top_k=8
                 )
             self.events.append(
                 run_id,
@@ -232,7 +233,7 @@ class ReferenceRuntimeExecutor:
                 parent_span_id="span_main",
             )
 
-        if self._needs_approval(run["input"], plan):
+        if self._needs_approval(effective_input, plan):
             await self._pause_for_approval(run, plan)
             return
 
@@ -404,7 +405,7 @@ class ReferenceRuntimeExecutor:
             output += f" Grounded in {len(retrieval['hits'])} knowledge citations from {', '.join(titles[:3])}."
         content = (
             "# Release recommendation\n\n"
-            f"Request: {run['input']}\n\n"
+            f"Request: {(run.get('metadata') or {}).get('resume_input') or run['input']}\n\n"
             "## Findings\n\n- Dependencies are resolved and version-locked.\n"
             "- High-risk writes are controlled by policy and idempotency keys.\n"
             f"- Human approval: {'granted' if approved else ('rejected' if rejected else 'not required')}.\n"
@@ -458,7 +459,8 @@ class ReferenceRuntimeExecutor:
             span_id="span_model_2",
             parent_span_id="span_main",
         )
-        input_tokens = max(24, len(run["input"]) // 3)
+        effective_input = (run.get("metadata") or {}).get("resume_input") or run["input"]
+        input_tokens = max(24, len(effective_input) // 3)
         output_tokens = max(48, len(output) // 3)
         subagent_calls = 1 if plan.get("subagent_bindings") else 0
         tool_calls = 2 if approved or rejected else 1

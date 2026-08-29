@@ -1,5 +1,30 @@
 export type Json = Record<string, unknown>
 
+export interface PlatformContext {
+  user: { id: string; name: string; role: string }
+  tenant: { id: string; name: string }
+  project: { id: string; name: string }
+  environment: { id: string; name: string }
+  runtime: {
+    status: string
+    workers_online: number
+    workers_total: number
+    queue_depth: number
+    event_lag_ms: number | null
+    updated_at: string
+  }
+  features: {
+    global_search: boolean
+    notifications: boolean
+    workspace_switching: boolean
+    environment_switching: boolean
+    resource_registration: boolean
+    routing_management: boolean
+    attachments: boolean
+    code_context: boolean
+  }
+}
+
 export interface AgentDraft {
   harness_type: 'deepagents' | 'langchain_agent' | 'custom_langgraph'
   harness_profile_revision_id: string
@@ -104,6 +129,29 @@ export interface Run {
   updated_at: string
 }
 
+export interface ThreadSummary {
+  id: string
+  agent_deployment_id: string
+  title: string
+  deployment_name?: string
+  agent_name?: string
+  last_run?: { id: string; status: string; updated_at: string } | null
+  runs?: Run[]
+  created_at: string
+  updated_at: string
+}
+
+export interface RunArtifact {
+  id: string
+  run_id: string
+  name: string
+  media_type: string
+  uri: string
+  content_hash: string
+  size_bytes: number
+  created_at: string
+}
+
 export interface RuntimeEvent {
   event_id: string
   sequence: number
@@ -136,6 +184,7 @@ export interface Interrupt {
   decision?: Record<string, unknown> | null
   expires_at: string
   created_at: string
+  updated_at?: string
 }
 
 export interface ModelDeployment {
@@ -180,10 +229,10 @@ export interface Overview {
   deployments: number
   pending_approvals: number
   run_statuses: Record<string, number>
-  success_rate: number
+  success_rate: number | null
   usage: Usage & { tokens: number }
   recent_runs: Run[]
-  runtime: { workers: number; queue_depth: number; event_lag_ms: number; status: string }
+  runtime: { workers: number; queue_depth: number; event_lag_ms: number | null; status: string; updated_at: string }
 }
 
 export interface KnowledgeDocument {

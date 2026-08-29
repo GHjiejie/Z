@@ -130,6 +130,10 @@ class RunService:
         )
         self.events.append(run_id, "run.created", {"input": payload.input, "plan_id": deployment["resolved_plan_id"]})
         self._set_status(run_id, RunStatus.QUEUED.value)
+        self.db.execute(
+            "UPDATE threads SET updated_at=? WHERE id=?",
+            (now, thread_id),
+        )
         self.events.append(run_id, "run.queued", {"queue": "runtime-worker-standard"})
         result = self.get_run(run_id, context)
         if idempotency_key:
@@ -147,6 +151,61 @@ class RunService:
         if self.orchestrator:
             await self.orchestrator.enqueue(run_id)
         return result
+
+    async def provide_input(
+        self, run_id: str, payload: RunCreate, context: TenantContext
+    ) -> Dict[str, Any]:
+        run = self.get_run(run_id, context)
+        if run["status"] != RunStatus.WAITING_FOR_INPUT.value:
+            raise ConflictError("Only runs waiting for input can be resumed this way")
+        now = utc_now()
+        attempt_number = self.db.fetch_one(
+            "SELECT COALESCE(MAX(attempt_number), 0) AS value FROM run_attempts WHERE run_id=?",
+            (run_id,),
+        )["value"] + 1
+        attempt_id = new_id("att")
+        checkpoint = run.get("checkpoint") or {}
+        checkpoint["stage"] = "input_received"
+        checkpoint.setdefault("responses", []).append(
+            {"input": payload.input, "actor": context.user_id, "received_at": now}
+        )
+        metadata = run.get("metadata") or {}
+        metadata.update(payload.metadata)
+        metadata["resume_input"] = payload.input
+        self.db.execute(
+            """INSERT INTO run_attempts
+               (id, run_id, attempt_number, status, created_at, updated_at)
+               VALUES (?, ?, ?, 'PENDING', ?, ?)""",
+            (attempt_id, run_id, attempt_number, now, now),
+        )
+        self.db.execute(
+            """UPDATE runs SET status='QUEUED', checkpoint_json=?, metadata_json=?,
+               current_attempt_id=?, version=version+1, updated_at=? WHERE id=?""",
+            (
+                self.db.encode(checkpoint),
+                self.db.encode(metadata),
+                attempt_id,
+                now,
+                run_id,
+            ),
+        )
+        self.db.execute(
+            "UPDATE threads SET updated_at=? WHERE id=?",
+            (now, run["thread_id"]),
+        )
+        self.events.append(
+            run_id,
+            "run.input_received",
+            {"actor": context.user_id, "attempt": attempt_number},
+        )
+        self.events.append(
+            run_id,
+            "run.queued",
+            {"reason": "input_received", "attempt": attempt_number},
+        )
+        if self.orchestrator:
+            await self.orchestrator.enqueue(run_id)
+        return self.get_run(run_id, context)
 
     def list_runs(self, context: TenantContext, limit: int = 100) -> List[Dict[str, Any]]:
         runs = self.db.fetch_all(

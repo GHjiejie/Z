@@ -142,7 +142,7 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
     # A production web build can be served by the API process for the local
     # reference deployment. Kubernetes deployments may serve it independently.
     web_dist = root / "apps" / "web" / "dist"
-    if web_dist.exists():
+    if (web_dist / "index.html").is_file() and (web_dist / "assets").is_dir():
         application.mount("/assets", StaticFiles(directory=web_dist / "assets"), name="web-assets")
 
         @application.get("/{spa_path:path}", include_in_schema=False)

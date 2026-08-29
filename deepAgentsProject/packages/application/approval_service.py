@@ -76,24 +76,12 @@ class ApprovalService:
         run = self.db.fetch_one("SELECT * FROM runs WHERE id=?", (interrupt["run_id"],))
         checkpoint = run.get("checkpoint") or {}
         primary = payload.decisions[0].model_dump()
-        checkpoint["stage"] = "approval_resolved"
+        decision_type = primary["type"]
+        checkpoint["stage"] = {
+            "reject": "approval_rejected",
+            "respond": "waiting_for_input",
+        }.get(decision_type, "approval_resolved")
         checkpoint["decision"] = primary
-        attempt_count = self.db.fetch_one(
-            "SELECT COALESCE(MAX(attempt_number), 0) AS value FROM run_attempts WHERE run_id=?",
-            (run["id"],),
-        )["value"]
-        attempt_id = new_id("att")
-        self.db.execute(
-            """INSERT INTO run_attempts
-               (id, run_id, attempt_number, status, created_at, updated_at)
-               VALUES (?, ?, ?, 'PENDING', ?, ?)""",
-            (attempt_id, run["id"], attempt_count + 1, now, now),
-        )
-        self.db.execute(
-            """UPDATE runs SET status='QUEUED', checkpoint_json=?, current_attempt_id=?,
-               version=version+1, updated_at=? WHERE id=?""",
-            (self.db.encode(checkpoint), attempt_id, now, run["id"]),
-        )
         self.events.append(
             run["id"],
             "interrupt.resolved",
@@ -103,9 +91,61 @@ class ApprovalService:
                 "actor": context.user_id,
             },
         )
-        self.events.append(
-            run["id"], "run.queued", {"reason": "approval_resolved", "attempt": attempt_count + 1}
-        )
+
+        should_resume = decision_type in {"approve", "edit"}
+        if should_resume:
+            attempt_count = self.db.fetch_one(
+                "SELECT COALESCE(MAX(attempt_number), 0) AS value FROM run_attempts WHERE run_id=?",
+                (run["id"],),
+            )["value"]
+            attempt_id = new_id("att")
+            self.db.execute(
+                """INSERT INTO run_attempts
+                   (id, run_id, attempt_number, status, created_at, updated_at)
+                   VALUES (?, ?, ?, 'PENDING', ?, ?)""",
+                (attempt_id, run["id"], attempt_count + 1, now, now),
+            )
+            self.db.execute(
+                """UPDATE runs SET status='QUEUED', checkpoint_json=?, current_attempt_id=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (self.db.encode(checkpoint), attempt_id, now, run["id"]),
+            )
+            self.events.append(
+                run["id"],
+                "run.queued",
+                {"reason": "approval_resolved", "attempt": attempt_count + 1},
+            )
+        elif decision_type == "reject":
+            self.db.execute(
+                """UPDATE runs SET status='CANCELLED', checkpoint_json=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (self.db.encode(checkpoint), now, run["id"]),
+            )
+            self.events.append(
+                run["id"],
+                "tool.failed",
+                {
+                    "tool_name": interrupt["actions"][0]["tool_name"],
+                    "reason": primary.get("message") or "Rejected by reviewer",
+                },
+            )
+            self.events.append(
+                run["id"], "run.cancelled", {"reason": "approval_rejected"}
+            )
+        else:
+            self.db.execute(
+                """UPDATE runs SET status='WAITING_FOR_INPUT', checkpoint_json=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (self.db.encode(checkpoint), now, run["id"]),
+            )
+            self.events.append(
+                run["id"],
+                "run.waiting_for_input",
+                {
+                    "reason": "reviewer_requested_changes",
+                    "message": primary.get("message"),
+                },
+            )
         result = self.get_interrupt(interrupt_id, context)
         if idempotency_key:
             self.db.execute(
@@ -119,5 +159,6 @@ class ApprovalService:
                     now,
                 ),
             )
-        await self.orchestrator.enqueue(run["id"])
+        if should_resume:
+            await self.orchestrator.enqueue(run["id"])
         return result
