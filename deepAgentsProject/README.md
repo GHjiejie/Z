@@ -142,6 +142,26 @@ POST /api/v1/knowledge:search
 
 `KNOWLEDGE_EMBEDDING_PROVIDER=hash` 是无需外部凭据的确定性参考实现。生产环境应配置 `openai_compatible` 并通过模型网关提供 Embedding endpoint、模型与维度；这些参数会被锁入 Knowledge Revision。
 
+## 真实对话模型
+
+Playground 通过统一模型适配层调用真实模型，支持 OpenAI-compatible Chat Completions、OpenAI Responses 和 Anthropic Messages 三种流式接口。服务启动时按“进程环境变量 → 显式 `DEEPAGENT_ENV_FILE` → 项目 `.env` → 工作区上级 `.env`”的优先关系解析以下配置，密钥只保留在运行时内存中，不写入数据库、Execution Plan、事件或 Artifact：
+
+```dotenv
+OPENAI_BASE_URL=https://api.example.com/v1
+OPENAI_API_KEY=your-secret-key
+MODEL=your-model-id
+MODEL_API_STYLE=chat_completions
+MODEL_MAX_COMPLETION_TOKENS=4096
+MODEL_REASONING_SPLIT=true
+MODEL_REASONING_SUMMARY=auto
+MODEL_ANTHROPIC_THINKING_MODE=enabled
+MODEL_ANTHROPIC_THINKING_BUDGET_TOKENS=2048
+```
+
+`MODEL_API_STYLE` 可设为 `chat_completions`、`responses` 或 `anthropic_messages`。标准 Anthropic 地址会自动使用 `x-api-key`，兼容网关默认使用 Bearer；特殊网关可通过 `MODEL_AUTH_STYLE=bearer|anthropic` 显式覆盖。完整参数见 `.env.example`。
+
+每个会话会把同一 Thread 中最近的成功轮次、当前 Agent system prompt、锁定的 Skill 指令和可用的 Knowledge 引用一起发送给模型。适配层把 `reasoning_details` / `reasoning_content`、Responses reasoning 事件和 Anthropic `thinking_delta` 统一映射为 `model.reasoning.started`、`model.reasoning.delta`、`model.reasoning.completed`，普通回答映射为 `model.delta`。Playground 会实时 Markdown 渲染思考面板和最终回答，完整原始事件仍可在 Live Execution 中查看。供应商返回的 token 使用量会写入 Usage Ledger。正式运行缺少模型配置时会拒绝启动，不会静默回退到固定模拟回复。
+
 ## 当前边界
 
-本实现交付文档定义的 Phase 1 核心运行骨架并包含可运行的 Knowledge/RAG 参考链路及阿里云 OSS 生产适配。Kubernetes Sandbox、真实 MCP Session、外部模型路由、PostgreSQL/pgvector 大规模索引和 Preview/Beta Dynamic/Async SubAgent 保留在后续阶段；对应领域边界已预留，不会用不安全的本机 `subprocess` 或伪造的 SDK 调用冒充生产实现。
+本实现交付文档定义的 Phase 1 核心运行骨架，包含真实 OpenAI-compatible 对话模型、可运行的 Knowledge/RAG 参考链路及阿里云 OSS 生产适配。Kubernetes Sandbox、真实 MCP Session、PostgreSQL/pgvector 大规模索引和 Preview/Beta Dynamic/Async SubAgent 保留在后续阶段；对应领域边界已预留，不会用不安全的本机 `subprocess` 冒充生产实现。

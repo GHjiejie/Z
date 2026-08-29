@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import json
 import secrets
-from typing import Optional
+from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import Response, StreamingResponse
@@ -367,6 +367,7 @@ async def stream_run_events(
     run_id: str,
     request: Request,
     after_sequence: int = Query(default=0, ge=0),
+    channel: Literal["typed", "all"] = Query(default="typed"),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
     context: TenantContext = Depends(tenant_context),
     container=Depends(services),
@@ -384,7 +385,8 @@ async def stream_run_events(
                 for event in events:
                     cursor = event["sequence"]
                     payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
-                    yield f"id: {cursor}\nevent: {event['type']}\ndata: {payload}\n\n"
+                    event_name = "runtime.event" if channel == "all" else event["type"]
+                    yield f"id: {cursor}\nevent: {event_name}\ndata: {payload}\n\n"
             else:
                 idle_ticks += 1
                 run = container.db.fetch_one("SELECT status FROM runs WHERE id=?", (run_id,))

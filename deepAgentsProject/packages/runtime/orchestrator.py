@@ -9,17 +9,24 @@ from packages.knowledge.service import KnowledgeService
 from packages.persistence import Database
 from packages.runtime.event_emitter import EventEmitter
 from packages.runtime.executor import ReferenceRuntimeExecutor
+from packages.runtime.model_gateway import ModelGateway
 
 
 class RunOrchestrator:
     def __init__(
-        self, db: Database, events: EventEmitter, knowledge: Optional[KnowledgeService] = None
+        self,
+        db: Database,
+        events: EventEmitter,
+        knowledge: Optional[KnowledgeService],
+        model_gateway: ModelGateway,
     ):
         self.db = db
         self.events = events
         self.queue: asyncio.Queue[str] = asyncio.Queue()
-        self.worker_id = f"worker_reference_{secrets.token_hex(3)}"
-        self.executor = ReferenceRuntimeExecutor(db, events, self.worker_id, knowledge)
+        self.worker_id = f"worker_model_{secrets.token_hex(3)}"
+        self.executor = ReferenceRuntimeExecutor(
+            db, events, self.worker_id, knowledge, model_gateway
+        )
         self.task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
@@ -61,8 +68,20 @@ class RunOrchestrator:
                     )
                     self.events.append(
                         run_id,
+                        "graph.failed",
+                        {
+                            "graph_id": run["current_attempt_id"],
+                            "status": "failed",
+                            "code": "MODEL_RUNTIME_ERROR",
+                            "message": str(exc),
+                        },
+                        span_id="span_main",
+                        execution_path=["main"],
+                    )
+                    self.events.append(
+                        run_id,
                         "run.failed",
-                        {"code": "REFERENCE_WORKER_ERROR", "message": str(exc)},
+                        {"code": "MODEL_RUNTIME_ERROR", "message": str(exc)},
                     )
             finally:
                 self.queue.task_done()

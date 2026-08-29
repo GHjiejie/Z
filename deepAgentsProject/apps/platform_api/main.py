@@ -21,6 +21,7 @@ from packages.application.services import (
     seed_reference_data,
 )
 from packages.compiler import AgentPlanCompiler
+from packages.config import load_environment
 from packages.knowledge.embedding import create_embedding_provider
 from packages.knowledge.errors import (
     KnowledgeConflictError,
@@ -33,17 +34,26 @@ from packages.persistence import Database
 from packages.plugins import PluginLoader, SkillRegistry
 from packages.runtime import RunOrchestrator, RunService
 from packages.runtime.event_emitter import EventEmitter
+from packages.runtime.model_gateway import ModelGateway, OpenAICompatibleModelGateway
 
 
 logger = logging.getLogger(__name__)
 
 
-def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
+def create_app(
+    database_path: str | None = None,
+    seed: bool = True,
+    model_gateway: ModelGateway | None = None,
+    load_env: bool = True,
+) -> FastAPI:
     root = Path(__file__).resolve().parents[2]
-    db_path = database_path or os.getenv("DEEPAGENT_DB_PATH", str(root / "data" / "deepagent.db"))
 
     @asynccontextmanager
     async def lifespan(application: FastAPI):
+        loaded_environment_files = load_environment(root) if load_env else []
+        db_path = database_path or os.getenv(
+            "DEEPAGENT_DB_PATH", str(root / "data" / "deepagent.db")
+        )
         db = Database(db_path)
         db.initialize()
         plugin_roots = [root / "builtin_plugins"]
@@ -66,7 +76,8 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
         object_storage = create_object_storage(root / "data" / "knowledge_objects")
         knowledge = KnowledgeService(db, object_storage, create_embedding_provider())
         events = EventEmitter(db)
-        orchestrator = RunOrchestrator(db, events, knowledge)
+        active_model_gateway = model_gateway or OpenAICompatibleModelGateway.from_environment()
+        orchestrator = RunOrchestrator(db, events, knowledge, active_model_gateway)
         run_service = RunService(db, events, orchestrator)
         approvals = ApprovalService(db, events, orchestrator)
         application.state.services = SimpleNamespace(
@@ -77,6 +88,8 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
             plugin_load_report=plugin_report,
             knowledge=knowledge,
             events=events,
+            model_gateway=active_model_gateway,
+            loaded_environment_files=loaded_environment_files,
             orchestrator=orchestrator,
             agents=AgentService(db, compiler),
             runs=run_service,
@@ -127,6 +140,7 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
     @application.get("/health")
     async def health(request: Request):
         services = request.app.state.services
+        model_identity = services.model_gateway.identity()
         return {
             "status": "healthy",
             "service": "platform-api",
@@ -134,6 +148,12 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
             "queue_depth": services.orchestrator.queue.qsize(),
             "plugins_loaded": services.plugin_load_report.plugin_count,
             "skills_loaded": services.plugin_load_report.skill_count,
+            "model": {
+                "configured": True,
+                "provider": model_identity["provider"],
+                "name": model_identity["model"],
+                "route": model_identity["route"],
+            },
         }
 
     application.include_router(native_router)

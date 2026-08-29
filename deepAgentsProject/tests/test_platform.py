@@ -5,6 +5,16 @@ import time
 from fastapi.testclient import TestClient
 
 from apps.platform_api.main import create_app
+from packages.runtime.model_gateway import DeterministicModelGateway
+
+
+class RecordingModelGateway(DeterministicModelGateway):
+    def __init__(self):
+        self.calls = []
+
+    async def complete(self, messages, on_delta=None):
+        self.calls.append(messages)
+        return await super().complete(messages, on_delta)
 
 
 def wait_for_status(client: TestClient, run_id: str, expected: set[str], timeout: float = 4.0):
@@ -20,7 +30,14 @@ def wait_for_status(client: TestClient, run_id: str, expected: set[str], timeout
 
 
 def client_for(tmp_path):
-    return TestClient(create_app(str(tmp_path / "platform.db"), seed=True))
+    return TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            load_env=False,
+        )
+    )
 
 
 def create_run_waiting_for_approval(client: TestClient, title: str = "HITL test"):
@@ -61,7 +78,14 @@ def test_platform_context_reports_authoritative_scope_and_capabilities(tmp_path)
 
 def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
     database_path = str(tmp_path / "platform.db")
-    with TestClient(create_app(database_path, seed=True)) as client:
+    with TestClient(
+        create_app(
+            database_path,
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            load_env=False,
+        )
+    ) as client:
         health = client.get("/health").json()
         assert health["plugins_loaded"] == 1
         assert health["skills_loaded"] == 3
@@ -86,7 +110,14 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
         assert all(len(skill["artifact_hash"]) == 64 for skill in pinned_skills)
         assert all(skill["instructions"].startswith("# ") for skill in pinned_skills)
 
-    with TestClient(create_app(database_path, seed=True)) as client:
+    with TestClient(
+        create_app(
+            database_path,
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            load_env=False,
+        )
+    ) as client:
         assert len(client.get("/api/v1/plugins").json()["items"]) == 1
         assert len(client.get("/api/v1/skills").json()["items"]) == 3
 
@@ -165,10 +196,25 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
         assert first.json()["id"] == second.json()["id"]
 
         run = wait_for_status(client, first.json()["id"], {"SUCCEEDED"})
-        assert run["usage"]["model_calls"] == 2
+        assert run["usage"]["model_calls"] == 1
         events = client.get(f"/api/v1/runs/{run['id']}/events").json()["items"]
         assert [event["sequence"] for event in events] == list(range(1, len(events) + 1))
-        assert {"model.started", "tool.completed", "subagent.completed", "artifact.created", "run.completed"}.issubset(
+        assert {
+            "graph.started",
+            "graph.node.started",
+            "graph.node.completed",
+            "graph.subgraph.started",
+            "graph.subgraph.completed",
+            "model.started",
+            "model.reasoning.started",
+            "model.reasoning.delta",
+            "model.reasoning.completed",
+            "tool.completed",
+            "subagent.completed",
+            "artifact.created",
+            "graph.completed",
+            "run.completed",
+        }.issubset(
             {event["type"] for event in events}
         )
         loaded_skills = [event for event in events if event["type"] == "skill.loaded"]
@@ -176,11 +222,26 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
             "task-planning",
             "release-safety",
         }
+        event_types = [event["type"] for event in events]
+        assert event_types.index("model.reasoning.started") < event_types.index("model.reasoning.delta")
+        assert event_types.index("model.reasoning.delta") < event_types.index("model.reasoning.completed")
+        assert event_types.index("model.reasoning.completed") < event_types.index("model.completed")
+        reasoning_completed = next(
+            event for event in events if event["type"] == "model.reasoning.completed"
+        )
+        assert reasoning_completed["payload"]["reasoning"]
         resumed = client.get(
             f"/api/v1/runs/{run['id']}/events?after_sequence={events[-2]['sequence']}"
         ).json()["items"]
         assert len(resumed) == 1
         assert resumed[0]["type"] == "run.completed"
+        unified_stream = client.get(
+            f"/api/v1/runs/{run['id']}/stream?channel=all"
+        )
+        assert unified_stream.status_code == 200
+        assert unified_stream.text.count("event: runtime.event") == len(events)
+        assert '"type":"run.completed"' in unified_stream.text
+        assert "event: stream.idle" in unified_stream.text
         artifacts = client.get(f"/api/v1/runs/{run['id']}/artifacts").json()["items"]
         assert artifacts
         assert "content" not in artifacts[0]
@@ -188,7 +249,46 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
         artifact = client.get(artifacts[0]["uri"])
         assert artifact.status_code == 200
         assert artifact.headers["content-type"].startswith("text/markdown")
-        assert "Release recommendation" in artifact.text
+        assert "Agent response" in artifact.text
+
+
+def test_second_run_sends_prior_successful_turns_to_model(tmp_path):
+    gateway = RecordingModelGateway()
+    with TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=gateway,
+            load_env=False,
+        )
+    ) as client:
+        deployment = client.get("/api/v1/agent-deployments").json()["items"][0]
+        thread = client.post(
+            "/api/v1/threads",
+            json={"agent_deployment_id": deployment["id"], "title": "History test"},
+        ).json()
+        first = client.post(
+            f"/api/v1/threads/{thread['id']}/runs",
+            headers={"Idempotency-Key": "history-one"},
+            json={"input": "Remember that the release codename is Aurora."},
+        ).json()
+        wait_for_status(client, first["id"], {"SUCCEEDED"})
+        second = client.post(
+            f"/api/v1/threads/{thread['id']}/runs",
+            headers={"Idempotency-Key": "history-two"},
+            json={"input": "What was the codename?"},
+        ).json()
+        wait_for_status(client, second["id"], {"SUCCEEDED"})
+
+    assert len(gateway.calls) == 2
+    assert [message["role"] for message in gateway.calls[1]] == [
+        "system",
+        "user",
+        "assistant",
+        "user",
+    ]
+    assert gateway.calls[1][1]["content"] == "Remember that the release codename is Aurora."
+    assert gateway.calls[1][-1]["content"] == "What was the codename?"
 
 
 def test_hitl_checkpoint_decision_and_new_attempt_resume(tmp_path):
@@ -219,6 +319,8 @@ def test_hitl_checkpoint_decision_and_new_attempt_resume(tmp_path):
         types = [event["type"] for event in events]
         assert "interrupt.created" in types
         assert "interrupt.resolved" in types
+        assert "graph.paused" in types
+        assert "graph.resumed" in types
         assert "run.resumed" in types
         assert types[-1] == "run.completed"
 

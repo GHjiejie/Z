@@ -5,10 +5,18 @@ import time
 from fastapi.testclient import TestClient
 
 from apps.platform_api.main import create_app
+from packages.runtime.model_gateway import DeterministicModelGateway
 
 
 def client_for(tmp_path):
-    return TestClient(create_app(str(tmp_path / "platform.db"), seed=True))
+    return TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            load_env=False,
+        )
+    )
 
 
 def wait_for_job(client: TestClient, job_id: str, timeout: float = 5.0):

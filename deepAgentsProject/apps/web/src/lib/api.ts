@@ -150,5 +150,5 @@ export const api = {
 }
 
 export function streamUrl(runId: string, afterSequence = 0) {
-  return `${API_BASE}/api/v1/runs/${runId}/stream?after_sequence=${afterSequence}`
+  return `${API_BASE}/api/v1/runs/${runId}/stream?after_sequence=${afterSequence}&channel=all`
 }

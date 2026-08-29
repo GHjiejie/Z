@@ -130,6 +130,18 @@ class ApprovalService:
                 },
             )
             self.events.append(
+                run["id"],
+                "graph.cancelled",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "status": "cancelled",
+                    "reason": "approval_rejected",
+                    "actor": context.user_id,
+                },
+                span_id="span_main",
+                execution_path=["main"],
+            )
+            self.events.append(
                 run["id"], "run.cancelled", {"reason": "approval_rejected"}
             )
         else:
@@ -137,6 +149,19 @@ class ApprovalService:
                 """UPDATE runs SET status='WAITING_FOR_INPUT', checkpoint_json=?,
                    version=version+1, updated_at=? WHERE id=?""",
                 (self.db.encode(checkpoint), now, run["id"]),
+            )
+            self.events.append(
+                run["id"],
+                "graph.paused",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "status": "waiting_for_input",
+                    "checkpoint_id": interrupt["checkpoint_id"],
+                    "reason": "reviewer_requested_changes",
+                    "actor": context.user_id,
+                },
+                span_id="span_main",
+                execution_path=["main", "write_artifact"],
             )
             self.events.append(
                 run["id"],

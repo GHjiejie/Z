@@ -267,6 +267,17 @@ class RunService:
             "UPDATE run_attempts SET status='CANCELLED', updated_at=? WHERE id=?",
             (utc_now(), run["current_attempt_id"]),
         )
+        self.events.append(
+            run_id,
+            "graph.cancelled",
+            {
+                "graph_id": run["current_attempt_id"],
+                "status": "cancelled",
+                "requested_by": context.user_id,
+            },
+            span_id="span_main",
+            execution_path=["main"],
+        )
         self.events.append(run_id, "run.cancelled", {})
         return self.get_run(run_id, context)
 
