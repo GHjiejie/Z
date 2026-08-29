@@ -137,17 +137,22 @@ export function CodingWorkbenchPage() {
   const refreshRun = async (runId: string) => {
     const detail = await api.run(runId)
     setRun(detail)
+    const nextWorkspace = await api.threadWorkspace(detail.thread_id)
+    setWorkspace(nextWorkspace)
+    const treeRequest = nextWorkspace.sandbox?.status === 'ACTIVE'
+      ? api.workspaceTree(runId).catch(() => null)
+      : Promise.resolve(null)
     const [eventResult, artifactResult, treeResult, diffResult, verificationResult, interrupts] = await Promise.all([
       api.runEvents(runId),
       api.runArtifacts(runId),
-      api.workspaceTree(runId).catch(() => null),
+      treeRequest,
       api.runDiff(runId).catch(() => null),
       api.runVerification(runId).catch(() => null),
       api.interrupts('PENDING'),
     ])
     setEvents(eventResult.items)
     setArtifacts(artifactResult.items)
-    if (treeResult) setTree(treeResult.items)
+    setTree(treeResult?.items ?? [])
     if (diffResult && 'id' in diffResult) setDiff(diffResult)
     if (verificationResult) setVerification(verificationResult)
     setInterrupt(interrupts.items.find((item) => item.run_id === runId) ?? null)
@@ -223,7 +228,7 @@ export function CodingWorkbenchPage() {
     } catch (nextError) { setError((nextError as Error).message) }
   }
 
-  const commands = useMemo(() => events.filter((event) => event.type === 'sandbox.command.completed' || event.type === 'sandbox.command.failed'), [events])
+  const commands = useMemo(() => events.filter((event) => ['sandbox.command.completed', 'sandbox.command.failed', 'sandbox.command.denied'].includes(event.type)), [events])
   const patchArtifact = artifacts.find((artifact) => artifact.name === 'changes.patch')
   const changedPaths = new Set(diff?.changed_files.map((item) => `/workspace/repo/${item.path}`) ?? [])
 
@@ -254,7 +259,7 @@ export function CodingWorkbenchPage() {
         {tab === 'code' && <div className="code-view"><div className="code-view-path">{selectedPath || 'Select a file'}</div><pre>{fileContent || 'Choose a text file from the repository tree.'}</pre></div>}
         {tab === 'diff' && <DiffView patch={diff?.patch ?? ''} split={splitDiff} changeSet={diff} />}
         {tab === 'verification' && <div className="verification-view"><div className="verification-summary"><StatusPill status={verification?.status ?? 'PENDING'} /><span>{verification?.summary.passed ?? 0} passed · {verification?.summary.failed ?? 0} failed</span></div>{verification?.checks.map((check) => <article key={check.id}><div>{check.status === 'passed' ? <CheckCircle2 size={15} /> : <ShieldAlert size={15} />}<code>{check.command}</code><StatusPill status={check.status} /></div><pre>{check.output_preview || `exit ${check.exit_code}`}</pre></article>) ?? <div className="center-empty">Verification has not run yet.</div>}</div>}
-        {tab === 'commands' && <div className="command-view">{commands.map((event) => <article key={event.event_id}><div><TerminalSquare size={14} /><code>{String(event.payload.command_id ?? '')}</code><StatusPill status={event.type.endsWith('failed') ? 'FAILED' : 'SUCCEEDED'} /></div><span>exit {String(event.payload.exit_code ?? '—')} · {String(event.payload.duration_ms ?? '—')} ms</span></article>)}{!commands.length && <div className="center-empty">Sandbox command evidence will appear here.</div>}</div>}
+        {tab === 'commands' && <div className="command-view">{commands.map((event) => <article key={event.event_id}><div><TerminalSquare size={14} /><code>{String(event.payload.command_id ?? '')}</code><StatusPill status={event.type.endsWith('denied') ? 'DENIED' : event.type.endsWith('failed') ? 'FAILED' : 'SUCCEEDED'} /></div><span>exit {String(event.payload.exit_code ?? '—')} · {String(event.payload.duration_ms ?? '—')} ms</span></article>)}{!commands.length && <div className="center-empty">Sandbox command evidence will appear here.</div>}</div>}
       </section>
 
       <aside className="coding-agent-pane panel">

@@ -397,7 +397,7 @@ class DockerSandboxProvider:
             initialized = backend.execute(
                 "git init -q && git config user.name 'DeepAgent Workspace' "
                 "&& git config user.email 'workspace@deepagent.invalid' "
-                "&& git add -A && git commit -q -m 'Repository snapshot'"
+                "&& git add -A && git commit -q --allow-empty -m 'Repository snapshot'"
             )
             if initialized.exit_code:
                 raise SandboxUnavailableError(

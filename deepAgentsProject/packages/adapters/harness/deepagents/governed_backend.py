@@ -4,9 +4,10 @@ import hashlib
 import time
 from typing import Any, Optional
 
-from deepagents.backends.protocol import BackendProtocol, SandboxBackendProtocol
+from deepagents.backends.protocol import BackendProtocol, ExecuteResponse, SandboxBackendProtocol
 
 from packages.application.services import new_id
+from packages.coding.errors import SandboxPolicyError
 from packages.coding.redaction import redact_text
 from packages.domain.models import utc_now
 from packages.persistence import Database
@@ -151,8 +152,53 @@ class GovernedSandboxBackend(SandboxBackendProtocol):
             )
 
     def execute(self, command: str, *, timeout: int | None = None):
-        self.policy.authorize_command(command)
+        try:
+            self.policy.authorize_command(command)
+        except SandboxPolicyError as exc:
+            return self._deny_command(command, exc)
         return self._execute_audited(command, timeout=timeout, actor="agent")
+
+    def _deny_command(self, command: str, error: SandboxPolicyError) -> ExecuteResponse:
+        """Audit a policy rejection and return it to the agent as a recoverable tool result."""
+        command_id = new_id("cmd")
+        command_hash = hashlib.sha256(command.encode()).hexdigest()
+        preview = redact_text(command)[:300]
+        message = redact_text(str(error))[:500]
+        now = utc_now()
+        self.db.execute(
+            """INSERT INTO sandbox_commands
+               (id, tenant_id, project_id, run_id, workspace_id, command_hash,
+                command_preview, working_directory, status, exit_code, duration_ms,
+                resource_usage_json, created_at, completed_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'DENIED', 126, 0, '{}', ?, ?)""",
+            (
+                command_id,
+                self.run["tenant_id"],
+                self.run["project_id"],
+                self.run["id"],
+                self.workspace["id"],
+                command_hash,
+                preview,
+                self.policy.workspace_root,
+                now,
+                now,
+            ),
+        )
+        self._emit(
+            "sandbox.command.denied",
+            {
+                "command_id": command_id,
+                "command_hash": command_hash,
+                "preview": preview,
+                "actor": "agent",
+                "message": message,
+                "exit_code": 126,
+            },
+        )
+        return ExecuteResponse(
+            output=f"Command was not executed: {message}",
+            exit_code=126,
+        )
 
     def execute_platform(self, command: str, *, timeout: int | None = None):
         """Execute a platform-authored maintenance command with full auditing.

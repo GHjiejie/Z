@@ -5,6 +5,7 @@ import subprocess
 import tarfile
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi.testclient import TestClient
 from langchain_core.language_models.fake_chat_models import FakeMessagesListChatModel
@@ -12,6 +13,7 @@ from langchain_core.messages import AIMessage
 
 from apps.platform_api.main import create_app
 from deepagents.backends.protocol import ExecuteResponse
+from packages.coding.changeset import VerificationService
 from packages.persistence import Database
 from packages.runtime.model_gateway import DeterministicModelGateway
 from packages.sandbox.docker_provider import DockerSandboxProvider
@@ -68,6 +70,21 @@ def _wait_event(
                 return item
         time.sleep(0.05)
     raise AssertionError(f"run {run_id} did not emit {event_type}")
+
+
+def test_verification_auto_discovers_standalone_python_sources():
+    class PythonWorkspace:
+        def execute(self, command: str, *, timeout: int | None = None):
+            if command == "find . -type f -name '*.py' -print -quit":
+                return ExecuteResponse(output="./simple_agent.py\n", exit_code=0)
+            return ExecuteResponse(output="", exit_code=1)
+
+        def download_files(self, paths: list[str]):
+            return [SimpleNamespace(error="not found", content=None)]
+
+    assert VerificationService._discover(PythonWorkspace()) == [
+        "PYTHONPYCACHEPREFIX=/tmp/deepagent-pycache python -m compileall -q ."
+    ]
 
 
 def _coding_draft() -> dict:
@@ -270,6 +287,17 @@ def test_real_deepagents_loop_builds_audited_changeset(tmp_path):
                 content="",
                 tool_calls=[
                     {
+                        "name": "execute",
+                        "args": {"command": "ls -la /workspace/repo/.git"},
+                        "id": "call-denied-command",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
                         "name": "write_file",
                         "args": {
                             "file_path": "/workspace/repo/coding-agent-test.txt",
@@ -348,11 +376,17 @@ def test_real_deepagents_loop_builds_audited_changeset(tmp_path):
             "workspace.ready",
             "file.changed",
             "tool.requested",
+            "sandbox.command.denied",
             "verification.completed",
             "changeset.created",
             "workspace.snapshot.created",
             "run.completed",
         }.issubset(event_types)
+        denied = client.app.state.services.db.fetch_one(
+            "SELECT * FROM sandbox_commands WHERE run_id=? AND status='DENIED'",
+            (run["id"],),
+        )
+        assert denied["exit_code"] == 126
         artifacts = client.get(f"/api/v1/runs/{run['id']}/artifacts").json()["items"]
         assert {
             "changes.patch",

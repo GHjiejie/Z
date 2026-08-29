@@ -128,6 +128,13 @@ class VerificationService:
         commands = []
         if backend.execute("test -f pyproject.toml -a -d tests").exit_code == 0:
             commands.append("python -m pytest -q")
+        python_source = backend.execute(
+            "find . -type f -name '*.py' -print -quit"
+        )
+        if python_source.exit_code == 0 and python_source.output.strip():
+            commands.append(
+                "PYTHONPYCACHEPREFIX=/tmp/deepagent-pycache python -m compileall -q ."
+            )
         package = backend.download_files(["/workspace/repo/package.json"])[0]
         package_content = getattr(package, "content", None)
         if not getattr(package, "error", None) and package_content:

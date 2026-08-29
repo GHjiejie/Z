@@ -65,17 +65,18 @@ def test_redaction_removes_common_credentials():
     assert redacted.count("[REDACTED]") == 4
 
 
-def _source_archive() -> bytes:
+def _source_archive(*, empty: bool = False) -> bytes:
     target = io.BytesIO()
     with gzip.GzipFile(fileobj=target, mode="wb", mtime=0) as zipped:
         with tarfile.open(fileobj=zipped, mode="w") as archive:
-            content = b"sandbox fixture\n"
-            info = tarfile.TarInfo("README.md")
-            info.size = len(content)
-            info.mode = 0o644
-            info.uid = 10001
-            info.gid = 10001
-            archive.addfile(info, io.BytesIO(content))
+            if not empty:
+                content = b"sandbox fixture\n"
+                info = tarfile.TarInfo("README.md")
+                info.size = len(content)
+                info.mode = 0o644
+                info.uid = 10001
+                info.gid = 10001
+                archive.addfile(info, io.BytesIO(content))
     return target.getvalue()
 
 
@@ -89,7 +90,7 @@ async def test_docker_sandbox_is_non_root_secret_free_offline_and_bounded(monkey
     if not await provider.available():
         pytest.skip("Docker daemon is unavailable")
     monkeypatch.setenv("DEEPAGENT_HOST_SECRET", "must-not-enter-sandbox")
-    archive = _source_archive()
+    archive = _source_archive(empty=True)
     profile = {
         "provider": "docker",
         "image": "deepagent/coding-runtime:0.1.0",
@@ -127,6 +128,9 @@ async def test_docker_sandbox_is_non_root_secret_free_offline_and_bounded(monkey
         identity = result.backend.execute("id -u && id -g")
         assert identity.exit_code == 0
         assert identity.output.splitlines() == ["10001", "10001"]
+        initial_commit = result.backend.execute("git log -1 --pretty=%s")
+        assert initial_commit.exit_code == 0
+        assert initial_commit.output == "Repository snapshot\n"
         assert result.backend.execute("printenv DEEPAGENT_HOST_SECRET").exit_code != 0
         assert result.backend.execute("test ! -e /var/run/docker.sock").exit_code == 0
         assert result.backend.execute("test ! -e /Users").exit_code == 0

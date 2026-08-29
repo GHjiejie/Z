@@ -6,6 +6,8 @@ __pycache__/
 data/*.db
 data/*.db-*
 data/knowledge_objects/
+data/repository_snapshots/
+data/workspace_snapshots/
 apps/web/node_modules/
 apps/web/dist/
 apps/web/*.tsbuildinfo
