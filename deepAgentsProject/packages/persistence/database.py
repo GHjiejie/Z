@@ -61,15 +61,106 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS repositories (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  canonical_uri TEXT NOT NULL,
+  default_branch TEXT NOT NULL,
+  credential_ref TEXT,
+  access_policy_revision_id TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(tenant_id, project_id, name)
+);
+CREATE INDEX IF NOT EXISTS idx_repositories_scope
+  ON repositories(tenant_id, project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS repository_snapshots (
+  id TEXT PRIMARY KEY,
+  repository_id TEXT NOT NULL REFERENCES repositories(id),
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  requested_ref TEXT NOT NULL,
+  resolved_commit_sha TEXT NOT NULL,
+  source_mode TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  archive_path TEXT NOT NULL,
+  archive_sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  file_count INTEGER NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(repository_id, resolved_commit_sha, source_mode, manifest_hash)
+);
+CREATE INDEX IF NOT EXISTS idx_repository_snapshots_scope
+  ON repository_snapshots(tenant_id, project_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS threads (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
   project_id TEXT NOT NULL,
   agent_deployment_id TEXT NOT NULL REFERENCES agent_deployments(id),
+  repository_id TEXT REFERENCES repositories(id),
+  repository_snapshot_id TEXT REFERENCES repository_snapshots(id),
   title TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sandbox_instances (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  provider TEXT NOT NULL,
+  external_id TEXT,
+  profile_json TEXT NOT NULL,
+  provider_metadata_json TEXT NOT NULL DEFAULT '{}',
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_sandbox_instances_scope
+  ON sandbox_instances(tenant_id, project_id, status, expires_at);
+
+CREATE TABLE IF NOT EXISTS coding_workspaces (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  thread_id TEXT NOT NULL UNIQUE REFERENCES threads(id),
+  repository_snapshot_id TEXT NOT NULL REFERENCES repository_snapshots(id),
+  sandbox_instance_id TEXT REFERENCES sandbox_instances(id),
+  lifecycle TEXT NOT NULL,
+  workspace_generation INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL,
+  last_checkpoint_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  expires_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_coding_workspaces_scope
+  ON coding_workspaces(tenant_id, project_id, status, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS workspace_snapshots (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+  base_commit_sha TEXT NOT NULL,
+  workspace_generation INTEGER NOT NULL,
+  plan_hash TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  archive_path TEXT NOT NULL,
+  archive_sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_snapshots_workspace
+  ON workspace_snapshots(workspace_id, workspace_generation DESC, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
@@ -86,6 +177,8 @@ CREATE TABLE IF NOT EXISTS runs (
   principal_roles_json TEXT NOT NULL DEFAULT '[]',
   principal_environment_id TEXT NOT NULL DEFAULT 'env_development',
   principal_verified INTEGER NOT NULL DEFAULT 0,
+  coding_workspace_id TEXT REFERENCES coding_workspaces(id),
+  workspace_generation INTEGER,
   checkpoint_json TEXT NOT NULL DEFAULT '{}',
   current_attempt_id TEXT,
   version INTEGER NOT NULL DEFAULT 1,
@@ -158,8 +251,81 @@ CREATE TABLE IF NOT EXISTS artifacts (
   size_bytes INTEGER NOT NULL,
   content_hash TEXT NOT NULL,
   content TEXT NOT NULL,
+  plan_hash TEXT,
+  base_commit_sha TEXT,
+  workspace_generation INTEGER,
+  artifact_metadata_json TEXT NOT NULL DEFAULT '{}',
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS sandbox_commands (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+  command_hash TEXT NOT NULL,
+  command_preview TEXT NOT NULL,
+  working_directory TEXT NOT NULL,
+  status TEXT NOT NULL,
+  exit_code INTEGER,
+  duration_ms INTEGER,
+  output_artifact_id TEXT REFERENCES artifacts(id),
+  resource_usage_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL,
+  completed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_sandbox_commands_run
+  ON sandbox_commands(run_id, created_at);
+
+CREATE TABLE IF NOT EXISTS workspace_file_changes (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+  path TEXT NOT NULL,
+  operation TEXT NOT NULL,
+  before_hash TEXT,
+  after_hash TEXT,
+  workspace_generation INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_file_changes_run
+  ON workspace_file_changes(run_id, workspace_generation);
+
+CREATE TABLE IF NOT EXISTS verification_reports (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL UNIQUE REFERENCES runs(id),
+  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+  status TEXT NOT NULL,
+  checks_json TEXT NOT NULL,
+  summary_json TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS change_sets (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+  base_commit_sha TEXT NOT NULL,
+  workspace_generation INTEGER NOT NULL,
+  patch_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  diff_artifact_id TEXT NOT NULL REFERENCES artifacts(id),
+  verification_report_id TEXT REFERENCES verification_reports(id),
+  diff_stat_json TEXT NOT NULL,
+  changed_files_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  content_hash TEXT NOT NULL,
+  plan_hash TEXT NOT NULL DEFAULT '',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_change_sets_run ON change_sets(run_id, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS idempotency_records (
   tenant_id TEXT NOT NULL,
@@ -179,6 +345,7 @@ CREATE TABLE IF NOT EXISTS model_deployments (
   model TEXT NOT NULL,
   endpoint_region TEXT NOT NULL,
   status TEXT NOT NULL,
+  context_window_tokens INTEGER NOT NULL DEFAULT 131072,
   capabilities_json TEXT NOT NULL,
   pricing_json TEXT NOT NULL,
   created_at TEXT NOT NULL
@@ -392,7 +559,15 @@ JSON_COLUMNS = {
     "spec_json": "spec",
     "plan_json": "plan",
     "metadata_json": "metadata",
+    "artifact_metadata_json": "artifact_metadata",
     "principal_roles_json": "principal_roles",
+    "profile_json": "profile",
+    "provider_metadata_json": "provider_metadata",
+    "resource_usage_json": "resource_usage",
+    "checks_json": "checks",
+    "summary_json": "summary",
+    "diff_stat_json": "diff_stat",
+    "changed_files_json": "changed_files",
     "checkpoint_json": "checkpoint",
     "actions_json": "actions",
     "decision_json": "decision",
@@ -443,6 +618,25 @@ class Database:
             self._ensure_column(
                 "runs", "principal_verified", "INTEGER NOT NULL DEFAULT 0"
             )
+            self._ensure_column("threads", "repository_id", "TEXT")
+            self._ensure_column("threads", "repository_snapshot_id", "TEXT")
+            self._ensure_column("runs", "coding_workspace_id", "TEXT")
+            self._ensure_column("runs", "workspace_generation", "INTEGER")
+            self._ensure_column("artifacts", "plan_hash", "TEXT")
+            self._ensure_column("artifacts", "base_commit_sha", "TEXT")
+            self._ensure_column("artifacts", "workspace_generation", "INTEGER")
+            self._ensure_column(
+                "artifacts", "artifact_metadata_json", "TEXT NOT NULL DEFAULT '{}'"
+            )
+            self._ensure_column(
+                "sandbox_instances", "provider_metadata_json", "TEXT NOT NULL DEFAULT '{}'"
+            )
+            self._ensure_column(
+                "model_deployments",
+                "context_window_tokens",
+                "INTEGER NOT NULL DEFAULT 131072",
+            )
+            self._ensure_column("change_sets", "plan_hash", "TEXT NOT NULL DEFAULT ''")
             self.connection.commit()
 
     def close(self) -> None:

@@ -61,12 +61,32 @@ class ApprovalService:
             raise ConflictError("Interrupt has already been resolved")
         if expected_version is not None and expected_version != interrupt["version"]:
             raise ConflictError(f"Interrupt version is {interrupt['version']}")
-        allowed_actions = {action["action_id"] for action in interrupt["actions"]}
+        action_configs = {
+            action["action_id"]: action for action in interrupt["actions"]
+        }
+        allowed_actions = set(action_configs)
+        submitted_actions = {decision.action_id for decision in payload.decisions}
+        if submitted_actions != allowed_actions or len(payload.decisions) != len(
+            allowed_actions
+        ):
+            raise ConflictError("A decision is required for every interrupted action")
         for decision in payload.decisions:
             if decision.action_id not in allowed_actions:
                 raise ConflictError(f"Unknown action {decision.action_id}")
+            if decision.type not in action_configs[decision.action_id].get(
+                "allowed_decisions", []
+            ):
+                raise ConflictError(
+                    f"Decision {decision.type} is not allowed for action {decision.action_id}"
+                )
 
-        decision_data = payload.model_dump()
+        by_action = {
+            decision.action_id: decision.model_dump() for decision in payload.decisions
+        }
+        ordered_decisions = [
+            by_action[action["action_id"]] for action in interrupt["actions"]
+        ]
+        decision_data = {"decisions": ordered_decisions}
         now = utc_now()
         self.db.execute(
             """UPDATE interrupts SET status='RESOLVED', decision_json=?, version=version+1,
@@ -75,19 +95,28 @@ class ApprovalService:
         )
         run = self.db.fetch_one("SELECT * FROM runs WHERE id=?", (interrupt["run_id"],))
         checkpoint = run.get("checkpoint") or {}
-        primary = payload.decisions[0].model_dump()
-        decision_type = primary["type"]
+        primary = ordered_decisions[0]
+        decision_types = {decision["type"] for decision in ordered_decisions}
+        decision_type = (
+            "reject"
+            if "reject" in decision_types
+            else "respond"
+            if "respond" in decision_types
+            else primary["type"]
+        )
         checkpoint["stage"] = {
             "reject": "approval_rejected",
             "respond": "waiting_for_input",
         }.get(decision_type, "approval_resolved")
         checkpoint["decision"] = primary
+        checkpoint["decisions"] = ordered_decisions
         self.events.append(
             run["id"],
             "interrupt.resolved",
             {
                 "interrupt_id": interrupt_id,
-                "decision": primary["type"],
+                "decision": decision_type,
+                "decision_count": len(ordered_decisions),
                 "actor": context.user_id,
             },
         )

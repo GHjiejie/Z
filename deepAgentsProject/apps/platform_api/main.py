@@ -5,6 +5,7 @@ import os
 from contextlib import asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Iterable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -12,6 +13,8 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from apps.platform_api.native_api.knowledge_routes import router as knowledge_router
+from apps.platform_api.native_api.coding_routes import router as coding_router
+from apps.platform_api.native_api.repository_routes import router as repository_router
 from apps.platform_api.native_api.routes import router as native_router
 from packages.application.approval_service import ApprovalService
 from packages.application.services import (
@@ -22,6 +25,13 @@ from packages.application.services import (
 )
 from packages.compiler import AgentPlanCompiler
 from packages.config import load_environment
+from packages.coding.errors import (
+    CodingConflictError,
+    CodingError,
+    CodingNotFoundError,
+    SandboxUnavailableError,
+)
+from packages.coding.service import CodingService
 from packages.knowledge.embedding import create_embedding_provider
 from packages.knowledge.errors import (
     KnowledgeConflictError,
@@ -32,9 +42,21 @@ from packages.knowledge.service import KnowledgeService
 from packages.knowledge.storage import create_object_storage
 from packages.persistence import Database
 from packages.plugins import PluginLoader, SkillRegistry
+from packages.repositories import RepositoryService
 from packages.runtime import RunOrchestrator, RunService
+from packages.runtime.coding_model import create_coding_chat_model
+from packages.runtime.deepagents_executor import DeepAgentsRuntimeExecutor
 from packages.runtime.event_emitter import EventEmitter
-from packages.runtime.model_gateway import ModelGateway, OpenAICompatibleModelGateway
+from packages.runtime.model_gateway import (
+    ModelGateway,
+    ModelGatewayError,
+    OpenAICompatibleModelGateway,
+)
+from packages.sandbox import DockerSandboxProvider, SandboxManager
+from packages.sandbox.ports import SandboxProvider
+
+from langchain_core.language_models.chat_models import BaseChatModel
+from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
 
 
 logger = logging.getLogger(__name__)
@@ -47,6 +69,8 @@ def create_app(
     load_env: bool = True,
     trust_identity_headers: bool | None = None,
     allow_demo_identity: bool | None = None,
+    coding_model: BaseChatModel | None = None,
+    sandbox_providers: Iterable[SandboxProvider] | None = None,
 ) -> FastAPI:
     root = Path(__file__).resolve().parents[2]
 
@@ -90,15 +114,89 @@ def create_app(
             ", ".join(plugin_report.plugin_ids) or "none",
         )
         skill_registry = SkillRegistry(db)
-        compiler = AgentPlanCompiler(skill_registry)
+        providers = list(sandbox_providers or [])
+        if not providers:
+            providers.append(
+                DockerSandboxProvider(
+                    image=os.getenv(
+                        "DEEPAGENT_CODING_IMAGE", "deepagent/coding-runtime:0.1.0"
+                    ),
+                    dockerfile_root=str(root / "docker" / "coding-runtime"),
+                    auto_build=os.getenv("DEEPAGENT_CODING_AUTO_BUILD", "true").lower()
+                    in {"1", "true", "yes"},
+                )
+            )
+
+        def resolve_sandbox_image(provider_name: str, image: str) -> str:
+            provider = next(
+                (candidate for candidate in providers if candidate.name == provider_name),
+                None,
+            )
+            resolver = getattr(provider, "resolve_image_digest", None)
+            if resolver is None:
+                raise ValueError(
+                    f"Sandbox provider cannot resolve immutable images: {provider_name}"
+                )
+            return str(resolver(image))
+
+        compiler = AgentPlanCompiler(
+            skill_registry,
+            allow_test_sandbox=not load_env,
+            sandbox_image_resolver=resolve_sandbox_image,
+        )
         if seed:
             seed_reference_data(db, compiler)
         object_storage = create_object_storage(Path(db_path).parent / "knowledge_objects")
         knowledge = KnowledgeService(db, object_storage, create_embedding_provider())
         events = EventEmitter(db)
         active_model_gateway = model_gateway or OpenAICompatibleModelGateway.from_environment()
+        repository_roots = (
+            os.getenv("DEEPAGENT_REPOSITORY_ROOTS", "").strip() or str(root.parent)
+        )
+        repositories = RepositoryService(
+            db,
+            Path(db_path).parent / "repository_snapshots",
+            [
+                Path(value.strip())
+                for value in repository_roots.split(os.pathsep)
+                if value.strip()
+            ],
+        )
+        sandbox_manager = SandboxManager(
+            db,
+            events,
+            repositories,
+            providers,
+            Path(db_path).parent / "workspace_snapshots",
+        )
+        coding = CodingService(db, repositories, sandbox_manager)
+        checkpointer_context = AsyncSqliteSaver.from_conn_string(
+            str(Path(db_path).with_suffix(".checkpoints.db"))
+        )
+        checkpointer = await checkpointer_context.__aenter__()
+        await checkpointer.setup()
+        active_coding_model = None
+        try:
+            active_coding_model = create_coding_chat_model(
+                active_model_gateway, coding_model
+            )
+        except ModelGatewayError:
+            logger.info(
+                "Native Coding Agent model is not configured; non-coding runs remain available"
+            )
         orchestrator = RunOrchestrator(db, events, knowledge, active_model_gateway)
-        run_service = RunService(db, events, orchestrator)
+        if active_coding_model is not None:
+            orchestrator.executors.coding = DeepAgentsRuntimeExecutor(
+                db,
+                events,
+                orchestrator.worker_id,
+                sandbox_manager,
+                checkpointer,
+                active_coding_model,
+                active_model_gateway.identity(),
+                knowledge,
+            )
+        run_service = RunService(db, events, orchestrator, coding)
         approvals = ApprovalService(db, events, orchestrator)
         application.state.services = SimpleNamespace(
             db=db,
@@ -109,6 +207,11 @@ def create_app(
             knowledge=knowledge,
             events=events,
             model_gateway=active_model_gateway,
+            coding_model=active_coding_model,
+            repositories=repositories,
+            sandbox_manager=sandbox_manager,
+            coding=coding,
+            checkpointer=checkpointer,
             loaded_environment_files=loaded_environment_files,
             orchestrator=orchestrator,
             agents=AgentService(db, compiler),
@@ -116,10 +219,13 @@ def create_app(
             approvals=approvals,
         )
         await knowledge.start()
+        await sandbox_manager.start()
         await orchestrator.start()
         yield
         await orchestrator.stop()
+        await sandbox_manager.stop()
         await knowledge.stop()
+        await checkpointer_context.__aexit__(None, None, None)
         db.close()
 
     application = FastAPI(
@@ -157,6 +263,19 @@ def create_app(
             content={"error": {"code": exc.code, "message": str(exc)}},
         )
 
+    @application.exception_handler(CodingError)
+    async def coding_error_handler(_: Request, exc: CodingError):
+        if isinstance(exc, CodingNotFoundError):
+            status_code = 404
+        elif isinstance(exc, (CodingConflictError, SandboxUnavailableError)):
+            status_code = 409
+        else:
+            status_code = 422
+        return JSONResponse(
+            status_code=status_code,
+            content={"error": {"code": exc.code, "message": str(exc)}},
+        )
+
     @application.get("/health")
     async def health(request: Request):
         services = request.app.state.services
@@ -178,6 +297,8 @@ def create_app(
 
     application.include_router(native_router)
     application.include_router(knowledge_router)
+    application.include_router(repository_router)
+    application.include_router(coding_router)
 
     # A production web build can be served by the API process for the local
     # reference deployment. Kubernetes deployments may serve it independently.

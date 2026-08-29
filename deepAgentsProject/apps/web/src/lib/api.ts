@@ -17,6 +17,11 @@ import type {
   RuntimeEvent,
   Skill,
   ThreadSummary,
+  Repository,
+  CodingWorkspace,
+  WorkspaceTreeItem,
+  VerificationReport,
+  ChangeSet,
 } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -122,6 +127,29 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ agent_deployment_id: deploymentId, title }),
     }),
+  repositories: () => request<{ items: Repository[] }>('/api/v1/repositories'),
+  createRepository: (body: { name: string; provider: Repository['provider']; canonical_uri: string; default_branch: string }) =>
+    request<Repository>('/api/v1/repositories', { method: 'POST', body: JSON.stringify(body) }),
+  probeRepository: (id: string) => request<Record<string, unknown>>(`/api/v1/repositories/${id}:probe`, { method: 'POST' }),
+  createCodingThread: (deploymentId: string, title: string, repositoryId: string, baseRef: string, sourceMode: 'committed_ref' | 'working_tree_snapshot' = 'committed_ref') =>
+    request<ThreadSummary>('/api/v1/threads', {
+      method: 'POST',
+      body: JSON.stringify({
+        agent_deployment_id: deploymentId,
+        title,
+        workspace: { repository_id: repositoryId, base_ref: baseRef, source_mode: sourceMode },
+      }),
+    }),
+  threadWorkspace: (threadId: string) => request<CodingWorkspace>(`/api/v1/threads/${threadId}/workspace`),
+  workspaceTree: (runId: string) => request<{ workspace_id: string; workspace_generation: number; items: WorkspaceTreeItem[]; truncated: boolean }>(`/api/v1/runs/${runId}/workspace/tree`),
+  workspaceFile: (runId: string, path: string) => request<{ path: string; content: string; encoding: string; size_bytes: number; workspace_generation: number }>(`/api/v1/runs/${runId}/workspace/file?path=${encodeURIComponent(path)}`),
+  runDiff: (runId: string) => request<ChangeSet | { run_id: string; status: 'PENDING'; patch: string; changed_files: [] }>(`/api/v1/runs/${runId}/diff`),
+  runVerification: (runId: string) => request<VerificationReport>(`/api/v1/runs/${runId}/verification`),
+  runChangeSets: (runId: string) => request<{ items: ChangeSet[] }>(`/api/v1/runs/${runId}/changesets`),
+  decideChangeSet: (runId: string, changeSetId: string, approve: boolean, message?: string) =>
+    request<ChangeSet>(`/api/v1/runs/${runId}/changesets/${changeSetId}:${approve ? 'approve' : 'reject'}`, {
+      method: 'POST', body: JSON.stringify({ message }),
+    }),
   createRun: (threadId: string, input: string) =>
     request<Run>(`/api/v1/threads/${threadId}/runs`, {
       method: 'POST',
@@ -141,7 +169,12 @@ export const api = {
       method: 'POST',
       headers: { 'Idempotency-Key': crypto.randomUUID(), 'If-Match': String(interrupt.version) },
       body: JSON.stringify({
-        decisions: [{ action_id: interrupt.actions[0].action_id, type, message, edited_arguments: editedArguments }],
+        decisions: interrupt.actions.map((action, index) => ({
+          action_id: action.action_id,
+          type: type === 'edit' && index > 0 ? 'approve' : type,
+          message,
+          edited_arguments: type === 'edit' && index === 0 ? editedArguments : undefined,
+        })),
       }),
     }),
 }

@@ -127,21 +127,6 @@ class AgentService:
         revision_number = (latest["value"] or 0) + 1
         revision_id = new_id("rev")
         now = utc_now()
-        self.db.execute(
-            """INSERT INTO agent_revisions
-               (id, agent_id, tenant_id, project_id, revision_number, spec_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                revision_id,
-                agent_id,
-                context.tenant_id,
-                context.project_id,
-                revision_number,
-                self.db.encode(agent["draft"]),
-                now,
-            ),
-        )
-
         model = self.db.fetch_one(
             """SELECT * FROM model_deployments
                WHERE id=? AND tenant_id=? AND project_id=?""",
@@ -163,6 +148,20 @@ class AgentService:
             raise ConflictError(str(exc)) from exc
         plan_id = new_id("plan")
         plan["id"] = plan_id
+        self.db.execute(
+            """INSERT INTO agent_revisions
+               (id, agent_id, tenant_id, project_id, revision_number, spec_json, created_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+            (
+                revision_id,
+                agent_id,
+                context.tenant_id,
+                context.project_id,
+                revision_number,
+                self.db.encode(agent["draft"]),
+                now,
+            ),
+        )
         self.db.execute(
             """INSERT INTO resolved_execution_plans
                (id, agent_revision_id, tenant_id, project_id, plan_hash, plan_json,
@@ -260,12 +259,23 @@ class AgentService:
         return self.db.fetch_one("SELECT * FROM agent_deployments WHERE id=?", (deployment_id,))
 
     def list_deployments(self, context: TenantContext) -> List[Dict[str, Any]]:
-        return self.db.fetch_all(
+        deployments = self.db.fetch_all(
             """SELECT d.*, a.name AS agent_name FROM agent_deployments d
                JOIN agents a ON a.id=d.agent_id
                WHERE d.tenant_id=? AND d.project_id=? ORDER BY d.created_at DESC""",
             (context.tenant_id, context.project_id),
         )
+        for deployment in deployments:
+            plan = self.db.fetch_one(
+                "SELECT * FROM resolved_execution_plans WHERE id=?",
+                (deployment["resolved_plan_id"],),
+            )
+            coding_profile = (plan or {}).get("plan", {}).get("coding_profile")
+            deployment["coding_enabled"] = bool(
+                coding_profile and coding_profile.get("enabled")
+            )
+            deployment["coding_profile"] = coding_profile
+        return deployments
 
     def list_models(self, context: TenantContext) -> List[Dict[str, Any]]:
         return self.db.fetch_all(

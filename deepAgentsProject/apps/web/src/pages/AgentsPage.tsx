@@ -36,6 +36,33 @@ const defaultDraft: AgentDraft = {
   limits: { max_duration_seconds: 600, max_model_calls: 20, max_tool_calls: 30, max_subagent_depth: 3, max_subagent_concurrency: 4, max_sandbox_cpu_seconds: 120, max_output_bytes: 1000000, max_cost: 5 }, output_schema: null,
 }
 
+const codingDraft: AgentDraft = {
+  ...structuredClone(defaultDraft),
+  harness_profile_revision_id: 'coding-agent-v1',
+  system_prompt: 'You are a careful coding agent. Inspect first, preserve unrelated work, make minimal changes, run real verification, and deliver a reviewable patch.',
+  capabilities: {
+    tools: [], mcp_servers: [], memories: [], knowledge_bases: [], filesystem: true,
+    skills: ['coding-workflow', 'repository-safety', 'test-and-verification', 'change-delivery'],
+    subagents: ['codebase-explorer', 'code-reviewer', 'test-diagnostician'],
+  },
+  policies: { permission_policy: 'coding-project-default-v1', approval_mode: 'high_risk', audit_level: 'strict' },
+  limits: { ...defaultDraft.limits, max_duration_seconds: 1800, max_model_calls: 40, max_tool_calls: 100, max_subagent_depth: 2, max_subagent_concurrency: 3, max_sandbox_cpu_seconds: 900 },
+  coding: {
+    enabled: true,
+    sandbox: {
+      revision_id: 'sandbox-docker-v1', provider: 'docker', image: 'deepagent/coding-runtime:0.1.0', image_digest: 'sha256:unresolved',
+      user: '10001:10001', cpu_limit: 2, memory_mb: 4096, disk_mb: 10240, pids_limit: 256,
+      command_timeout_seconds: 300, run_timeout_seconds: 1800, max_output_bytes: 200000,
+      network_mode: 'deny_by_default', workspace_root: '/workspace/repo', read_only_rootfs: true,
+      lifecycle: 'thread_scoped', ttl_seconds: 86400,
+    },
+    repository_policy_revision_id: 'repository-project-default-v1', delivery_mode: 'patch_only',
+    verification_policy: { auto_discover: true, required_commands: [], max_attempts: 2, command_timeout_seconds: 300, require_success: true },
+    protected_paths: ['/workspace/repo/.env*', '/workspace/repo/.github/workflows/**', '/workspace/repo/**/secrets/**'],
+    max_changed_files: 50, max_diff_lines: 5000,
+  },
+}
+
 type BuilderTab = 'basics' | 'model' | 'capabilities' | 'guardrails' | 'review' | 'release'
 type ValidationIssue = { level: string; message: string }
 type BindingOption = { value: string; label: string; detail?: string; status?: string }
@@ -60,6 +87,7 @@ export function AgentsPage() {
   const [creating, setCreating] = useState(false)
   const [createName, setCreateName] = useState('')
   const [createDescription, setCreateDescription] = useState('')
+  const [createTemplate, setCreateTemplate] = useState<'standard' | 'coding'>('standard')
   const [publishing, setPublishing] = useState(false)
   const [publishEnvironment, setPublishEnvironment] = useState('development')
   const [publishResult, setPublishResult] = useState<PublishResult | null>(null)
@@ -142,8 +170,8 @@ export function AgentsPage() {
     if (!createName.trim()) return
     setBusy('create')
     try {
-      const agent = await api.createAgent({ name: createName, description: createDescription, draft: structuredClone(defaultDraft) })
-      setCreating(false); setCreateName(''); setCreateDescription(''); await load(); await selectAgent(agent.id); await refreshPlatform()
+      const agent = await api.createAgent({ name: createName, description: createDescription, draft: structuredClone(createTemplate === 'coding' ? codingDraft : defaultDraft) })
+      setCreating(false); setCreateName(''); setCreateDescription(''); setCreateTemplate('standard'); await load(); await selectAgent(agent.id); await refreshPlatform()
     } catch (nextError) { setError((nextError as Error).message) } finally { setBusy('') }
   }
 
@@ -187,7 +215,7 @@ export function AgentsPage() {
       </> : <div className="empty-release"><Bot size={28} /><h4>Select an agent</h4><p>Choose an agent draft to start editing.</p></div>}</section>
     </div>
 
-    {creating && <div className="modal-backdrop" onMouseDown={() => setCreating(false)}><div className="modal" role="dialog" aria-modal="true" aria-label="Create an agent" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="page-eyebrow">NEW DRAFT</span><h3>Create an agent</h3><p>Start with the governed Deep Agents profile.</p></div><button aria-label="Close" className="icon-button" onClick={() => setCreating(false)}><X size={18} /></button></div><div className="form-stack"><label>Agent name<input autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="e.g. Incident investigator" /></label><label>Description<textarea rows={3} value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="What should this agent own?" /></label><div className="template-card"><div className="agent-logo"><Sparkles size={16} /></div><div><strong>Deep Agents starter</strong><span>Planning, filesystem, research SubAgent, HITL, and strict audit enabled.</span></div><Check size={16} /></div></div><div className="modal-actions"><button className="button secondary" onClick={() => setCreating(false)}>Cancel</button><button className="button primary" disabled={!createName.trim() || !!busy} onClick={() => void create()}>{busy === 'create' && <LoaderCircle size={15} className="spin" />}Create draft</button></div></div></div>}
+    {creating && <div className="modal-backdrop" onMouseDown={() => setCreating(false)}><div className="modal" role="dialog" aria-modal="true" aria-label="Create an agent" onMouseDown={(event) => event.stopPropagation()}><div className="modal-heading"><div><span className="page-eyebrow">NEW DRAFT</span><h3>Create an agent</h3><p>Choose a governed starter profile.</p></div><button aria-label="Close" className="icon-button" onClick={() => setCreating(false)}><X size={18} /></button></div><div className="form-stack"><label>Agent name<input autoFocus value={createName} onChange={(event) => setCreateName(event.target.value)} placeholder="e.g. Repository maintainer" /></label><label>Description<textarea rows={3} value={createDescription} onChange={(event) => setCreateDescription(event.target.value)} placeholder="What should this agent own?" /></label><button className={`template-card ${createTemplate === 'standard' ? 'selected' : ''}`} onClick={() => setCreateTemplate('standard')}><div className="agent-logo"><Sparkles size={16} /></div><div><strong>Deep Agents starter</strong><span>Planning, knowledge, HITL, and strict audit.</span></div>{createTemplate === 'standard' && <Check size={16} />}</button><button className={`template-card ${createTemplate === 'coding' ? 'selected' : ''}`} onClick={() => setCreateTemplate('coding')}><div className="agent-logo"><Code2 size={16} /></div><div><strong>Coding Agent starter</strong><span>Docker sandbox, coding skills, read-only reviewers, verification, and patch delivery.</span></div>{createTemplate === 'coding' && <Check size={16} />}</button></div><div className="modal-actions"><button className="button secondary" onClick={() => setCreating(false)}>Cancel</button><button className="button primary" disabled={!createName.trim() || !!busy} onClick={() => void create()}>{busy === 'create' && <LoaderCircle size={15} className="spin" />}Create draft</button></div></div></div>}
     {publishing && selected && <PublishDialog result={publishResult} changedSections={changedSections} environment={publishEnvironment} busy={busy} onEnvironment={setPublishEnvironment} onPublish={() => void publishRevision()} onDeploy={() => void deployRevision()} onClose={() => setPublishing(false)} />}
   </div>
 }

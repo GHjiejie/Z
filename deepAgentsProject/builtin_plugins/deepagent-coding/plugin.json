@@ -1,0 +1,41 @@
+{
+  "schema_version": "1.0",
+  "id": "deepagent-coding",
+  "name": "DeepAgent Coding Skills",
+  "version": "1.0.0",
+  "description": "Reviewed workflows and safety rules for repository coding tasks.",
+  "skills": [
+    {
+      "slug": "coding-workflow",
+      "name": "Coding Workflow",
+      "version": "1.0.0",
+      "description": "Inspect, plan, implement, and verify repository changes.",
+      "path": "skills/coding-workflow/SKILL.md",
+      "tags": ["coding", "planning", "verification"]
+    },
+    {
+      "slug": "repository-safety",
+      "name": "Repository Safety",
+      "version": "1.0.0",
+      "description": "Preserve existing work and respect repository and delivery boundaries.",
+      "path": "skills/repository-safety/SKILL.md",
+      "tags": ["coding", "safety", "git"]
+    },
+    {
+      "slug": "test-and-verification",
+      "name": "Test and Verification",
+      "version": "1.0.0",
+      "description": "Choose and report evidence-backed verification for code changes.",
+      "path": "skills/test-and-verification/SKILL.md",
+      "tags": ["coding", "testing", "quality"]
+    },
+    {
+      "slug": "change-delivery",
+      "name": "Change Delivery",
+      "version": "1.0.0",
+      "description": "Produce reviewable patches, diffs, and honest delivery summaries.",
+      "path": "skills/change-delivery/SKILL.md",
+      "tags": ["coding", "diff", "delivery"]
+    }
+  ]
+}

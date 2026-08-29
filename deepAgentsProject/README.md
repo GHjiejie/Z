@@ -16,6 +16,7 @@
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
 - Knowledge/RAG：内置 `builtin_rag` Agent 自动判断知识检索或模型直答，支持 OSS 直传授权、持久摄取、不可变索引、混合检索、ACL 与可验证 Citation。
+- Coding Agent：真实 `create_deep_agent()` / LangGraph Tool Loop、内容寻址源码快照、Thread-scoped Workspace、Docker Sandbox、HITL、平台重算 Patch/Diff/Verification 和 Coding Workbench。
 
 ## 快速启动
 
@@ -25,6 +26,8 @@ make install
 make build
 make api
 ```
+
+Coding Agent 还要求本机 Docker daemon 可用。第一次发布默认 Docker Profile 时，控制面会构建（或复用）`deepagent/coding-runtime:0.1.0`，解析真实 OCI image digest，并把它锁入 Execution Plan；运行时若镜像摘要不匹配会拒绝启动。
 
 打开 [http://localhost:8000](http://localhost:8000)。API 文档位于 [http://localhost:8000/docs](http://localhost:8000/docs)。
 
@@ -47,6 +50,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
 6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，内置 RAG Agent 会对事实型请求检索，对创作等无需知识库的请求自动走模型直答。
+7. 在 **Agents** 选择 `Coding Agent starter`，发布并部署后进入 **Coding**，注册允许范围内的 Repository、选择 Base Ref 并启动任务；Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
 
 ## 测试与构建
 
@@ -63,6 +67,9 @@ make verify
 - Tenant / Project 数据隔离。
 - Knowledge 上传、文件完整性校验、摄取、版本发布、检索、下载与 Agent Runtime Citation；
 - Knowledge 的 Tenant / Project / Role 隔离和错误上传拒绝。
+- 真实 Deep Agents 文件/命令 Tool Loop、受保护路径审批与 Checkpoint 恢复；
+- Docker 非 root、只读根文件系统、默认禁网、密钥隔离、超时/输出/磁盘限制和软链接逃逸；
+- Run 取消终止容器命令、Sandbox 丢失恢复、Patch 防篡改、平台重算文件 Hash，以及宿主工作区不被修改。
 
 ## 代码结构
 
@@ -76,6 +83,9 @@ packages/
 ├── compiler/              静态验证、依赖锁定、Plan Hash
 ├── runtime/               Orchestrator、Lease、Binder、Executor、Event
 ├── knowledge/             OSS、摄取、解析、分块、Embedding、检索与 Citation
+├── repositories/          Repository 注册与不可变源码快照
+├── sandbox/               Docker/Fake Provider、策略、恢复与生命周期
+├── coding/                Workspace、Verification、ChangeSet 与 API 用例
 ├── adapters/harness/      Deep Agents 稳定适配边界
 └── persistence/           SQLite 参考仓储与 Schema
 tests/                      端到端平台契约测试
@@ -83,9 +93,9 @@ tests/                      端到端平台契约测试
 
 ## Reference Harness 与真实 Deep Agents
 
-当前仓库内置 Reference Harness，目的是让发布、调度、流式、HITL、恢复、审计和计费在无任何外部凭据时全部可验证。生产接入时，只需在 `packages/adapters/harness/deepagents` 中使用锁定版本的 `create_deep_agent()` 构建 LangGraph Runnable，并将 SDK 事件转换成 `Platform RuntimeEvent`；API、领域对象和控制台无需改变。
+普通 Agent 继续保留确定性 Reference Harness，目的是让发布、调度、流式、HITL、审计和计费在无外部凭据时可验证。`coding-agent-v1` 已接入锁定版本的真实 `create_deep_agent()`、持久 LangGraph Checkpointer 和事件适配器；文件与命令结果来自 Sandbox，Diff、Verification 和 Artifact 由平台重新计算，不能由模型自行声明。
 
-真实 Credential 禁止进入 Revision、Plan、Checkpoint、Event 或 Prompt。当前 Runtime Binder 只产生短期 opaque handle，生产实现应由 Credential Broker 在实际工具调用前兑换。
+真实 Credential 禁止进入 Revision、Plan、Checkpoint、Event 或 Prompt。Coding MVP 为 `patch_only`，明确禁止 Commit、Push、PR 和 Deploy，也不会把宿主目录读写挂载进容器。
 
 ## 内置 Plugin 与 Skill
 
@@ -170,4 +180,4 @@ MODEL_ANTHROPIC_THINKING_BUDGET_TOKENS=2048
 
 ## 当前边界
 
-本实现交付文档定义的 Phase 1 核心运行骨架，包含真实 OpenAI-compatible 对话模型、可运行的 Knowledge/RAG 参考链路及阿里云 OSS 生产适配。Kubernetes Sandbox、真实 MCP Session、PostgreSQL/pgvector 大规模索引和 Preview/Beta Dynamic/Async SubAgent 保留在后续阶段；对应领域边界已预留，不会用不安全的本机 `subprocess` 冒充生产实现。
+本实现交付文档定义的 Phase 1 核心运行骨架、真实 OpenAI-compatible 对话模型、Knowledge/RAG 链路、阿里云 OSS 适配，以及 Coding Agent 的 Docker `patch_only` MVP。Kubernetes Sandbox、受控 Git Credential/Commit/Push/PR、真实 MCP Session、PostgreSQL/pgvector 大规模索引和 Dynamic/Async 写入型 SubAgent 保留在后续阶段；对应领域边界已预留，不会用不安全的宿主 Shell 或读写 HostPath 冒充实现。

@@ -4,7 +4,14 @@ import secrets
 from typing import Any, Dict, List, Optional
 
 from packages.application.services import ConflictError, NotFoundError, new_id
-from packages.domain.models import RunCreate, RunStatus, TenantContext, ThreadCreate, utc_now
+from packages.domain.models import (
+    TERMINAL_RUN_STATUSES,
+    RunCreate,
+    RunStatus,
+    TenantContext,
+    ThreadCreate,
+    utc_now,
+)
 from packages.persistence import Database
 from packages.runtime.event_emitter import EventEmitter
 
@@ -20,10 +27,17 @@ RESERVED_RUN_METADATA = {
 
 
 class RunService:
-    def __init__(self, db: Database, events: EventEmitter, orchestrator: Any = None):
+    def __init__(
+        self,
+        db: Database,
+        events: EventEmitter,
+        orchestrator: Any = None,
+        coding: Any = None,
+    ):
         self.db = db
         self.events = events
         self.orchestrator = orchestrator
+        self.coding = coding
 
     def attach_orchestrator(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator
@@ -36,6 +50,17 @@ class RunService:
         )
         if not deployment:
             raise NotFoundError("Active deployment not found")
+        plan_row = self.db.fetch_one(
+            "SELECT * FROM resolved_execution_plans WHERE id=?",
+            (deployment["resolved_plan_id"],),
+        )
+        coding_enabled = bool(
+            plan_row and (plan_row.get("plan", {}).get("coding_profile") or {}).get("enabled")
+        )
+        if coding_enabled and payload.workspace is None:
+            raise ConflictError("Coding Agent threads require an explicit repository workspace")
+        if not coding_enabled and payload.workspace is not None:
+            raise ConflictError("Workspace binding is supported only by Coding Agent deployments")
         thread_id = new_id("thr")
         now = utc_now()
         self.db.execute(
@@ -52,6 +77,22 @@ class RunService:
                 now,
             ),
         )
+        if payload.workspace is not None:
+            if not self.coding:
+                self.db.execute("DELETE FROM threads WHERE id=?", (thread_id,))
+                raise ConflictError("Coding workspace service is unavailable")
+            try:
+                sandbox_profile = plan_row["plan"]["coding_profile"]["sandbox"]
+                self.coding.bind_thread(
+                    thread_id,
+                    payload.workspace,
+                    context,
+                    lifecycle=sandbox_profile.get("lifecycle", "thread_scoped"),
+                    ttl_seconds=int(sandbox_profile.get("ttl_seconds", 86400)),
+                )
+            except Exception:
+                self.db.execute("DELETE FROM threads WHERE id=?", (thread_id,))
+                raise
         return self.get_thread(thread_id, context)
 
     def list_threads(self, context: TenantContext) -> List[Dict[str, Any]]:
@@ -79,6 +120,9 @@ class RunService:
             raise NotFoundError("Thread not found")
         thread["runs"] = self.db.fetch_all(
             "SELECT * FROM runs WHERE thread_id=? ORDER BY created_at DESC", (thread_id,)
+        )
+        thread["workspace"] = self.db.fetch_one(
+            "SELECT * FROM coding_workspaces WHERE thread_id=?", (thread_id,)
         )
         return thread
 
@@ -114,13 +158,17 @@ class RunService:
         metadata = dict(payload.metadata)
         metadata["request_id"] = metadata.get("request_id", new_id("req"))
         metadata["trace_id"] = metadata.get("trace_id", new_id("trace"))
+        workspace = self.db.fetch_one(
+            "SELECT * FROM coding_workspaces WHERE thread_id=?", (thread_id,)
+        )
         self.db.execute(
             """INSERT INTO runs
                (id, tenant_id, project_id, thread_id, agent_deployment_id, resolved_plan_id,
                 status, input, metadata_json, principal_user_id, principal_roles_json,
-                principal_environment_id, principal_verified, checkpoint_json,
+                principal_environment_id, principal_verified, coding_workspace_id,
+                workspace_generation, checkpoint_json,
                 current_attempt_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, 1, '{}', ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, 1, ?, ?, '{}', ?, ?, ?)""",
             (
                 run_id,
                 context.tenant_id,
@@ -133,6 +181,8 @@ class RunService:
                 context.user_id,
                 self.db.encode(context.roles),
                 context.environment_id,
+                workspace["id"] if workspace else None,
+                workspace["workspace_generation"] if workspace else None,
                 attempt_id,
                 now,
                 now,
@@ -275,7 +325,7 @@ class RunService:
 
     async def cancel(self, run_id: str, context: TenantContext) -> Dict[str, Any]:
         run = self.get_run(run_id, context)
-        if run["status"] in {"SUCCEEDED", "FAILED", "CANCELLED", "TIMED_OUT"}:
+        if run["status"] in TERMINAL_RUN_STATUSES:
             return run
         self._set_status(run_id, RunStatus.CANCELLING.value)
         self.events.append(run_id, "run.cancelling", {"requested_by": context.user_id})
@@ -296,6 +346,8 @@ class RunService:
             execution_path=["main"],
         )
         self.events.append(run_id, "run.cancelled", {})
+        if self.orchestrator:
+            await self.orchestrator.cancel_execution(run_id)
         return self.get_run(run_id, context)
 
     async def retry(self, run_id: str, context: TenantContext) -> Dict[str, Any]:

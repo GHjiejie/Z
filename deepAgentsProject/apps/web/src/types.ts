@@ -55,6 +55,40 @@ export interface AgentDraft {
     max_cost: number | null
   }
   output_schema?: Json | null
+  coding?: {
+    enabled: boolean
+    sandbox: {
+      revision_id?: string
+      provider: 'docker' | 'kubernetes' | 'fake'
+      image: string
+      image_digest: string
+      user: string
+      cpu_limit: number
+      memory_mb: number
+      disk_mb: number
+      pids_limit: number
+      command_timeout_seconds: number
+      run_timeout_seconds: number
+      max_output_bytes: number
+      network_mode: 'deny_by_default' | 'allowlist'
+      workspace_root: string
+      read_only_rootfs: boolean
+      lifecycle: 'run_scoped' | 'thread_scoped' | 'agent_scoped'
+      ttl_seconds: number
+    }
+    repository_policy_revision_id?: string
+    delivery_mode: 'patch_only' | 'commit' | 'pull_request'
+    verification_policy: {
+      auto_discover: boolean
+      required_commands: string[]
+      max_attempts: number
+      command_timeout_seconds: number
+      require_success: boolean
+    }
+    protected_paths: string[]
+    max_changed_files: number
+    max_diff_lines: number
+  } | null
 }
 
 export interface Deployment {
@@ -66,6 +100,8 @@ export interface Deployment {
   resolved_plan_id: string
   environment: string
   status: string
+  coding_enabled?: boolean
+  coding_profile?: AgentDraft['coding']
   created_at: string
 }
 
@@ -137,8 +173,61 @@ export interface ThreadSummary {
   agent_name?: string
   last_run?: { id: string; status: string; updated_at: string } | null
   runs?: Run[]
+  repository_id?: string | null
+  repository_snapshot_id?: string | null
+  workspace?: CodingWorkspace | null
   created_at: string
   updated_at: string
+}
+
+export interface Repository {
+  id: string
+  name: string
+  provider: 'local_snapshot' | 'generic_git' | 'github' | 'gitlab'
+  canonical_uri: string
+  default_branch: string
+  status: string
+  snapshot_count?: number
+  created_at: string
+  updated_at: string
+}
+
+export interface CodingWorkspace {
+  id: string
+  thread_id: string
+  repository_id?: string
+  repository_name?: string
+  repository_snapshot_id: string
+  resolved_commit_sha?: string
+  requested_ref?: string
+  workspace_generation: number
+  status: string
+  sandbox?: { id: string; provider: string; status: string; provider_metadata?: Json } | null
+  expires_at: string
+}
+
+export interface WorkspaceTreeItem { path: string; name: string; type: string }
+
+export interface VerificationReport {
+  id?: string
+  run_id: string
+  status: string
+  checks: Array<{ id: string; command: string; exit_code: number; status: string; output_preview?: string }>
+  summary: { total?: number; passed?: number; failed?: number; require_success?: boolean }
+}
+
+export interface ChangeSet {
+  id: string
+  run_id: string
+  base_commit_sha: string
+  workspace_generation: number
+  diff_stat: { files: number; added: number; deleted: number }
+  changed_files: Array<{ path: string; status: string; original_path?: string; sha256?: string | null }>
+  status: string
+  content_hash: string
+  plan_hash: string
+  patch?: string
+  created_at: string
 }
 
 export interface RunArtifact {

@@ -1,9 +1,9 @@
 # DeepAgent Platform Coding Agent 架构设计方案
 
-> 状态：Proposal v0.1，等待评审  
-> 日期：2026-08-29  
-> 范围：在现有 `deepAgentsProject` 中增加一个可以读取代码、修改代码、运行构建与测试、输出可审阅变更集的 Coding Agent  
-> 当前阶段：仅架构设计，尚未开始实现
+> 状态：Approved v1.0；Docker `patch_only` MVP 已实现
+> 日期：2026-08-29
+> 范围：在现有 `deepAgentsProject` 中增加一个可以读取代码、修改代码、运行构建与测试、输出可审阅变更集的 Coding Agent
+> 当前阶段：Phase A–C 的本地/CI 实现已落地；Kubernetes 与受控 Git 交付按原方案后续实施
 
 ## 1. 结论与推荐方案
 
@@ -863,4 +863,3 @@ MVP 只有同时满足以下条件才算完成：
 - Backend 可替换或组合，适合在平台侧实现受治理的 Sandbox Backend：<https://docs.langchain.com/oss/python/deepagents/backends>
 - LangGraph Checkpoint 支持 HITL、线程记忆、故障恢复和状态回放：<https://docs.langchain.com/oss/python/langgraph/persistence>
 - Interrupt 恢复依赖持久 Checkpointer，且 Interrupt 前的副作用必须幂等：<https://docs.langchain.com/oss/python/langgraph/interrupts>
-

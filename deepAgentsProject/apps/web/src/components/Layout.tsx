@@ -12,6 +12,7 @@ import {
   Settings,
   Sparkles,
   X,
+  CodeXml,
 } from 'lucide-react'
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { NavLink, Outlet, useLocation, useNavigate } from 'react-router-dom'
@@ -27,6 +28,7 @@ const navGroups = [
   ] },
   { label: 'OPERATE', items: [
     { to: '/playground', label: 'Test & Run', icon: PlayCircle },
+    { to: '/coding', label: 'Coding Workbench', icon: CodeXml },
     { to: '/runs', label: 'Runs', icon: Activity },
     { to: '/approvals', label: 'Approvals', icon: FileCheck2 },
   ] },
@@ -36,6 +38,7 @@ const titles: Record<string, string> = {
   '/': 'Platform overview',
   '/agents': 'Agent registry',
   '/playground': 'Test & run',
+  '/coding': 'Coding workbench',
   '/knowledge': 'Knowledge & retrieval',
   '/runs': 'Runs & traces',
   '/approvals': 'Approval center',

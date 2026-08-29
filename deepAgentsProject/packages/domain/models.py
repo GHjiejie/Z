@@ -6,6 +6,8 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, field_validator
 
+from packages.coding.models import CodingProfileSpec, WorkspaceBinding
+
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -25,6 +27,7 @@ class RunStatus(str, Enum):
     CANCELLED = "CANCELLED"
     TIMED_OUT = "TIMED_OUT"
     FAILED = "FAILED"
+    FAILED_BUDGET = "FAILED_BUDGET"
     SUCCEEDED = "SUCCEEDED"
 
 
@@ -32,6 +35,7 @@ TERMINAL_RUN_STATUSES = {
     RunStatus.CANCELLED.value,
     RunStatus.TIMED_OUT.value,
     RunStatus.FAILED.value,
+    RunStatus.FAILED_BUDGET.value,
     RunStatus.SUCCEEDED.value,
 }
 
@@ -72,6 +76,7 @@ class AgentDraftSpec(BaseModel):
     policies: PolicyBindings = Field(default_factory=PolicyBindings)
     limits: RunLimits = Field(default_factory=RunLimits)
     output_schema: Optional[Dict[str, Any]] = None
+    coding: Optional[CodingProfileSpec] = None
 
     @field_validator("system_prompt")
     @classmethod
@@ -103,6 +108,7 @@ class DeploymentCreate(BaseModel):
 class ThreadCreate(BaseModel):
     agent_deployment_id: str
     title: str = Field(default="New agent task", min_length=1, max_length=160)
+    workspace: Optional[WorkspaceBinding] = None
 
 
 class RunCreate(BaseModel):
