@@ -43,7 +43,7 @@ async def run_demo() -> None:
             "messages": [{"role": "user", "content": "请给我一条学习建议。"}],
             "learner_level": "初学者",
             "learning_topic": "LangChain create_agent",
-        }
+        },
     )
 
 

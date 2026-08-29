@@ -42,9 +42,22 @@ graph.stream(
 uv run python -m subgraph.v3 "LangGraph subgraphs"
 ```
 
-This version uses `graph.stream_events(input, version="v3")` and consumes the
-dedicated `stream.subgraphs` projection. Each discovered subgraph exposes its
-own message stream.
+This version uses `graph.stream_events(input, version="v3")` and calls
+`interleave("lifecycle", "subgraphs", "messages", "values")` on the parent and
+each discovered subgraph. Events are consumed in their actual arrival order.
+
+`run(topic, feedback=handler)` also provides frontend-ready feedback events:
+
+- `workflow`: the workflow or a nested stream was attached;
+- `lifecycle`: a subgraph started, completed, or failed;
+- `activity`: an agent node started or completed;
+- `output`: one streamed model-output delta;
+- `state`: graph state became available;
+- `result`: the final user-facing output.
+
+The default handler renders live terminal feedback. A server can pass an SSE or
+WebSocket sender as `feedback` and forward the same serializable dictionaries to
+the frontend.
 
 The old `uv run python -m subgraph.main` command remains available and runs the
 v2 example.
