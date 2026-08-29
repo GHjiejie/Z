@@ -23,6 +23,59 @@ def client_for(tmp_path):
     return TestClient(create_app(str(tmp_path / "platform.db"), seed=True))
 
 
+def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
+    database_path = str(tmp_path / "platform.db")
+    with TestClient(create_app(database_path, seed=True)) as client:
+        health = client.get("/health").json()
+        assert health["plugins_loaded"] == 1
+        assert health["skills_loaded"] == 3
+
+        plugins = client.get("/api/v1/plugins").json()["items"]
+        skills = client.get("/api/v1/skills").json()["items"]
+        assert [(plugin["id"], plugin["skill_count"]) for plugin in plugins] == [
+            ("deepagent-core", 3)
+        ]
+        assert {skill["slug"] for skill in skills} == {
+            "task-planning",
+            "evidence-research",
+            "release-safety",
+        }
+
+        agent = client.get("/api/v1/agents").json()["items"][0]
+        detail = client.get(f"/api/v1/agents/{agent['id']}").json()
+        plan = detail["revisions"][0]
+        resolved = client.get(f"/api/v1/agent-revisions/{plan['id']}").json()["resolved_plan"]["plan"]
+        pinned_skills = resolved["skill_versions"]
+        assert {skill["slug"] for skill in pinned_skills} == {"task-planning", "release-safety"}
+        assert all(len(skill["artifact_hash"]) == 64 for skill in pinned_skills)
+        assert all(skill["instructions"].startswith("# ") for skill in pinned_skills)
+
+    with TestClient(create_app(database_path, seed=True)) as client:
+        assert len(client.get("/api/v1/plugins").json()["items"]) == 1
+        assert len(client.get("/api/v1/skills").json()["items"]) == 3
+
+
+def test_unknown_skill_blocks_publish(tmp_path):
+    with client_for(tmp_path) as client:
+        agent = client.get("/api/v1/agents").json()["items"][0]
+        detail = client.get(f"/api/v1/agents/{agent['id']}").json()
+        detail["draft"]["capabilities"]["skills"].append("missing-skill")
+        saved = client.patch(
+            f"/api/v1/agents/{agent['id']}/draft",
+            json={
+                "name": detail["name"],
+                "description": detail["description"],
+                "draft": detail["draft"],
+                "version": detail["version"],
+            },
+        )
+        assert saved.status_code == 200
+        validation = client.post(f"/api/v1/agents/{agent['id']}/revisions:validate").json()
+        assert validation["valid"] is False
+        assert any(issue["code"] == "SKILL_NOT_FOUND" for issue in validation["issues"])
+        assert client.post(f"/api/v1/agents/{agent['id']}/revisions:publish").status_code == 409
+
+
 def test_publish_creates_immutable_revision_and_plan(tmp_path):
     with client_for(tmp_path) as client:
         agent = client.get("/api/v1/agents").json()["items"][0]
@@ -82,6 +135,11 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
         assert {"model.started", "tool.completed", "subagent.completed", "artifact.created", "run.completed"}.issubset(
             {event["type"] for event in events}
         )
+        loaded_skills = [event for event in events if event["type"] == "skill.loaded"]
+        assert {event["payload"]["slug"] for event in loaded_skills} == {
+            "task-planning",
+            "release-safety",
+        }
         resumed = client.get(
             f"/api/v1/runs/{run['id']}/events?after_sequence={events[-2]['sequence']}"
         ).json()["items"]

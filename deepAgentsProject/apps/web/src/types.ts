@@ -149,6 +149,32 @@ export interface ModelDeployment {
   pricing: { input_per_million: number; output_per_million: number }
 }
 
+export interface Plugin {
+  id: string
+  name: string
+  version: string
+  description: string
+  manifest_hash: string
+  status: string
+  skill_count: number
+  loaded_at: string
+}
+
+export interface Skill {
+  id: string
+  plugin_id: string
+  plugin_name: string
+  slug: string
+  name: string
+  description: string
+  current_version_id: string
+  version: string
+  artifact_hash: string
+  tags: string[]
+  status: string
+  builtin: number
+}
+
 export interface Overview {
   agents: number
   deployments: number

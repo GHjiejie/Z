@@ -25,6 +25,9 @@ class RuntimeBinder:
             "store_namespace": f"{run['tenant_id']}/{run['project_id']}/user_demo/{plan['agent_revision_id']}/memory",
             "model_endpoint_id": plan["model_deployment_revision_id"],
             "sandbox_instance_id": None,
-            "feature_flags": {"reference_harness": True},
+            "feature_flags": {
+                "reference_harness": True,
+                "skills_enabled": bool(plan.get("skill_versions")),
+            },
         }
 

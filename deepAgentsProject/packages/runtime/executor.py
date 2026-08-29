@@ -73,8 +73,21 @@ class ReferenceRuntimeExecutor:
                 "worker_id": self.worker_id,
                 "runtime_image_digest": plan["runtime_image_digest"],
                 "plan_hash": plan["plan_hash"],
+                "skill_count": len(executable["skills"]),
             },
         )
+        for skill in executable["skills"]:
+            self.events.append(
+                run_id,
+                "skill.loaded",
+                {
+                    "revision_id": skill["revision_id"],
+                    "slug": skill["slug"],
+                    "version": skill["version"],
+                    "artifact_hash": skill["artifact_hash"],
+                },
+                span_id="span_main",
+            )
         await asyncio.sleep(0.08)
         if self._is_cancelled(run_id):
             return
@@ -88,6 +101,7 @@ class ReferenceRuntimeExecutor:
                 "attempt_id": run["current_attempt_id"],
                 "model_endpoint_id": runtime_context["model_endpoint_id"],
                 "harness_adapter_version": executable["adapter_version"],
+                "skills": [skill["slug"] for skill in executable["skills"]],
             },
             span_id="span_main",
         )

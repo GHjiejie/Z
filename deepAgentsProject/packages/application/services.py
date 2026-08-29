@@ -9,6 +9,7 @@ from packages.domain.models import (
     AgentCreate,
     AgentDraftSpec,
     AgentDraftUpdate,
+    CapabilityBindings,
     DeploymentCreate,
     TenantContext,
     utc_now,
@@ -245,7 +246,7 @@ class AgentService:
         )
 
 
-def seed_reference_data(db: Database) -> None:
+def seed_reference_data(db: Database, compiler: AgentPlanCompiler) -> None:
     if db.fetch_one("SELECT id FROM model_deployments LIMIT 1"):
         return
     now = utc_now()
@@ -279,12 +280,14 @@ def seed_reference_data(db: Database) -> None:
     )
 
     context = TenantContext(tenant_id="tenant_demo", project_id="project_atlas")
-    service = AgentService(db, AgentPlanCompiler())
+    service = AgentService(db, compiler)
     created = service.create_agent(
         AgentCreate(
             name="Release Sentinel",
             description="Plans releases, inspects risk, and pauses production changes for human approval.",
-            draft=AgentDraftSpec(),
+            draft=AgentDraftSpec(
+                capabilities=CapabilityBindings(skills=["task-planning", "release-safety"])
+            ),
         ),
         context,
     )

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import os
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -20,8 +21,12 @@ from packages.application.services import (
 )
 from packages.compiler import AgentPlanCompiler
 from packages.persistence import Database
+from packages.plugins import PluginLoader, SkillRegistry
 from packages.runtime import RunOrchestrator, RunService
 from packages.runtime.event_emitter import EventEmitter
+
+
+logger = logging.getLogger(__name__)
 
 
 def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
@@ -32,9 +37,23 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
     async def lifespan(application: FastAPI):
         db = Database(db_path)
         db.initialize()
+        plugin_roots = [root / "builtin_plugins"]
+        configured_roots = os.getenv("DEEPAGENT_PLUGIN_PATHS", "")
+        for configured_root in configured_roots.split(os.pathsep):
+            if configured_root.strip():
+                path = Path(configured_root.strip())
+                plugin_roots.append(path if path.is_absolute() else root / path)
+        plugin_report = PluginLoader(db, plugin_roots).load()
+        logger.info(
+            "Loaded %s plugin(s) and %s skill(s): %s",
+            plugin_report.plugin_count,
+            plugin_report.skill_count,
+            ", ".join(plugin_report.plugin_ids) or "none",
+        )
+        skill_registry = SkillRegistry(db)
+        compiler = AgentPlanCompiler(skill_registry)
         if seed:
-            seed_reference_data(db)
-        compiler = AgentPlanCompiler()
+            seed_reference_data(db, compiler)
         events = EventEmitter(db)
         orchestrator = RunOrchestrator(db, events)
         run_service = RunService(db, events, orchestrator)
@@ -42,6 +61,9 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
         application.state.services = SimpleNamespace(
             db=db,
             compiler=compiler,
+            plugins=skill_registry,
+            skills=skill_registry,
+            plugin_load_report=plugin_report,
             events=events,
             orchestrator=orchestrator,
             agents=AgentService(db, compiler),
@@ -83,6 +105,8 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
             "service": "platform-api",
             "worker_id": services.orchestrator.worker_id,
             "queue_depth": services.orchestrator.queue.qsize(),
+            "plugins_loaded": services.plugin_load_report.plugin_count,
+            "skills_loaded": services.plugin_load_report.skill_count,
         }
 
     application.include_router(native_router)

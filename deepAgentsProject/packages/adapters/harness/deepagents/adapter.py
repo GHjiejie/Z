@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 from typing import Any, Awaitable, Callable, Dict
 
 
@@ -16,12 +17,36 @@ class DeepAgentsHarnessAdapter:
     async def build_factory(
         self, plan: Dict[str, Any]
     ) -> Callable[[Dict[str, Any]], Awaitable[Dict[str, Any]]]:
+        loaded_skills = []
+        for skill in plan.get("skill_versions", []):
+            instructions = skill.get("instructions", "")
+            actual_hash = hashlib.sha256(instructions.encode("utf-8")).hexdigest()
+            if actual_hash != skill.get("artifact_hash"):
+                raise RuntimeError(
+                    f"Skill artifact hash mismatch for {skill.get('slug', skill.get('revision_id'))}"
+                )
+            loaded_skills.append(
+                {
+                    "revision_id": skill["revision_id"],
+                    "slug": skill["slug"],
+                    "name": skill["name"],
+                    "version": skill["version"],
+                    "artifact_hash": skill["artifact_hash"],
+                    "instructions": instructions,
+                }
+            )
+
         async def factory(runtime_context: Dict[str, Any]) -> Dict[str, Any]:
             return {
                 "harness": plan["harness_type"],
                 "adapter_version": self.adapter_version,
                 "plan_hash": plan["plan_hash"],
                 "runtime_context": runtime_context,
+                "skills": loaded_skills,
+                "skill_context": "\n\n".join(
+                    f"## Skill: {skill['name']} ({skill['version']})\n{skill['instructions']}"
+                    for skill in loaded_skills
+                ),
             }
 
         return factory

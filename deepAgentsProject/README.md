@@ -14,6 +14,7 @@
 - React 控制台：Overview、Agent Builder、Playground、Runs & Traces、Approvals、Resources；
 - 无模型密钥即可运行的确定性 Reference Harness，便于验证平台契约；
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
+- 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
 
 ## 快速启动
 
@@ -78,6 +79,37 @@ tests/                      端到端平台契约测试
 当前仓库内置 Reference Harness，目的是让发布、调度、流式、HITL、恢复、审计和计费在无任何外部凭据时全部可验证。生产接入时，只需在 `packages/adapters/harness/deepagents` 中使用锁定版本的 `create_deep_agent()` 构建 LangGraph Runnable，并将 SDK 事件转换成 `Platform RuntimeEvent`；API、领域对象和控制台无需改变。
 
 真实 Credential 禁止进入 Revision、Plan、Checkpoint、Event 或 Prompt。当前 Runtime Binder 只产生短期 opaque handle，生产实现应由 Credential Broker 在实际工具调用前兑换。
+
+## 内置 Plugin 与 Skill
+
+项目自带 `builtin_plugins/deepagent-core` 声明式插件包，启动 API 时会自动发现并注册以下 Skills：
+
+- `task-planning`：复杂任务拆解、状态维护与交付验证；
+- `evidence-research`：证据收集、冲突处理与可追溯引用；
+- `release-safety`：发布检查、生产变更审批与回滚意识。
+
+默认 Agent 会绑定 `task-planning` 和 `release-safety`。发布 Agent 时，Skill 引用会被解析为不可变的 `skill_version`，其版本、说明、完整指令和 SHA-256 Artifact Hash 一同锁入 `ResolvedExecutionPlan`；Worker 构建 Harness 时会再次校验 Hash 并加载指令，同时产生 `skill.loaded` RuntimeEvent。
+
+插件格式如下：
+
+```text
+my-plugin/
+├── plugin.json
+└── skills/
+    └── my-skill/
+        └── SKILL.md
+```
+
+`plugin.json` 只声明元数据和 Skill 文件路径。Phase 1 不会从插件目录导入或执行代码。需要加载额外的本地插件目录时，在 `.env` 中配置 `DEEPAGENT_PLUGIN_PATHS`（多个目录使用操作系统 path separator 分隔）。同一 Skill 版本的内容不可原地修改；内容变化必须提升版本号。
+
+可通过以下接口检查启动结果：
+
+```text
+GET /health
+GET /api/v1/plugins
+GET /api/v1/skills
+GET /api/v1/skills/{slug-or-version}
+```
 
 ## 当前边界
 

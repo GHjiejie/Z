@@ -22,7 +22,7 @@ import {
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
 import { api } from '../lib/api'
-import type { Agent, AgentDraft, ModelDeployment } from '../types'
+import type { Agent, AgentDraft, ModelDeployment, Skill } from '../types'
 import { ErrorBanner, LoadingBlock, PageHeader, StatusPill, formatRelative, shortId } from '../components/UI'
 
 const defaultDraft: AgentDraft = {
@@ -30,7 +30,7 @@ const defaultDraft: AgentDraft = {
   harness_profile_revision_id: 'deepagents-0.x-adapter-1.0',
   model_deployment_id: 'model_qwen_prod_v1',
   system_prompt: 'You are a careful project agent. Plan first, use approved tools, and cite artifacts.',
-  capabilities: { tools: ['knowledge_search', 'artifact_write'], mcp_servers: [], skills: [], memories: [], knowledge_bases: [], subagents: ['researcher'], filesystem: true },
+  capabilities: { tools: ['knowledge_search', 'artifact_write'], mcp_servers: [], skills: ['task-planning', 'release-safety'], memories: [], knowledge_bases: [], subagents: ['researcher'], filesystem: true },
   policies: { permission_policy: 'project-default', approval_mode: 'high_risk', audit_level: 'strict' },
   limits: { max_duration_seconds: 600, max_model_calls: 20, max_tool_calls: 30, max_subagent_depth: 3, max_subagent_concurrency: 4, max_sandbox_cpu_seconds: 120, max_output_bytes: 1000000, max_cost: 5 },
   output_schema: null,
@@ -41,6 +41,7 @@ type BuilderTab = 'identity' | 'capabilities' | 'policies' | 'release'
 export function AgentsPage() {
   const [agents, setAgents] = useState<Agent[]>([])
   const [models, setModels] = useState<ModelDeployment[]>([])
+  const [skills, setSkills] = useState<Skill[]>([])
   const [selected, setSelected] = useState<Agent | null>(null)
   const [draft, setDraft] = useState<AgentDraft>(defaultDraft)
   const [name, setName] = useState('')
@@ -54,9 +55,10 @@ export function AgentsPage() {
 
   const load = async () => {
     try {
-      const [agentResult, modelResult] = await Promise.all([api.agents(), api.models()])
+      const [agentResult, modelResult, skillResult] = await Promise.all([api.agents(), api.models(), api.skills()])
       setAgents(agentResult.items)
       setModels(modelResult.items)
+      setSkills(skillResult.items)
       if (!selected && agentResult.items[0]) await selectAgent(agentResult.items[0].id)
       setLoaded(true)
     } catch (err) { setError((err as Error).message); setLoaded(true) }
@@ -159,7 +161,7 @@ export function AgentsPage() {
               {tab === 'capabilities' && <div className="capabilities-grid">
                 <CapabilityCard icon={Wrench} title="Tools" description="Runtime tool gateway bindings" items={draft.capabilities.tools} onChange={(items) => updateCapabilities('tools', items)} suggestions={['knowledge_search', 'artifact_write', 'shell_execute']} />
                 <CapabilityCard icon={Bot} title="SubAgents" description="Synchronous execution spans" items={draft.capabilities.subagents} onChange={(items) => updateCapabilities('subagents', items)} suggestions={['researcher', 'reviewer', 'coder']} />
-                <CapabilityCard icon={Layers3} title="Skills" description="Progressive instruction packages" items={draft.capabilities.skills} onChange={(items) => updateCapabilities('skills', items)} suggestions={['frontend-review-v1', 'release-audit-v2']} />
+                <CapabilityCard icon={Layers3} title="Skills" description="Versioned instructions loaded by the harness" items={draft.capabilities.skills} onChange={(items) => updateCapabilities('skills', items)} suggestions={skills.map((skill) => skill.slug)} />
                 <CapabilityCard icon={Box} title="MCP servers" description="Versioned discovery snapshots" items={draft.capabilities.mcp_servers} onChange={(items) => updateCapabilities('mcp_servers', items)} suggestions={['github-mcp-v1', 'postgres-readonly-v1']} />
                 <div className="capability-card toggle-card"><div className="capability-head"><div className="capability-icon"><Code2 size={18} /></div><div><h4>Filesystem workspace</h4><p>Expose virtual workspace mounts</p></div><button className={`toggle ${draft.capabilities.filesystem ? 'on' : ''}`} onClick={() => updateCapabilities('filesystem', !draft.capabilities.filesystem)}><span /></button></div><div className="mount-preview"><code>/workspace</code><span>run-scoped · read/write</span><code>/artifacts</code><span>object storage · write</span></div></div>
               </div>}
@@ -188,4 +190,3 @@ function CapabilityCard({ icon: Icon, title, description, items, onChange, sugge
   const add = () => { const item = value.trim(); if (item && !items.includes(item)) onChange([...items, item]); setValue('') }
   return <div className="capability-card"><div className="capability-head"><div className="capability-icon"><Icon size={18} /></div><div><h4>{title}</h4><p>{description}</p></div><span className="count-badge">{items.length}</span></div><div className="chips">{items.map((item) => <span className="chip" key={item}>{item}<button onClick={() => onChange(items.filter((entry) => entry !== item))}><X size={12} /></button></span>)}</div><div className="inline-add"><input list={`${title}-suggestions`} value={value} onChange={(e) => setValue(e.target.value)} onKeyDown={(e) => { if (e.key === 'Enter') { e.preventDefault(); add() } }} placeholder={`Add ${title.toLowerCase()} binding`} /><datalist id={`${title}-suggestions`}>{suggestions.map((item) => <option key={item} value={item} />)}</datalist><button onClick={add}><Plus size={15} /></button></div></div>
 }
-

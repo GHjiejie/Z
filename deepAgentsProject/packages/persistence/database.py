@@ -179,6 +179,44 @@ CREATE TABLE IF NOT EXISTS model_deployments (
   pricing_json TEXT NOT NULL,
   created_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS plugins (
+  id TEXT PRIMARY KEY,
+  name TEXT NOT NULL,
+  version TEXT NOT NULL,
+  description TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  manifest_hash TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  loaded_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS skills (
+  id TEXT PRIMARY KEY,
+  plugin_id TEXT NOT NULL REFERENCES plugins(id),
+  slug TEXT NOT NULL UNIQUE,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL,
+  current_version_id TEXT NOT NULL,
+  tags_json TEXT NOT NULL DEFAULT '[]',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  builtin INTEGER NOT NULL DEFAULT 1,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_skills_plugin ON skills(plugin_id, status, name);
+
+CREATE TABLE IF NOT EXISTS skill_versions (
+  id TEXT PRIMARY KEY,
+  skill_id TEXT NOT NULL REFERENCES skills(id),
+  version TEXT NOT NULL,
+  artifact_hash TEXT NOT NULL,
+  content TEXT NOT NULL,
+  source_path TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(skill_id, version)
+);
+CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, created_at DESC);
 """
 
 
@@ -193,6 +231,7 @@ JSON_COLUMNS = {
     "capabilities_json": "capabilities",
     "pricing_json": "pricing",
     "event_json": "event",
+    "tags_json": "tags",
 }
 
 

@@ -1,0 +1,33 @@
+{
+  "schema_version": "1.0",
+  "id": "deepagent-core",
+  "name": "DeepAgent Core Skills",
+  "version": "1.0.0",
+  "description": "Reviewed instruction packages that provide the baseline behavior expected from a DeepAgent runtime.",
+  "skills": [
+    {
+      "slug": "task-planning",
+      "name": "Task Planning",
+      "version": "1.0.0",
+      "description": "Turn complex requests into explicit, verifiable execution plans.",
+      "path": "skills/task-planning/SKILL.md",
+      "tags": ["core", "planning", "execution"]
+    },
+    {
+      "slug": "evidence-research",
+      "name": "Evidence Research",
+      "version": "1.0.0",
+      "description": "Gather, compare, and synthesize evidence with traceable sources.",
+      "path": "skills/evidence-research/SKILL.md",
+      "tags": ["core", "research", "citations"]
+    },
+    {
+      "slug": "release-safety",
+      "name": "Release Safety",
+      "version": "1.0.0",
+      "description": "Review deployment risk and gate consequential production actions.",
+      "path": "skills/release-safety/SKILL.md",
+      "tags": ["core", "release", "safety", "hitl"]
+    }
+  ]
+}

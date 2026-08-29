@@ -3,9 +3,13 @@ from __future__ import annotations
 import hashlib
 import json
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Protocol
 
 from packages.domain.models import AgentDraftSpec
+
+
+class SkillResolver(Protocol):
+    def resolve_many(self, references: List[str]) -> List[Dict[str, Any]]: ...
 
 
 @dataclass
@@ -43,6 +47,9 @@ class AgentPlanCompiler:
         "streaming",
     }
 
+    def __init__(self, skill_registry: Optional[SkillResolver] = None):
+        self.skill_registry = skill_registry
+
     def validate(self, draft_data: Dict[str, Any]) -> List[ValidationIssue]:
         issues: List[ValidationIssue] = []
         try:
@@ -77,6 +84,28 @@ class AgentPlanCompiler:
                     "limits.max_subagent_concurrency",
                 )
             )
+        if draft.capabilities.skills:
+            if not self.skill_registry:
+                issues.append(
+                    ValidationIssue(
+                        "error",
+                        "SKILL_REGISTRY_UNAVAILABLE",
+                        "Skills are bound but no Skill Registry is available",
+                        "capabilities.skills",
+                    )
+                )
+            else:
+                try:
+                    self.skill_registry.resolve_many(draft.capabilities.skills)
+                except LookupError as exc:
+                    issues.append(
+                        ValidationIssue(
+                            "error",
+                            "SKILL_NOT_FOUND",
+                            str(exc),
+                            "capabilities.skills",
+                        )
+                    )
         if draft.policies.approval_mode == "never":
             issues.append(
                 ValidationIssue(
@@ -100,6 +129,11 @@ class AgentPlanCompiler:
             raise ValueError("; ".join(issue.message for issue in errors))
 
         draft = AgentDraftSpec.model_validate(draft_data)
+        skill_versions = (
+            self.skill_registry.resolve_many(draft.capabilities.skills)
+            if draft.capabilities.skills and self.skill_registry
+            else []
+        )
         prompt_hash = hashlib.sha256(draft.system_prompt.encode("utf-8")).hexdigest()
         resolved = {
             "agent_revision_id": revision_id,
@@ -121,7 +155,7 @@ class AgentPlanCompiler:
                 for name in draft.capabilities.tools
             ],
             "mcp_bindings": [{"revision_id": item} for item in draft.capabilities.mcp_servers],
-            "skill_versions": [{"revision_id": item} for item in draft.capabilities.skills],
+            "skill_versions": skill_versions,
             "memory_versions": [{"revision_id": item} for item in draft.capabilities.memories],
             "knowledge_bindings": [{"revision_id": item} for item in draft.capabilities.knowledge_bases],
             "subagent_bindings": [

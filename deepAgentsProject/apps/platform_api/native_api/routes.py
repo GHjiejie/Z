@@ -9,6 +9,7 @@ from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import StreamingResponse
 
 from apps.platform_api.dependencies import services, tenant_context
+from packages.application.services import NotFoundError
 from packages.domain.models import (
     AgentCreate,
     AgentDraftUpdate,
@@ -197,6 +198,24 @@ def list_models(context: TenantContext = Depends(tenant_context), container=Depe
     return {"items": container.agents.list_models(context)}
 
 
+@router.get("/plugins")
+def list_plugins(container=Depends(services)):
+    return {"items": container.plugins.list_plugins()}
+
+
+@router.get("/skills")
+def list_skills(container=Depends(services)):
+    return {"items": container.skills.list_skills()}
+
+
+@router.get("/skills/{skill_reference}")
+def get_skill(skill_reference: str, container=Depends(services)):
+    skill = container.skills.get_skill(skill_reference)
+    if not skill:
+        raise NotFoundError("Skill not found")
+    return skill
+
+
 @router.get("/threads")
 def list_threads(context: TenantContext = Depends(tenant_context), container=Depends(services)):
     return {"items": container.runs.list_threads(context)}
@@ -381,4 +400,3 @@ async def decide_interrupt(
         idempotency_key or f"decision_{secrets.token_hex(8)}",
         expected_version,
     )
-

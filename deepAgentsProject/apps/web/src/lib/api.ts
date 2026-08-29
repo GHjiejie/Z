@@ -5,8 +5,10 @@ import type {
   Interrupt,
   ModelDeployment,
   Overview,
+  Plugin,
   Run,
   RuntimeEvent,
+  Skill,
 } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -53,6 +55,8 @@ export const api = {
       body: JSON.stringify({ agent_revision_id: agentRevisionId, environment }),
     }),
   models: () => request<{ items: ModelDeployment[] }>('/api/v1/models'),
+  plugins: () => request<{ items: Plugin[] }>('/api/v1/plugins'),
+  skills: () => request<{ items: Skill[] }>('/api/v1/skills'),
   runs: () => request<{ items: Run[] }>('/api/v1/runs'),
   run: (id: string) => request<Run>(`/api/v1/runs/${id}`),
   runEvents: (id: string, after = 0) =>
@@ -85,4 +89,3 @@ export const api = {
 export function streamUrl(runId: string, afterSequence = 0) {
   return `${API_BASE}/api/v1/runs/${runId}/stream?after_sequence=${afterSequence}`
 }
-
