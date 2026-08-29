@@ -122,6 +122,7 @@ class AgentPlanCompiler:
         revision_id: str,
         draft_data: Dict[str, Any],
         model_snapshot: Dict[str, Any],
+        knowledge_snapshots: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
         issues = self.validate(draft_data)
         errors = [issue for issue in issues if issue.level == "error"]
@@ -157,7 +158,18 @@ class AgentPlanCompiler:
             "mcp_bindings": [{"revision_id": item} for item in draft.capabilities.mcp_servers],
             "skill_versions": skill_versions,
             "memory_versions": [{"revision_id": item} for item in draft.capabilities.memories],
-            "knowledge_bindings": [{"revision_id": item} for item in draft.capabilities.knowledge_bases],
+            "knowledge_bindings": [
+                {
+                    "revision_id": item["id"],
+                    "knowledge_base_id": item["knowledge_base_id"],
+                    "index_hash": item["index_hash"],
+                    "embedding_model": item["embedding_model"],
+                    "embedding_dimensions": item["embedding_dimensions"],
+                    "retrieval_profile": item["retrieval_profile"],
+                    "access": "read_only",
+                }
+                for item in (knowledge_snapshots or [])
+            ],
             "subagent_bindings": [
                 {
                     "name": name,

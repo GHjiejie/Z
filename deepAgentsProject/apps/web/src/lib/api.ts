@@ -3,6 +3,11 @@ import type {
   AgentDraft,
   Deployment,
   Interrupt,
+  KnowledgeBase,
+  KnowledgeIngestionJob,
+  KnowledgeRevision,
+  KnowledgeSearchResult,
+  KnowledgeUploadPreparation,
   ModelDeployment,
   Overview,
   Plugin,
@@ -57,6 +62,51 @@ export const api = {
   models: () => request<{ items: ModelDeployment[] }>('/api/v1/models'),
   plugins: () => request<{ items: Plugin[] }>('/api/v1/plugins'),
   skills: () => request<{ items: Skill[] }>('/api/v1/skills'),
+  knowledgeBases: () => request<{ items: KnowledgeBase[] }>('/api/v1/knowledge-bases'),
+  knowledgeBase: (id: string) => request<KnowledgeBase>(`/api/v1/knowledge-bases/${id}`),
+  createKnowledgeBase: (body: { name: string; description: string }) =>
+    request<KnowledgeBase>('/api/v1/knowledge-bases', { method: 'POST', body: JSON.stringify(body) }),
+  knowledgeRevisions: (knowledgeBaseId: string) =>
+    request<{ items: KnowledgeRevision[] }>(`/api/v1/knowledge-bases/${knowledgeBaseId}/revisions`),
+  prepareKnowledgeUpload: (knowledgeBaseId: string, file: File) =>
+    request<KnowledgeUploadPreparation>(`/api/v1/knowledge-bases/${knowledgeBaseId}/documents:prepare-upload`, {
+      method: 'POST',
+      body: JSON.stringify({
+        filename: file.name,
+        content_type: file.type || 'application/octet-stream',
+        size_bytes: file.size,
+        visibility: 'project',
+        allowed_roles: [],
+      }),
+    }),
+  uploadKnowledgeFile: async (preparation: KnowledgeUploadPreparation, file: File) => {
+    const platformUpload = preparation.upload.url.startsWith('/')
+    const response = await fetch(platformUpload ? `${API_BASE}${preparation.upload.url}` : preparation.upload.url, {
+      method: preparation.upload.method,
+      body: file,
+      headers: {
+        ...(platformUpload ? tenantHeaders : {}),
+        'Content-Type': file.type || 'application/octet-stream',
+        ...preparation.upload.required_headers,
+      },
+    })
+    if (!response.ok) {
+      const body = await response.json().catch(() => ({}))
+      throw new Error(body?.error?.message ?? body?.detail ?? `Upload failed (${response.status})`)
+    }
+    return { etag: response.headers.get('etag')?.replaceAll('"', '') ?? undefined }
+  },
+  completeKnowledgeUpload: (versionId: string, etag?: string) =>
+    request<KnowledgeIngestionJob>(`/api/v1/knowledge-document-versions/${versionId}:complete`, {
+      method: 'POST',
+      body: JSON.stringify({ etag }),
+    }),
+  knowledgeJob: (id: string) => request<KnowledgeIngestionJob>(`/api/v1/knowledge-ingestion-jobs/${id}`),
+  searchKnowledge: (knowledgeBaseId: string, query: string, topK = 8) =>
+    request<KnowledgeSearchResult>('/api/v1/knowledge:search', {
+      method: 'POST',
+      body: JSON.stringify({ knowledge_base_id: knowledgeBaseId, query, top_k: topK }),
+    }),
   runs: () => request<{ items: Run[] }>('/api/v1/runs'),
   run: (id: string) => request<Run>(`/api/v1/runs/${id}`),
   runEvents: (id: string, after = 0) =>

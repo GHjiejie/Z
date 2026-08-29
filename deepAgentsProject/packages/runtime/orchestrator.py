@@ -5,18 +5,21 @@ import secrets
 from typing import Optional
 
 from packages.domain.models import utc_now
+from packages.knowledge.service import KnowledgeService
 from packages.persistence import Database
 from packages.runtime.event_emitter import EventEmitter
 from packages.runtime.executor import ReferenceRuntimeExecutor
 
 
 class RunOrchestrator:
-    def __init__(self, db: Database, events: EventEmitter):
+    def __init__(
+        self, db: Database, events: EventEmitter, knowledge: Optional[KnowledgeService] = None
+    ):
         self.db = db
         self.events = events
         self.queue: asyncio.Queue[str] = asyncio.Queue()
         self.worker_id = f"worker_reference_{secrets.token_hex(3)}"
-        self.executor = ReferenceRuntimeExecutor(db, events, self.worker_id)
+        self.executor = ReferenceRuntimeExecutor(db, events, self.worker_id, knowledge)
         self.task: Optional[asyncio.Task] = None
 
     async def start(self) -> None:
@@ -63,4 +66,3 @@ class RunOrchestrator:
                     )
             finally:
                 self.queue.task_done()
-

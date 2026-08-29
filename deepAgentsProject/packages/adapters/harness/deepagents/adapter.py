@@ -43,6 +43,18 @@ class DeepAgentsHarnessAdapter:
                 "plan_hash": plan["plan_hash"],
                 "runtime_context": runtime_context,
                 "skills": loaded_skills,
+                "tools": [
+                    {
+                        "name": "knowledge_search",
+                        "risk_level": "low",
+                        "revision_ids": [
+                            binding["revision_id"]
+                            for binding in plan.get("knowledge_bindings", [])
+                        ],
+                    }
+                ]
+                if plan.get("knowledge_bindings")
+                else [],
                 "skill_context": "\n\n".join(
                     f"## Skill: {skill['name']} ({skill['version']})\n{skill['instructions']}"
                     for skill in loaded_skills
@@ -50,4 +62,3 @@ class DeepAgentsHarnessAdapter:
             }
 
         return factory
-

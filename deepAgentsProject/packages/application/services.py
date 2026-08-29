@@ -149,7 +149,15 @@ class AgentService:
         )
         if not model:
             raise ConflictError("Referenced model deployment does not exist in this project")
-        plan = self.compiler.compile(revision_id, agent["draft"], model)
+        knowledge_snapshots = self._resolve_knowledge_revisions(
+            agent["draft"]["capabilities"].get("knowledge_bases", []), context
+        )
+        plan = self.compiler.compile(
+            revision_id,
+            agent["draft"],
+            model,
+            knowledge_snapshots=knowledge_snapshots,
+        )
         plan_id = new_id("plan")
         plan["id"] = plan_id
         self.db.execute(
@@ -177,6 +185,23 @@ class AgentService:
             ),
             "validation": validation,
         }
+
+    def _resolve_knowledge_revisions(
+        self, references: List[str], context: TenantContext
+    ) -> List[Dict[str, Any]]:
+        snapshots: List[Dict[str, Any]] = []
+        for revision_id in references:
+            revision = self.db.fetch_one(
+                """SELECT * FROM knowledge_base_revisions
+                   WHERE id=? AND tenant_id=? AND project_id=? AND status='ACTIVE'""",
+                (revision_id, context.tenant_id, context.project_id),
+            )
+            if not revision:
+                raise ConflictError(
+                    f"Knowledge revision {revision_id} is unavailable or not active in this project"
+                )
+            snapshots.append(revision)
+        return snapshots
 
     def list_revisions(self, agent_id: str, context: TenantContext) -> List[Dict[str, Any]]:
         self.get_agent(agent_id, context)

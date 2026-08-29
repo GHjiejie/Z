@@ -1,7 +1,10 @@
 fastapi>=0.116,<1
 uvicorn[standard]>=0.35,<1
 pydantic>=2.11,<3
+alibabacloud-credentials>=1,<2
+alibabacloud-oss-v2>=1.2,<2
+pypdf>=5,<7
+python-docx>=1.1,<2
 httpx>=0.28,<1
 pytest>=8.4,<9
 pytest-asyncio>=1.1,<2
-

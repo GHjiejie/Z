@@ -15,6 +15,7 @@
 - 无模型密钥即可运行的确定性 Reference Harness，便于验证平台契约；
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
+- Knowledge/RAG：OSS 直传授权、持久摄取任务、PDF/DOCX/Markdown 等解析、不可变知识库版本、混合检索、ACL 与 Citation。
 
 ## 快速启动
 
@@ -43,6 +44,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 3. 输入含有 `deploy to production` 或“部署到生产”的任务，Run 会进入 `WAITING_FOR_APPROVAL`。
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
+6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，Run 会执行真实 `knowledge_search`。
 
 ## 测试与构建
 
@@ -57,6 +59,8 @@ make verify
 - RuntimeEvent 序列和断点读取；
 - HITL Checkpoint、幂等决策和多 Attempt 恢复；
 - Tenant / Project 数据隔离。
+- Knowledge 上传、文件完整性校验、摄取、版本发布、检索、下载与 Agent Runtime Citation；
+- Knowledge 的 Tenant / Project / Role 隔离和错误上传拒绝。
 
 ## 代码结构
 
@@ -69,6 +73,7 @@ packages/
 ├── application/           Agent 发布与审批用例
 ├── compiler/              静态验证、依赖锁定、Plan Hash
 ├── runtime/               Orchestrator、Lease、Binder、Executor、Event
+├── knowledge/             OSS、摄取、解析、分块、Embedding、检索与 Citation
 ├── adapters/harness/      Deep Agents 稳定适配边界
 └── persistence/           SQLite 参考仓储与 Schema
 tests/                      端到端平台契约测试
@@ -111,6 +116,32 @@ GET /api/v1/skills
 GET /api/v1/skills/{slug-or-version}
 ```
 
+## Knowledge / RAG 与阿里云 OSS
+
+开发环境默认使用 `KNOWLEDGE_OBJECT_STORE=local`，保留与 OSS 相同的上传授权、完成确认和索引契约。生产环境设置：
+
+```dotenv
+KNOWLEDGE_OBJECT_STORE=oss
+ALIYUN_OSS_BUCKET=jie-agent-file
+ALIYUN_OSS_REGION=cn-beijing
+ALIYUN_OSS_USE_INTERNAL_ENDPOINT=true
+```
+
+服务使用阿里云默认凭据链，支持 RAM Role、OIDC、STS 和环境凭据；不会把 AK/SK 写入数据库、Agent Revision、Execution Plan、Checkpoint 或事件。数据库保存 `bucket`、`region`、`object_key`、`version_id` 和稳定 `oss://` URI，上传和下载 URL 均按需短期签名。
+
+Knowledge API 的主要流程：
+
+```text
+POST /api/v1/knowledge-bases
+POST /api/v1/knowledge-bases/{id}/documents:prepare-upload
+PUT  <returned upload URL>
+POST /api/v1/knowledge-document-versions/{id}:complete
+GET  /api/v1/knowledge-ingestion-jobs/{id}
+POST /api/v1/knowledge:search
+```
+
+`KNOWLEDGE_EMBEDDING_PROVIDER=hash` 是无需外部凭据的确定性参考实现。生产环境应配置 `openai_compatible` 并通过模型网关提供 Embedding endpoint、模型与维度；这些参数会被锁入 Knowledge Revision。
+
 ## 当前边界
 
-本实现交付文档定义的 Phase 1 核心运行骨架。Kubernetes Sandbox、真实 MCP Session、向量知识库、外部模型路由和 Preview/Beta Dynamic/Async SubAgent 保留在后续阶段；对应领域边界已预留，但不会用不安全的本机 `subprocess` 或伪造的 SDK 调用冒充生产实现。
+本实现交付文档定义的 Phase 1 核心运行骨架并包含可运行的 Knowledge/RAG 参考链路及阿里云 OSS 生产适配。Kubernetes Sandbox、真实 MCP Session、外部模型路由、PostgreSQL/pgvector 大规模索引和 Preview/Beta Dynamic/Async SubAgent 保留在后续阶段；对应领域边界已预留，不会用不安全的本机 `subprocess` 或伪造的 SDK 调用冒充生产实现。

@@ -4,6 +4,7 @@ import { AgentsPage } from './pages/AgentsPage'
 import { ApprovalsPage } from './pages/ApprovalsPage'
 import { DashboardPage } from './pages/DashboardPage'
 import { PlaygroundPage } from './pages/PlaygroundPage'
+import { KnowledgePage } from './pages/KnowledgePage'
 import { ResourcesPage } from './pages/ResourcesPage'
 import { RunsPage } from './pages/RunsPage'
 
@@ -14,6 +15,7 @@ export default function App() {
         <Route index element={<DashboardPage />} />
         <Route path="agents" element={<AgentsPage />} />
         <Route path="playground" element={<PlaygroundPage />} />
+        <Route path="knowledge" element={<KnowledgePage />} />
         <Route path="runs" element={<RunsPage />} />
         <Route path="approvals" element={<ApprovalsPage />} />
         <Route path="resources" element={<ResourcesPage />} />
@@ -22,4 +24,3 @@ export default function App() {
     </Routes>
   )
 }
-

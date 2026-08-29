@@ -11,6 +11,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
+from apps.platform_api.native_api.knowledge_routes import router as knowledge_router
 from apps.platform_api.native_api.routes import router as native_router
 from packages.application.approval_service import ApprovalService
 from packages.application.services import (
@@ -20,6 +21,14 @@ from packages.application.services import (
     seed_reference_data,
 )
 from packages.compiler import AgentPlanCompiler
+from packages.knowledge.embedding import create_embedding_provider
+from packages.knowledge.errors import (
+    KnowledgeConflictError,
+    KnowledgeError,
+    KnowledgeNotFoundError,
+)
+from packages.knowledge.service import KnowledgeService
+from packages.knowledge.storage import create_object_storage
 from packages.persistence import Database
 from packages.plugins import PluginLoader, SkillRegistry
 from packages.runtime import RunOrchestrator, RunService
@@ -54,8 +63,10 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
         compiler = AgentPlanCompiler(skill_registry)
         if seed:
             seed_reference_data(db, compiler)
+        object_storage = create_object_storage(root / "data" / "knowledge_objects")
+        knowledge = KnowledgeService(db, object_storage, create_embedding_provider())
         events = EventEmitter(db)
-        orchestrator = RunOrchestrator(db, events)
+        orchestrator = RunOrchestrator(db, events, knowledge)
         run_service = RunService(db, events, orchestrator)
         approvals = ApprovalService(db, events, orchestrator)
         application.state.services = SimpleNamespace(
@@ -64,15 +75,18 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
             plugins=skill_registry,
             skills=skill_registry,
             plugin_load_report=plugin_report,
+            knowledge=knowledge,
             events=events,
             orchestrator=orchestrator,
             agents=AgentService(db, compiler),
             runs=run_service,
             approvals=approvals,
         )
+        await knowledge.start()
         await orchestrator.start()
         yield
         await orchestrator.stop()
+        await knowledge.stop()
         db.close()
 
     application = FastAPI(
@@ -97,6 +111,19 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
     async def conflict_handler(_: Request, exc: ConflictError):
         return JSONResponse(status_code=409, content={"error": {"code": "CONFLICT", "message": str(exc)}})
 
+    @application.exception_handler(KnowledgeError)
+    async def knowledge_error_handler(_: Request, exc: KnowledgeError):
+        if isinstance(exc, KnowledgeNotFoundError):
+            status_code = 404
+        elif isinstance(exc, KnowledgeConflictError):
+            status_code = 409
+        else:
+            status_code = 422
+        return JSONResponse(
+            status_code=status_code,
+            content={"error": {"code": exc.code, "message": str(exc)}},
+        )
+
     @application.get("/health")
     async def health(request: Request):
         services = request.app.state.services
@@ -110,6 +137,7 @@ def create_app(database_path: str | None = None, seed: bool = True) -> FastAPI:
         }
 
     application.include_router(native_router)
+    application.include_router(knowledge_router)
 
     # A production web build can be served by the API process for the local
     # reference deployment. Kubernetes deployments may serve it independently.

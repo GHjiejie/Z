@@ -185,3 +185,109 @@ export interface Overview {
   recent_runs: Run[]
   runtime: { workers: number; queue_depth: number; event_lag_ms: number; status: string }
 }
+
+export interface KnowledgeDocument {
+  id: string
+  knowledge_base_id: string
+  display_name: string
+  description: string
+  source_type: string
+  status: string
+  visibility: 'private' | 'project'
+  allowed_roles: string[]
+  current_version_id?: string | null
+  content_type?: string | null
+  size_bytes?: number | null
+  content_sha256?: string | null
+  canonical_uri?: string | null
+  version_status?: string | null
+  indexed_at?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface KnowledgeRevision {
+  id: string
+  knowledge_base_id: string
+  revision_number: number
+  status: string
+  manifest: Record<string, unknown>
+  retrieval_profile: Record<string, unknown>
+  embedding_model: string
+  embedding_dimensions: number
+  index_hash: string
+  created_at: string
+  activated_at?: string | null
+  deprecated_at?: string | null
+}
+
+export interface KnowledgeBase {
+  id: string
+  name: string
+  description: string
+  status: string
+  current_revision_id?: string | null
+  document_count?: number
+  ready_document_count?: number
+  documents?: KnowledgeDocument[]
+  revisions?: KnowledgeRevision[]
+  created_at: string
+  updated_at: string
+}
+
+export interface KnowledgeUploadPreparation {
+  document_id: string
+  document_version_id: string
+  storage: {
+    provider: string
+    bucket: string
+    region: string
+    canonical_uri: string
+  }
+  upload: {
+    method: string
+    url: string
+    expires_at: string
+    required_headers: Record<string, string>
+  }
+}
+
+export interface KnowledgeIngestionJob {
+  id: string
+  knowledge_base_id: string
+  document_version_id: string
+  status: string
+  stage: string
+  attempts: number
+  chunk_count?: number | null
+  error_code?: string | null
+  error_message?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface KnowledgeSearchHit {
+  citation_id: string
+  chunk_id: string
+  document_id: string
+  document_version_id: string
+  text: string
+  score: number
+  source: {
+    title: string
+    content_type: string
+    locator: Record<string, unknown>
+    page?: number | null
+    section?: string | null
+    content_hash: string
+    canonical_uri: string
+    download_url: string
+  }
+}
+
+export interface KnowledgeSearchResult {
+  status: string
+  hits: KnowledgeSearchHit[]
+  revision_ids: string[]
+  latency_ms: number
+}

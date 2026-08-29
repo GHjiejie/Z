@@ -2,11 +2,11 @@
 
 install:
 	python3 -m venv .venv
-	.venv/bin/pip install -r requirements.txt
+	.venv/bin/python -m pip install -r requirements.txt
 	cd apps/web && npm install
 
 api:
-	.venv/bin/uvicorn apps.platform_api.main:app --reload --host 0.0.0.0 --port 8000
+	.venv/bin/python -m uvicorn apps.platform_api.main:app --reload --host 0.0.0.0 --port 8000
 
 web:
 	cd apps/web && npm run dev
@@ -15,7 +15,7 @@ build:
 	cd apps/web && npm run build
 
 test:
-	.venv/bin/pytest -q
+	.venv/bin/python -m pytest -q
 
 verify: test build
 

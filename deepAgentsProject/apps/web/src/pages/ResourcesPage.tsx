@@ -37,14 +37,15 @@ export function ResourcesPage() {
   const [models, setModels] = useState<ModelDeployment[]>([])
   const [plugins, setPlugins] = useState<Plugin[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
+  const [knowledgeCount, setKnowledgeCount] = useState(0)
   const [error, setError] = useState('')
   const [loaded, setLoaded] = useState(false)
-  useEffect(() => { Promise.all([api.models(), api.plugins(), api.skills()]).then(([modelResult, pluginResult, skillResult]) => { setModels(modelResult.items); setPlugins(pluginResult.items); setSkills(skillResult.items); setLoaded(true) }).catch((err) => { setError(err.message); setLoaded(true) }) }, [])
+  useEffect(() => { Promise.all([api.models(), api.plugins(), api.skills(), api.knowledgeBases()]).then(([modelResult, pluginResult, skillResult, knowledgeResult]) => { setModels(modelResult.items); setPlugins(pluginResult.items); setSkills(skillResult.items); setKnowledgeCount(knowledgeResult.items.length); setLoaded(true) }).catch((err) => { setError(err.message); setLoaded(true) }) }, [])
   if (!loaded) return <LoadingBlock />
   const registries = [
     ...baseRegistries.slice(0, 2),
     { icon: Layers3, name: 'Skill registry', count: skills.length, description: 'Version-locked progressive instruction artifacts', tone: 'violet' },
-    ...baseRegistries.slice(2),
+    ...baseRegistries.slice(2).map((registry) => registry.name === 'Knowledge bases' ? { ...registry, count: knowledgeCount } : registry),
   ]
   return <div className="page-stack">
     <PageHeader eyebrow="CONTROL PLANE" title="Govern every runtime dependency" description="Resources keep independent control-plane lifecycles and converge only through immutable capability bindings." actions={<button className="button primary"><Plus size={16} /> Register resource</button>} />

@@ -145,4 +145,3 @@ class TenantContext(BaseModel):
     environment_id: str = "env_development"
     user_id: str = "user_demo"
     roles: List[str] = Field(default_factory=lambda: ["owner"])
-

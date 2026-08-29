@@ -4,11 +4,13 @@ import asyncio
 import hashlib
 import secrets
 from datetime import datetime, timedelta, timezone
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 from packages.adapters.harness.deepagents import DeepAgentsHarnessAdapter
 from packages.application.services import new_id
 from packages.domain.models import RunStatus, utc_now
+from packages.knowledge.service import KnowledgeService
+from packages.knowledge.tool import KnowledgeSearchTool
 from packages.persistence import Database
 from packages.runtime.binder import RuntimeBinder
 from packages.runtime.event_emitter import EventEmitter
@@ -37,12 +39,19 @@ class ReferenceRuntimeExecutor:
     Deep Agents/LangGraph SDK in a production worker image.
     """
 
-    def __init__(self, db: Database, events: EventEmitter, worker_id: str):
+    def __init__(
+        self,
+        db: Database,
+        events: EventEmitter,
+        worker_id: str,
+        knowledge: Optional[KnowledgeService] = None,
+    ):
         self.db = db
         self.events = events
         self.worker_id = worker_id
         self.binder = RuntimeBinder()
         self.harness = DeepAgentsHarnessAdapter()
+        self.knowledge_tool = KnowledgeSearchTool(knowledge) if knowledge else None
 
     async def execute(self, run_id: str) -> None:
         run = self.db.fetch_one("SELECT * FROM runs WHERE id=?", (run_id,))
@@ -177,19 +186,57 @@ class ReferenceRuntimeExecutor:
             parent_span_id="span_main",
         )
         await asyncio.sleep(0.07)
-        self.events.append(
-            run_id,
-            "tool.completed",
-            {"tool_name": "knowledge_search", "result_count": 4, "redacted": False},
-            span_id="span_tool_search",
-            parent_span_id="span_main",
-        )
+        search_result: Dict[str, Any] = {
+            "status": "insufficient_evidence",
+            "hits": [],
+            "revision_ids": [],
+        }
+        try:
+            if self.knowledge_tool:
+                search_result = self.knowledge_tool.invoke(
+                    run["input"], plan, runtime_context, top_k=8
+                )
+            self.events.append(
+                run_id,
+                "tool.completed",
+                {
+                    "tool_name": "knowledge_search",
+                    "status": search_result["status"],
+                    "result_count": len(search_result["hits"]),
+                    "revision_ids": search_result.get("revision_ids", []),
+                    "citations": [
+                        {
+                            "citation_id": hit["citation_id"],
+                            "document_id": hit["document_id"],
+                            "title": hit["source"]["title"],
+                            "page": hit["source"].get("page"),
+                            "section": hit["source"].get("section"),
+                        }
+                        for hit in search_result["hits"]
+                    ],
+                    "redacted": False,
+                },
+                span_id="span_tool_search",
+                parent_span_id="span_main",
+            )
+        except Exception as exc:
+            self.events.append(
+                run_id,
+                "tool.failed",
+                {
+                    "tool_name": "knowledge_search",
+                    "code": getattr(exc, "code", "KNOWLEDGE_SEARCH_FAILED"),
+                    "message": str(exc),
+                },
+                span_id="span_tool_search",
+                parent_span_id="span_main",
+            )
 
         if self._needs_approval(run["input"], plan):
             await self._pause_for_approval(run, plan)
             return
 
-        await self._complete(run, plan, approved=False)
+        await self._complete(run, plan, approved=False, retrieval=search_result)
 
     def _acquire_lease(self, run: Dict[str, Any]) -> None:
         now = datetime.now(timezone.utc)
@@ -337,7 +384,13 @@ class ReferenceRuntimeExecutor:
         await self._complete(run, plan, approved=True)
 
     async def _complete(
-        self, run: Dict[str, Any], plan: Dict[str, Any], *, approved: bool, rejected: bool = False
+        self,
+        run: Dict[str, Any],
+        plan: Dict[str, Any],
+        *,
+        approved: bool,
+        rejected: bool = False,
+        retrieval: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self._is_cancelled(run["id"]):
             return
@@ -346,6 +399,9 @@ class ReferenceRuntimeExecutor:
             if rejected
             else "Analysis complete. I verified the execution plan, gathered the relevant context, and produced an auditable release recommendation."
         )
+        if retrieval and retrieval.get("hits"):
+            titles = list(dict.fromkeys(hit["source"]["title"] for hit in retrieval["hits"]))
+            output += f" Grounded in {len(retrieval['hits'])} knowledge citations from {', '.join(titles[:3])}."
         content = (
             "# Release recommendation\n\n"
             f"Request: {run['input']}\n\n"
@@ -459,4 +515,3 @@ class ReferenceRuntimeExecutor:
     def _is_cancelled(self, run_id: str) -> bool:
         run = self.db.fetch_one("SELECT status FROM runs WHERE id=?", (run_id,))
         return not run or run["status"] in {"CANCELLED", "CANCELLING"}
-

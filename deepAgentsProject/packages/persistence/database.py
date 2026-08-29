@@ -217,6 +217,169 @@ CREATE TABLE IF NOT EXISTS skill_versions (
   UNIQUE(skill_id, version)
 );
 CREATE INDEX IF NOT EXISTS idx_skill_versions_skill ON skill_versions(skill_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_bases (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  current_revision_id TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_bases_scope
+  ON knowledge_bases(tenant_id, project_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_documents (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
+  display_name TEXT NOT NULL,
+  description TEXT NOT NULL DEFAULT '',
+  source_type TEXT NOT NULL DEFAULT 'upload',
+  current_version_id TEXT,
+  status TEXT NOT NULL DEFAULT 'PENDING_UPLOAD',
+  visibility TEXT NOT NULL DEFAULT 'project',
+  allowed_roles_json TEXT NOT NULL DEFAULT '[]',
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_documents_scope
+  ON knowledge_documents(tenant_id, project_id, knowledge_base_id, updated_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_document_versions (
+  id TEXT PRIMARY KEY,
+  document_id TEXT NOT NULL REFERENCES knowledge_documents(id),
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  revision_number INTEGER NOT NULL,
+  storage_provider TEXT NOT NULL,
+  bucket TEXT NOT NULL,
+  region TEXT NOT NULL,
+  object_key TEXT NOT NULL,
+  object_version_id TEXT,
+  canonical_uri TEXT NOT NULL,
+  etag TEXT,
+  content_sha256 TEXT,
+  expected_sha256 TEXT,
+  content_type TEXT NOT NULL,
+  size_bytes INTEGER,
+  expected_size_bytes INTEGER NOT NULL,
+  storage_class TEXT,
+  parser_version TEXT,
+  chunker_version TEXT,
+  embedding_revision_id TEXT,
+  status TEXT NOT NULL DEFAULT 'PENDING_UPLOAD',
+  error_code TEXT,
+  error_message TEXT,
+  created_at TEXT NOT NULL,
+  uploaded_at TEXT,
+  indexed_at TEXT,
+  UNIQUE(document_id, revision_number),
+  UNIQUE(storage_provider, bucket, object_key)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_document_versions_scope
+  ON knowledge_document_versions(tenant_id, project_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_base_revisions (
+  id TEXT PRIMARY KEY,
+  knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  revision_number INTEGER NOT NULL,
+  status TEXT NOT NULL,
+  manifest_json TEXT NOT NULL,
+  retrieval_profile_json TEXT NOT NULL,
+  embedding_model TEXT NOT NULL,
+  embedding_dimensions INTEGER NOT NULL,
+  index_hash TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  activated_at TEXT,
+  deprecated_at TEXT,
+  UNIQUE(knowledge_base_id, revision_number)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_base_revisions_scope
+  ON knowledge_base_revisions(tenant_id, project_id, knowledge_base_id, revision_number DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_revision_documents (
+  revision_id TEXT NOT NULL REFERENCES knowledge_base_revisions(id),
+  document_version_id TEXT NOT NULL REFERENCES knowledge_document_versions(id),
+  PRIMARY KEY(revision_id, document_version_id)
+);
+
+CREATE TABLE IF NOT EXISTS knowledge_chunks (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
+  document_id TEXT NOT NULL REFERENCES knowledge_documents(id),
+  document_version_id TEXT NOT NULL REFERENCES knowledge_document_versions(id),
+  position INTEGER NOT NULL,
+  text TEXT NOT NULL,
+  token_count INTEGER NOT NULL,
+  content_hash TEXT NOT NULL,
+  locator_json TEXT NOT NULL,
+  embedding_json TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(document_version_id, position)
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_chunks_scope
+  ON knowledge_chunks(tenant_id, project_id, knowledge_base_id, document_version_id);
+
+CREATE TABLE IF NOT EXISTS knowledge_ingestion_jobs (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  knowledge_base_id TEXT NOT NULL REFERENCES knowledge_bases(id),
+  document_version_id TEXT NOT NULL UNIQUE REFERENCES knowledge_document_versions(id),
+  status TEXT NOT NULL,
+  stage TEXT NOT NULL,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  worker_id TEXT,
+  lease_token TEXT,
+  heartbeat_at TEXT,
+  error_code TEXT,
+  error_message TEXT,
+  chunk_count INTEGER,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_ingestion_jobs_scope
+  ON knowledge_ingestion_jobs(tenant_id, project_id, status, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_retrieval_audits (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  user_id TEXT NOT NULL,
+  run_id TEXT,
+  query_hash TEXT NOT NULL,
+  revision_ids_json TEXT NOT NULL,
+  result_count INTEGER NOT NULL,
+  latency_ms INTEGER NOT NULL,
+  hits_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_retrieval_audits_scope
+  ON knowledge_retrieval_audits(tenant_id, project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS knowledge_events (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  knowledge_base_id TEXT,
+  document_version_id TEXT,
+  ingestion_job_id TEXT,
+  type TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_knowledge_events_scope
+  ON knowledge_events(tenant_id, project_id, created_at DESC);
 """
 
 
@@ -232,6 +395,14 @@ JSON_COLUMNS = {
     "pricing_json": "pricing",
     "event_json": "event",
     "tags_json": "tags",
+    "allowed_roles_json": "allowed_roles",
+    "manifest_json": "manifest",
+    "retrieval_profile_json": "retrieval_profile",
+    "locator_json": "locator",
+    "embedding_json": "embedding",
+    "revision_ids_json": "revision_ids",
+    "hits_json": "hits",
+    "payload_json": "payload",
 }
 
 
@@ -251,6 +422,8 @@ class Database:
     def initialize(self) -> None:
         with self.lock:
             self.connection.executescript(SCHEMA)
+            self._ensure_column("knowledge_base_revisions", "deprecated_at", "TEXT")
+            self._ensure_column("knowledge_ingestion_jobs", "chunk_count", "INTEGER")
             self.connection.commit()
 
     def close(self) -> None:
@@ -279,6 +452,14 @@ class Database:
 
     def transaction(self):
         return self.connection
+
+    def _ensure_column(self, table: str, column: str, declaration: str) -> None:
+        columns = {
+            row["name"]
+            for row in self.connection.execute(f"PRAGMA table_info({table})").fetchall()
+        }
+        if column not in columns:
+            self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
 
     @staticmethod
     def encode(value: Any) -> str:

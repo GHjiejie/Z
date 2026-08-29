@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Command,
   FileCheck2,
+  LibraryBig,
   LayoutDashboard,
   Menu,
   PlayCircle,
@@ -21,6 +22,7 @@ const nav = [
   { to: '/', label: 'Overview', icon: LayoutDashboard },
   { to: '/agents', label: 'Agents', icon: Bot },
   { to: '/playground', label: 'Playground', icon: PlayCircle },
+  { to: '/knowledge', label: 'Knowledge', icon: LibraryBig },
   { to: '/runs', label: 'Runs & traces', icon: Activity },
   { to: '/approvals', label: 'Approvals', icon: FileCheck2, badge: true },
   { to: '/resources', label: 'Resources', icon: Blocks },
@@ -30,6 +32,7 @@ const titles: Record<string, string> = {
   '/': 'Platform overview',
   '/agents': 'Agent registry',
   '/playground': 'Agent playground',
+  '/knowledge': 'Knowledge & retrieval',
   '/runs': 'Runs & traces',
   '/approvals': 'Approval center',
   '/resources': 'Resource registry',
@@ -114,4 +117,3 @@ export function Layout() {
     </div>
   )
 }
-
