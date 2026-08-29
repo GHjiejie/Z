@@ -29,6 +29,8 @@ make api
 
 Coding Agent 还要求本机 Docker daemon 可用。第一次发布默认 Docker Profile 时，控制面会构建（或复用）`deepagent/coding-runtime:0.1.0`，解析真实 OCI image digest，并把它锁入 Execution Plan；运行时若镜像摘要不匹配会拒绝启动。
 
+本地工作目录不要求远端仓库链接，也不要求 Git。可在 `.env` 的 `DEEPAGENT_REPOSITORY_ROOTS` 中用操作系统 path separator 配置一个或多个允许选择的目录根；留空时默认限制在当前项目工作区范围内。
+
 打开 [http://localhost:8000](http://localhost:8000)。API 文档位于 [http://localhost:8000/docs](http://localhost:8000/docs)。
 
 如果本机没有认证代理，仅用于本地演示时以 `DEEPAGENT_ALLOW_DEMO_IDENTITY=true make api` 启动；生产环境不得启用该开关。
@@ -50,7 +52,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
 6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，内置 RAG Agent 会对事实型请求检索，对创作等无需知识库的请求自动走模型直答。
-7. 启动后直接进入 **Coding** 使用已发布、已部署的 `Built-in Coding Agent`；点击 `Choose folder` 在允许的本地根目录内选择 Git 仓库或其中的项目子目录，确认 Base Ref 后启动任务。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
+7. 启动后直接进入 **Coding** 使用已发布、已部署的 `Built-in Coding Agent`；点击 `Choose folder` 在允许的本地根目录内选择任意工作目录。Git 是可选能力：Git 目录会自动识别分支，普通目录会创建内容寻址的工作树快照。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
 
 ## 测试与构建
 

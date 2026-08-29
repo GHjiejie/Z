@@ -25,9 +25,30 @@ from packages.domain.models import TenantContext, utc_now
 from packages.persistence import Database
 
 
-_EXCLUDED_NAMES = {".git", ".DS_Store", "node_modules", "__pycache__", ".pytest_cache"}
-_SECRET_NAMES = {".env", ".env.local", ".env.production", "id_rsa", "id_ed25519"}
+_EXCLUDED_NAMES = {
+    ".git",
+    ".DS_Store",
+    ".ssh",
+    ".aws",
+    ".gnupg",
+    ".kube",
+    ".azure",
+    "node_modules",
+    "__pycache__",
+    ".pytest_cache",
+}
+_SECRET_NAMES = {
+    ".env",
+    ".env.local",
+    ".env.production",
+    ".netrc",
+    ".npmrc",
+    ".pypirc",
+    "id_rsa",
+    "id_ed25519",
+}
 _MAX_SNAPSHOT_BYTES = 512 * 1024 * 1024
+_MAX_SNAPSHOT_FILES = 100_000
 
 
 class RepositoryService:
@@ -166,6 +187,17 @@ class RepositoryService:
     def probe(self, repository_id: str, context: TenantContext) -> Dict[str, Any]:
         repository = self.get_repository(repository_id, context)
         with self._repository_checkout(repository) as checkout:
+            is_git_repository, _ = self._git_metadata(checkout)
+            if not is_git_repository:
+                return {
+                    "repository_id": repository_id,
+                    "status": "healthy",
+                    "resolved_commit_sha": None,
+                    "branch": None,
+                    "dirty": None,
+                    "version_controlled": False,
+                    "checked_at": utc_now(),
+                }
             commit = self._git(checkout, "rev-parse", "--verify", "HEAD^{commit}").strip()
             branch = self._git(checkout, "branch", "--show-current").strip() or None
             dirty = bool(self._git(checkout, "status", "--porcelain").strip())
@@ -175,6 +207,7 @@ class RepositoryService:
             "resolved_commit_sha": commit,
             "branch": branch,
             "dirty": dirty,
+            "version_controlled": True,
             "checked_at": utc_now(),
         }
 
@@ -186,18 +219,28 @@ class RepositoryService:
     ) -> Dict[str, Any]:
         repository = self.get_repository(repository_id, context)
         requested_ref = payload.requested_ref or repository["default_branch"]
+        source_mode = payload.source_mode
         with self._repository_checkout(repository) as checkout:
-            if payload.source_mode == "working_tree_snapshot" and repository["provider"] != "local_snapshot":
+            if source_mode == "working_tree_snapshot" and repository["provider"] != "local_snapshot":
                 raise CodingConflictError(
                     "working_tree_snapshot is available only for local repositories"
                 )
-            resolved_commit = self._git(
-                checkout, "rev-parse", "--verify", f"{requested_ref}^{{commit}}"
-            ).strip()
-            if payload.source_mode == "committed_ref":
-                archive, manifest = self._archive_committed(checkout, resolved_commit)
+            is_git_repository, _ = self._git_metadata(checkout)
+            if not is_git_repository:
+                if repository["provider"] != "local_snapshot":
+                    raise CodingConflictError("Remote repository is not a Git repository")
+                archive, manifest = self._archive_directory(checkout)
+                resolved_commit = hashlib.sha256(archive).hexdigest()
+                requested_ref = "working-directory"
+                source_mode = "working_tree_snapshot"
             else:
-                archive, manifest = self._archive_working_tree(checkout)
+                resolved_commit = self._git(
+                    checkout, "rev-parse", "--verify", f"{requested_ref}^{{commit}}"
+                ).strip()
+                if source_mode == "committed_ref":
+                    archive, manifest = self._archive_committed(checkout, resolved_commit)
+                else:
+                    archive, manifest = self._archive_working_tree(checkout)
 
         content_hash = hashlib.sha256(archive).hexdigest()
         manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
@@ -211,7 +254,7 @@ class RepositoryService:
             """SELECT * FROM repository_snapshots
                WHERE repository_id=? AND resolved_commit_sha=? AND source_mode=?
                  AND manifest_hash=?""",
-            (repository_id, resolved_commit, payload.source_mode, manifest_hash),
+            (repository_id, resolved_commit, source_mode, manifest_hash),
         )
         if existing:
             return self.get_snapshot(existing["id"], context)
@@ -230,7 +273,7 @@ class RepositoryService:
                 context.project_id,
                 requested_ref,
                 resolved_commit,
-                payload.source_mode,
+                source_mode,
                 manifest_hash,
                 str(archive_path),
                 content_hash,
@@ -508,6 +551,62 @@ class RepositoryService:
                             "size": len(content),
                         }
                     )
+        return buffer.getvalue(), manifest
+
+    def _archive_directory(self, path: Path) -> tuple[bytes, List[Dict[str, Any]]]:
+        buffer = io.BytesIO()
+        total = 0
+        file_count = 0
+        manifest: List[Dict[str, Any]] = []
+        with gzip.GzipFile(fileobj=buffer, mode="wb", mtime=0) as zipped:
+            with tarfile.open(fileobj=zipped, mode="w") as tar:
+                for directory, directory_names, file_names in os.walk(
+                    path, topdown=True, followlinks=False
+                ):
+                    current = Path(directory)
+                    directory_names[:] = sorted(
+                        name
+                        for name in directory_names
+                        if not (current / name).is_symlink()
+                        and not self._excluded(
+                            PurePosixPath(
+                                (current / name).relative_to(path).as_posix()
+                            )
+                        )
+                    )
+                    for name in sorted(file_names):
+                        source = current / name
+                        relative = PurePosixPath(source.relative_to(path).as_posix())
+                        if source.is_symlink() or self._excluded(relative):
+                            continue
+                        try:
+                            resolved = source.resolve(strict=True)
+                            if path not in resolved.parents or not resolved.is_file():
+                                continue
+                            stat = resolved.stat()
+                            if stat.st_size > _MAX_SNAPSHOT_BYTES - total:
+                                raise CodingConflictError(
+                                    "Working directory snapshot exceeds 512 MiB"
+                                )
+                            content = resolved.read_bytes()
+                        except OSError as exc:
+                            raise RepositoryAccessError(
+                                f"Unable to read local file: {relative}"
+                            ) from exc
+                        total += len(content)
+                        file_count += 1
+                        if file_count > _MAX_SNAPSHOT_FILES:
+                            raise CodingConflictError(
+                                "Working directory snapshot exceeds 100000 files"
+                            )
+                        self._add_tar_bytes(tar, str(relative), content, stat.st_mode)
+                        manifest.append(
+                            {
+                                "path": str(relative),
+                                "sha256": hashlib.sha256(content).hexdigest(),
+                                "size": len(content),
+                            }
+                        )
         return buffer.getvalue(), manifest
 
     @staticmethod

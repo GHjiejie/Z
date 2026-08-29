@@ -488,11 +488,18 @@ def test_local_folder_picker_browses_git_repositories_without_root_escape(
         check=True,
         capture_output=True,
     )
-    (allowed_root / "ordinary-folder").mkdir()
+    ordinary_folder = allowed_root / "ordinary-folder"
+    ordinary_folder.mkdir()
+    (ordinary_folder / "visible.txt").write_text("visible\n")
+    (ordinary_folder / ".env").write_text("TOKEN=do-not-copy\n")
+    (ordinary_folder / ".ssh").mkdir()
+    (ordinary_folder / ".ssh" / "id_rsa").write_text("private\n")
     (allowed_root / "node_modules").mkdir()
     outside = tmp_path / "outside"
     outside.mkdir()
+    (outside / "outside.txt").write_text("outside\n")
     (allowed_root / "escape-link").symlink_to(outside, target_is_directory=True)
+    (ordinary_folder / "outside-link").symlink_to(outside, target_is_directory=True)
     monkeypatch.setenv("DEEPAGENT_REPOSITORY_ROOTS", str(allowed_root))
 
     with TestClient(
@@ -555,6 +562,43 @@ def test_local_folder_picker_browses_git_repositories_without_root_escape(
         )
         with tarfile.open(snapshot_record["archive_path"], mode="r:gz") as archive:
             assert archive.getnames() == ["inside.txt"]
+
+        ordinary = client.get(
+            "/api/v1/local-repository-folders",
+            params={"path": str(ordinary_folder)},
+        )
+        assert ordinary.status_code == 200, ordinary.text
+        assert ordinary.json()["current"]["is_git_repository"] is False
+        assert ordinary.json()["current"]["default_branch"] is None
+        ordinary_repository = client.post(
+            "/api/v1/repositories",
+            json={
+                "name": "ordinary-workspace",
+                "provider": "local_snapshot",
+                "canonical_uri": str(ordinary_folder),
+                "default_branch": "working-directory",
+            },
+        )
+        assert ordinary_repository.status_code == 201, ordinary_repository.text
+        probe = client.post(
+            f"/api/v1/repositories/{ordinary_repository.json()['id']}:probe"
+        )
+        assert probe.status_code == 200, probe.text
+        assert probe.json()["version_controlled"] is False
+        ordinary_snapshot = client.post(
+            f"/api/v1/repositories/{ordinary_repository.json()['id']}/snapshots",
+            json={"requested_ref": "working-directory", "source_mode": "committed_ref"},
+        )
+        assert ordinary_snapshot.status_code == 201, ordinary_snapshot.text
+        assert ordinary_snapshot.json()["source_mode"] == "working_tree_snapshot"
+        assert ordinary_snapshot.json()["requested_ref"] == "working-directory"
+        assert len(ordinary_snapshot.json()["resolved_commit_sha"]) == 64
+        ordinary_record = client.app.state.services.db.fetch_one(
+            "SELECT * FROM repository_snapshots WHERE id=?",
+            (ordinary_snapshot.json()["id"],),
+        )
+        with tarfile.open(ordinary_record["archive_path"], mode="r:gz") as archive:
+            assert archive.getnames() == ["visible.txt"]
         assert client.get(
             "/api/v1/local-repository-folders", params={"path": str(outside)}
         ).status_code == 422
@@ -562,6 +606,95 @@ def test_local_folder_picker_browses_git_repositories_without_root_escape(
             "/api/v1/local-repository-folders",
             params={"path": str(allowed_root / "escape-link")},
         ).status_code == 422
+
+
+def test_non_git_working_directory_runs_in_isolated_coding_workspace(
+    tmp_path, monkeypatch
+):
+    working_directory = tmp_path / "plain-project"
+    working_directory.mkdir()
+    (working_directory / "existing.txt").write_text("original\n")
+    monkeypatch.setenv("DEEPAGENT_REPOSITORY_ROOTS", str(tmp_path))
+    model = ToolCallingFakeModel(
+        responses=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": "write_file",
+                        "args": {
+                            "file_path": "/workspace/repo/coding-agent-test.txt",
+                            "content": "implemented\n",
+                        },
+                        "id": "call-plain-folder-write",
+                        "type": "tool_call",
+                    }
+                ],
+            ),
+            AIMessage(content="Implemented the change in the isolated workspace."),
+        ]
+    )
+
+    with TestClient(
+        create_app(
+            str(tmp_path / "platform.db"),
+            seed=True,
+            model_gateway=DeterministicModelGateway(),
+            coding_model=model,
+            sandbox_providers=[FakeSandboxProvider(_command_result)],
+            load_env=False,
+        )
+    ) as client:
+        repository = client.post(
+            "/api/v1/repositories",
+            json={
+                "name": "plain-project",
+                "provider": "local_snapshot",
+                "canonical_uri": str(working_directory),
+                "default_branch": "working-directory",
+            },
+        )
+        assert repository.status_code == 201, repository.text
+        deployment = next(
+            item
+            for item in client.get("/api/v1/agent-deployments").json()["items"]
+            if item["coding_enabled"]
+        )
+        thread = client.post(
+            "/api/v1/threads",
+            json={
+                "agent_deployment_id": deployment["id"],
+                "title": "Plain folder coding",
+                "workspace": {
+                    "repository_id": repository.json()["id"],
+                    "base_ref": "working-directory",
+                    "source_mode": "working_tree_snapshot",
+                },
+            },
+        )
+        assert thread.status_code == 201, thread.text
+        created = client.post(
+            f"/api/v1/threads/{thread.json()['id']}/runs",
+            json={"input": "Create coding-agent-test.txt containing implemented."},
+        ).json()
+        finished = _wait(client, created["id"], {"SUCCEEDED", "FAILED"})
+        assert finished["status"] == "SUCCEEDED", finished.get("output")
+        workspace_file = client.get(
+            f"/api/v1/runs/{created['id']}/workspace/file",
+            params={"path": "coding-agent-test.txt"},
+        )
+        assert workspace_file.status_code == 200, workspace_file.text
+        assert workspace_file.json()["content"] == "implemented\n"
+        snapshot = client.app.state.services.db.fetch_one(
+            "SELECT * FROM repository_snapshots WHERE repository_id=?",
+            (repository.json()["id"],),
+        )
+        assert snapshot["source_mode"] == "working_tree_snapshot"
+        assert len(snapshot["resolved_commit_sha"]) == 64
+        assert "+implemented" in client.get(
+            f"/api/v1/runs/{created['id']}/diff"
+        ).json()["patch"]
+    assert not (working_directory / "coding-agent-test.txt").exists()
 
 
 def test_coding_starter_builds_all_read_only_subagents(tmp_path):

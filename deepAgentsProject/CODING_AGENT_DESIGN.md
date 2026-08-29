@@ -246,9 +246,9 @@ ChangeSet
 }
 ```
 
-`base_ref` 在 Workspace 创建前解析为不可变 Commit SHA。历史 Run 始终显示实际 SHA，不能只保存可移动的分支名。
+Git 来源的 `base_ref` 在 Workspace 创建前解析为不可变 Commit SHA。历史 Run 始终显示实际 SHA，不能只保存可移动的分支名。
 
-本地仓库开发模式额外支持 `working_tree_snapshot`，但必须先形成内容寻址的源码归档与 Manifest，再送入 Sandbox；不能把宿主目录以读写方式直接挂载给模型。
+本地来源不强制要求 Git：用户可以在允许根目录内选择任意工作目录。Git 目录和项目子目录默认使用 `working_tree_snapshot` 保留当前文件状态；非 Git 目录生成确定性的内容寻址归档，并以归档 SHA-256 作为合成基线标识。两者都必须先形成源码归档与 Manifest 再送入 Sandbox，不能把宿主目录以读写方式直接挂载给模型。
 
 ### 6.3 Workspace 生命周期
 
@@ -595,6 +595,7 @@ Artifact 必须包含 Hash、Base Commit、Workspace Generation、Plan Hash 和�
 ```text
 POST   /api/v1/repositories
 GET    /api/v1/repositories
+GET    /api/v1/local-repository-folders
 GET    /api/v1/repositories/{repository_id}
 POST   /api/v1/repositories/{repository_id}:probe
 POST   /api/v1/repositories/{repository_id}/snapshots
@@ -630,7 +631,8 @@ POST   /api/v1/runs/{run_id}/changesets/{changeset_id}:reject
 
 最小功能：
 
-- 创建 Thread 时选择 Repository 和 Base Ref；
+- 通过受根目录约束的文件夹选择器指定本地工作目录，Git 可选；
+- 创建 Thread 时选择工作目录，Git 来源还可确认 Base Ref；
 - 文件树、只读代码查看器；
 - Unified / Split Diff；
 - 变更文件计数和 Diff Stat；
