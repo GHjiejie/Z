@@ -17,7 +17,11 @@ def main() -> None:
             break
         result = agent.invoke({"messages": [HumanMessage(content=question)]})
 
-        print(result)
+        # 对模型的输出结果进行处理，提取出文本内容
+        if isinstance(result, dict) and "text" in result:
+            print(result["text"])
+        else:
+            print(result)
 
 
 if __name__ == "__main__":
