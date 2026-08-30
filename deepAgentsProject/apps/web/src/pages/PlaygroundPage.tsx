@@ -135,7 +135,7 @@ export function PlaygroundPage() {
   const openStream = (runId: string, after = 0, reconnecting = false) => {
     streamRef.current?.close()
     setConnection(reconnecting ? 'reconnecting' : 'connecting')
-    const source = new EventSource(streamUrl(runId, after))
+    const source = new EventSource(streamUrl(runId, after), { withCredentials: true })
     streamRef.current = source
     source.onopen = () => setConnection('connected')
     const onEvent = (message: MessageEvent) => {
@@ -340,7 +340,7 @@ export function PlaygroundPage() {
           </button>)}
           {!filteredThreads.length && <div className="conversation-list-empty">{threads.length ? 'No matching conversations.' : 'Your conversations will appear here.'}</div>}
         </div>
-        <div className="conversation-sidebar-foot"><span>{threads.length} conversations</span><Link to="/runs">View all runs</Link></div>
+        <div className="conversation-sidebar-foot"><span>{threads.length} conversations</span><Link to="/advanced/runs">View all runs</Link></div>
       </aside>
 
       {sidebarOpen && <button className="conversation-sidebar-scrim" aria-label="Close conversation history" onClick={() => setSidebarOpen(false)} />}
@@ -373,7 +373,7 @@ export function PlaygroundPage() {
 
         <div className="playground-composer-zone">
           {run?.status === 'WAITING_FOR_INPUT' && <div className="composer-context"><MessageSquareText size={15} /><span>A reviewer requested changes. Your next message resumes this run as a new attempt.</span></div>}
-          {run?.status === 'WAITING_FOR_APPROVAL' && <div className="composer-context approval"><PauseCircle size={15} /><span>This run is waiting for approval before it can continue.</span><Link to="/approvals">Review request</Link></div>}
+          {run?.status === 'WAITING_FOR_APPROVAL' && <div className="composer-context approval"><PauseCircle size={15} /><span>This run is waiting for approval before it can continue.</span><Link to="/advanced/approvals">Review request</Link></div>}
           {routingNotice && <div className={`composer-context routing ${routingNotice.status === 'FALLBACK' ? 'approval' : ''}`}><Sparkles size={15} /><span><strong>{routingNotice.selected_deployment?.agent_name}</strong> selected for {routingNotice.classification.primary_intent.replaceAll('_', ' ')} · {Math.round(routingNotice.classification.confidence * 100)}% confidence</span></div>}
           <div className={`gemini-composer ${busy ? 'busy' : ''}`}>
             <textarea
@@ -407,7 +407,7 @@ export function PlaygroundPage() {
       <div className="form-stack routing-confirmation">
         <div className="routing-intent-summary"><Sparkles size={19} /><div><strong>{pendingRoute.decision.classification.primary_intent.replaceAll('_', ' ')}</strong><span>{pendingRoute.decision.classification.subtype.replaceAll('_', ' ')} · {Math.round(pendingRoute.decision.classification.confidence * 100)}% confidence</span></div><StatusPill status={pendingRoute.decision.classification.risk_hint} /></div>
         <label>Agent deployment<select value={routeOverrideId} onChange={(event) => setRouteOverrideId(event.target.value)}>{pendingRoute.decision.candidate_deployments.map((item) => <option value={item.id} key={item.id}>{item.agent_name} · {item.coding_enabled ? 'Coding' : item.knowledge_enabled ? 'Knowledge' : 'General'}</option>)}</select></label>
-        {pendingTarget?.coding_enabled && <><label>Repository<select value={routeRepositoryId} onChange={(event) => { const id = event.target.value; setRouteRepositoryId(id); setRouteBaseRef(repositories.find((item) => item.id === id)?.default_branch ?? 'main') }}><option value="">Select repository…</option>{repositories.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>Base ref<input value={routeBaseRef} onChange={(event) => setRouteBaseRef(event.target.value)} /></label>{!repositories.length && <div className="coding-empty-note"><FolderOpen size={15} /> Register a working directory in <Link to="/coding">Coding Workbench</Link> first.</div>}</>}
+        {pendingTarget?.coding_enabled && <><label>Repository<select value={routeRepositoryId} onChange={(event) => { const id = event.target.value; setRouteRepositoryId(id); setRouteBaseRef(repositories.find((item) => item.id === id)?.default_branch ?? 'main') }}><option value="">Select repository…</option>{repositories.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>Base ref<input value={routeBaseRef} onChange={(event) => setRouteBaseRef(event.target.value)} /></label>{!repositories.length && <div className="coding-empty-note"><FolderOpen size={15} /> Register a working directory in <Link to="/advanced/coding">Coding Workbench</Link> first.</div>}</>}
         <div className="routing-request-preview"><span>ORIGINAL REQUEST</span><p>{pendingRoute.message}</p></div>
       </div>
       <div className="modal-actions"><button className="button secondary" onClick={() => { if (routeOverrideId) setDeploymentId(routeOverrideId); setPendingRoute(null) }}>Choose manually</button><button className="button primary" disabled={pendingTarget?.coding_enabled && !routeRepositoryId} onClick={() => { setBusy(true); setError(''); void commitRouted(pendingRoute.decision, pendingRoute.message, true, routeOverrideId !== pendingRoute.decision.selected_deployment_id ? routeOverrideId : undefined).catch((nextError) => { setError((nextError as Error).message); setBusy(false) }) }}>Continue with {pendingTarget?.agent_name ?? 'selected agent'}</button></div>
@@ -426,7 +426,7 @@ function ConversationWelcome({ userName, hasDeployment, onPrompt }: { userName?:
     <p>{userName ? `Hi, ${userName.split(' ')[0]}` : 'Hi there'}</p>
     <h2>What can your agent help with?</h2>
     <span>Start a governed conversation. Every run stays attached to this thread with its trace, state, approvals, and artifacts.</span>
-    {hasDeployment ? <div className="conversation-suggestions">{suggestions.map(([title, prompt]) => <button onClick={() => onPrompt(prompt)} key={title}><strong>{title}</strong><span>{prompt}</span></button>)}</div> : <div className="no-deployment-callout"><Bot size={20} /><div><strong>No active agent deployment</strong><span>Publish and deploy an agent before starting a conversation.</span></div><Link to="/agents">Open Agents</Link></div>}
+    {hasDeployment ? <div className="conversation-suggestions">{suggestions.map(([title, prompt]) => <button onClick={() => onPrompt(prompt)} key={title}><strong>{title}</strong><span>{prompt}</span></button>)}</div> : <div className="no-deployment-callout"><Bot size={20} /><div><strong>No active agent deployment</strong><span>Publish and deploy an agent before starting a conversation.</span></div><Link to="/advanced/agents">Open Agents</Link></div>}
   </div>
 }
 
@@ -469,10 +469,10 @@ function ConversationTurn({ run, active, agentName, events, artifacts }: { run: 
         <div className="turn-heading"><strong>{agentName}</strong><StatusPill status={run.status} /></div>
         {reasoning && <ThinkingPanel content={reasoning} kind={reasoningKind} active={reasoningActive} />}
         {response ? <MarkdownContent className="assistant-copy">{response}</MarkdownContent> : running && !reasoningActive ? <div className="assistant-progress"><LoaderCircle className="spin" size={17} /><div><strong>{latestEvent ? eventLabel(latestEvent.type) : 'Preparing your run'}</strong><span>Live events are available in the run inspector.</span></div></div> : !running && !['WAITING_FOR_APPROVAL', 'WAITING_FOR_INPUT'].includes(run.status) ? <div className="assistant-empty-result">This run ended without a text response.</div> : null}
-        {run.status === 'WAITING_FOR_APPROVAL' && <div className="conversation-action-card approval"><PauseCircle size={18} /><div><strong>Approval required</strong><span>This run is checkpointed and waiting for a reviewer.</span></div><Link to="/approvals">Review</Link></div>}
+        {run.status === 'WAITING_FOR_APPROVAL' && <div className="conversation-action-card approval"><PauseCircle size={18} /><div><strong>Approval required</strong><span>This run is checkpointed and waiting for a reviewer.</span></div><Link to="/advanced/approvals">Review</Link></div>}
         {run.status === 'WAITING_FOR_INPUT' && <div className="conversation-action-card"><MessageSquareText size={18} /><div><strong>Changes requested</strong><span>Use the composer below to provide revised instructions.</span></div></div>}
         {artifacts.length > 0 && <div className="conversation-artifacts">{artifacts.map((artifact) => <a href={artifact.uri} target="_blank" rel="noreferrer" key={artifact.id}><FileText size={16} /><span><strong>{artifact.name}</strong><small>{artifact.media_type} · {artifact.size_bytes} bytes</small></span></a>)}</div>}
-        <div className="turn-footer"><time>{new Date(run.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><Link to={`/runs/${run.id}`}>View trace <GitBranch size={13} /></Link>{active && running && <span className="live-run-indicator"><i /> Live</span>}</div>
+        <div className="turn-footer"><time>{new Date(run.updated_at).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}</time><Link to={`/advanced/runs/${run.id}`}>View trace <GitBranch size={13} /></Link>{active && running && <span className="live-run-indicator"><i /> Live</span>}</div>
       </div>
     </div>
   </article>
@@ -527,7 +527,7 @@ function RunInspector({ run, events, artifacts, tab, connection, busy, onTab, on
   return <aside id="run-inspector" className="playground-inspector" aria-label="Live execution activity">
     <div className="playground-inspector-head">
       <div><span>LIVE EXECUTION</span><strong><i className={`live-connection-dot state-${connection}`} />{busy ? 'Following backend events' : run ? `${events.length} events captured` : 'Waiting for a run'}</strong></div>
-      <div>{run && <Link className="button ghost" to={`/runs/${run.id}`}>Full trace</Link>}<button className="icon-button" aria-label="Close live activity" onClick={onClose}><X size={18} /></button></div>
+      <div>{run && <Link className="button ghost" to={`/advanced/runs/${run.id}`}>Full trace</Link>}<button className="icon-button" aria-label="Close live activity" onClick={onClose}><X size={18} /></button></div>
     </div>
     <div className="inspector-tabs" role="tablist">{(['events', 'plan', 'state', 'artifacts', 'usage'] as InspectorTab[]).map((item) => <button role="tab" aria-selected={tab === item} className={tab === item ? 'active' : ''} onClick={() => onTab(item)} key={item}>{item === 'plan' ? <CheckCircle2 size={14} /> : item === 'events' ? <Activity size={14} /> : item === 'state' ? <Boxes size={14} /> : item === 'artifacts' ? <FileText size={14} /> : <Clock3 size={14} />}{item}{item === 'events' && events.length > 0 && <i>{events.length > 99 ? '99+' : events.length}</i>}{item === 'artifacts' && artifacts.length > 0 && <i>{artifacts.length}</i>}</button>)}</div>
     {tab === 'events' && <div className="activity-filter-shell">

@@ -13,11 +13,21 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 
 from apps.platform_api.native_api.knowledge_routes import router as knowledge_router
+from apps.platform_api.native_api.auth_routes import router as auth_router
 from apps.platform_api.native_api.coding_routes import router as coding_router
 from apps.platform_api.native_api.repository_routes import router as repository_router
 from apps.platform_api.native_api.routing_routes import router as routing_router
 from apps.platform_api.native_api.routes import router as native_router
 from packages.application.approval_service import ApprovalService
+from packages.auth import (
+    AuthAuthorizationError,
+    AuthenticationError,
+    AuthConflictError,
+    AuthNotFoundError,
+    AuthRateLimitError,
+    AuthService,
+    AuthValidationError,
+)
 from packages.application.services import (
     AgentService,
     ConflictError,
@@ -103,6 +113,11 @@ def create_app(
         )
         db = Database(db_path)
         db.initialize()
+        auth = AuthService(db)
+        auth.bootstrap_super_admin(
+            os.getenv("DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD", "Console1@")
+        )
+        auth.purge_expired_sessions()
         plugin_roots = [root / "builtin_plugins"]
         configured_roots = os.getenv("DEEPAGENT_PLUGIN_PATHS", "")
         for configured_root in configured_roots.split(os.pathsep):
@@ -224,6 +239,7 @@ def create_app(
         approvals = ApprovalService(db, events, orchestrator)
         application.state.services = SimpleNamespace(
             db=db,
+            auth=auth,
             compiler=compiler,
             plugins=skill_registry,
             skills=skill_registry,
@@ -275,6 +291,50 @@ def create_app(
     async def conflict_handler(_: Request, exc: ConflictError):
         return JSONResponse(status_code=409, content={"error": {"code": "CONFLICT", "message": str(exc)}})
 
+    @application.exception_handler(AuthenticationError)
+    async def authentication_error_handler(_: Request, exc: AuthenticationError):
+        return JSONResponse(
+            status_code=401,
+            headers={"WWW-Authenticate": "Bearer"},
+            content={"error": {"code": "AUTHENTICATION_FAILED", "message": str(exc)}},
+        )
+
+    @application.exception_handler(AuthNotFoundError)
+    async def auth_not_found_handler(_: Request, exc: AuthNotFoundError):
+        return JSONResponse(
+            status_code=404,
+            content={"error": {"code": "USER_NOT_FOUND", "message": str(exc)}},
+        )
+
+    @application.exception_handler(AuthConflictError)
+    async def auth_conflict_handler(_: Request, exc: AuthConflictError):
+        return JSONResponse(
+            status_code=409,
+            content={"error": {"code": "USER_CONFLICT", "message": str(exc)}},
+        )
+
+    @application.exception_handler(AuthValidationError)
+    async def auth_validation_handler(_: Request, exc: AuthValidationError):
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "USER_VALIDATION", "message": str(exc)}},
+        )
+
+    @application.exception_handler(AuthAuthorizationError)
+    async def auth_authorization_handler(_: Request, exc: AuthAuthorizationError):
+        return JSONResponse(
+            status_code=403,
+            content={"error": {"code": "AUTHORIZATION_FAILED", "message": str(exc)}},
+        )
+
+    @application.exception_handler(AuthRateLimitError)
+    async def auth_rate_limit_handler(_: Request, exc: AuthRateLimitError):
+        return JSONResponse(
+            status_code=429,
+            headers={"Retry-After": str(exc.retry_after)},
+            content={"error": {"code": "AUTH_RATE_LIMITED", "message": str(exc)}},
+        )
+
     @application.exception_handler(KnowledgeError)
     async def knowledge_error_handler(_: Request, exc: KnowledgeError):
         if isinstance(exc, KnowledgeNotFoundError):
@@ -320,6 +380,7 @@ def create_app(
             },
         }
 
+    application.include_router(auth_router)
     application.include_router(native_router)
     application.include_router(knowledge_router)
     application.include_router(repository_router)

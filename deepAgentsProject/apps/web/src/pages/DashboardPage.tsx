@@ -26,16 +26,16 @@ export function DashboardPage() {
   const failedRuns = data.run_statuses.FAILED ?? 0
   const waitingForInput = data.run_statuses.WAITING_FOR_INPUT ?? 0
   const needsAttention = [
-    data.pending_approvals ? { icon: FileCheck2, title: `${data.pending_approvals} approval${data.pending_approvals === 1 ? '' : 's'} waiting`, detail: 'Review policy-gated actions before they expire.', to: '/approvals', tone: 'amber' } : null,
-    failedRuns ? { icon: TriangleAlert, title: `${failedRuns} failed run${failedRuns === 1 ? '' : 's'}`, detail: 'Open the trace to identify the last successful checkpoint.', to: '/runs?status=FAILED', tone: 'rose' } : null,
-    waitingForInput ? { icon: MessageSquareText, title: `${waitingForInput} run${waitingForInput === 1 ? '' : 's'} waiting for input`, detail: 'Open Test & Run and provide the reviewer-requested changes.', to: '/runs?status=WAITING_FOR_INPUT', tone: 'blue' } : null,
-    !data.deployments ? { icon: Bot, title: 'No active deployment', detail: 'Publish an agent revision and deploy it before starting a run.', to: '/agents', tone: 'violet' } : null,
+    data.pending_approvals ? { icon: FileCheck2, title: `${data.pending_approvals} approval${data.pending_approvals === 1 ? '' : 's'} waiting`, detail: 'Review policy-gated actions before they expire.', to: '/advanced/approvals', tone: 'amber' } : null,
+    failedRuns ? { icon: TriangleAlert, title: `${failedRuns} failed run${failedRuns === 1 ? '' : 's'}`, detail: 'Open the trace to identify the last successful checkpoint.', to: '/advanced/runs?status=FAILED', tone: 'rose' } : null,
+    waitingForInput ? { icon: MessageSquareText, title: `${waitingForInput} run${waitingForInput === 1 ? '' : 's'} waiting for input`, detail: 'Open Test & Run and provide the reviewer-requested changes.', to: '/advanced/runs?status=WAITING_FOR_INPUT', tone: 'blue' } : null,
+    !data.deployments ? { icon: Bot, title: 'No active deployment', detail: 'Publish an agent revision and deploy it before starting a run.', to: '/advanced/agents', tone: 'violet' } : null,
   ].filter(Boolean) as Array<{ icon: typeof FileCheck2; title: string; detail: string; to: string; tone: string }>
   const showGettingStarted = data.agents === 0 || data.deployments === 0 || data.recent_runs.length === 0
 
   return (
     <div className="page-stack">
-      <PageHeader eyebrow="PROJECT OVERVIEW" title={`Welcome to ${context?.project.name ?? 'your project'}`} description="Start with work that needs attention, then inspect live execution and recent activity." actions={<><Link className="button secondary" to="/agents"><Plus size={16} /> New agent</Link><Link className="button primary" to="/playground"><PlayCircle size={16} /> Start a run</Link></>} />
+      <PageHeader eyebrow="PROJECT OVERVIEW" title={`Welcome to ${context?.project.name ?? 'your project'}`} description="Start with work that needs attention, then inspect live execution and recent activity." actions={<><Link className="button secondary" to="/advanced/agents"><Plus size={16} /> New agent</Link><Link className="button primary" to="/playground"><PlayCircle size={16} /> Start a run</Link></>} />
 
       {needsAttention.length > 0 && <section className="attention-section">
         <div className="section-heading"><div><h3>Needs attention</h3><p>Issues that can block publishing or execution.</p></div></div>
@@ -52,18 +52,18 @@ export function DashboardPage() {
       {showGettingStarted && <section className="panel getting-started">
         <div className="panel-heading"><div><h3>Getting started</h3><p>Complete the core path once to verify this project is ready.</p></div></div>
         <div className="getting-started-list">
-          <Link className={data.agents > 0 ? 'complete' : ''} to="/agents"><span>1</span><div><strong>Create an agent draft</strong><small>Define its purpose and model.</small></div><ArrowRight size={16} /></Link>
-          <Link className={data.deployments > 0 ? 'complete' : ''} to="/agents"><span>2</span><div><strong>Validate, publish, and deploy</strong><small>Review the immutable revision before deployment.</small></div><ArrowRight size={16} /></Link>
+          <Link className={data.agents > 0 ? 'complete' : ''} to="/advanced/agents"><span>1</span><div><strong>Create an agent draft</strong><small>Define its purpose and model.</small></div><ArrowRight size={16} /></Link>
+          <Link className={data.deployments > 0 ? 'complete' : ''} to="/advanced/agents"><span>2</span><div><strong>Validate, publish, and deploy</strong><small>Review the immutable revision before deployment.</small></div><ArrowRight size={16} /></Link>
           <Link className={data.recent_runs.length > 0 ? 'complete' : ''} to="/playground"><span>3</span><div><strong>Start a test run</strong><small>Observe events and inspect its output.</small></div><ArrowRight size={16} /></Link>
         </div>
       </section>}
 
       <section className="dashboard-grid">
         <div className="panel recent-runs-panel">
-          <div className="panel-heading"><div><h3>Recent runs</h3><p>Latest execution activity across your agents</p></div><Link to="/runs" className="text-link">View all <ArrowRight size={14} /></Link></div>
+          <div className="panel-heading"><div><h3>Recent runs</h3><p>Latest execution activity across your agents</p></div><Link to="/advanced/runs" className="text-link">View all <ArrowRight size={14} /></Link></div>
           <div className="table-wrap"><table className="data-table"><thead><tr><th>Run</th><th>Agent</th><th>Status</th><th>Started</th><th>Plan</th></tr></thead><tbody>
             {data.recent_runs.length === 0 ? <tr><td colSpan={5} className="empty-cell">No runs yet. Start one in Test & Run.</td></tr> : data.recent_runs.map((run) => <tr key={run.id}>
-              <td><Link className="run-cell" to={`/runs/${run.id}`}><div className="mini-run-icon"><PlayCircle size={15} /></div><div><strong>{shortId(run.id)}</strong><span>{run.input.slice(0, 46)}</span></div></Link></td>
+              <td><Link className="run-cell" to={`/advanced/runs/${run.id}`}><div className="mini-run-icon"><PlayCircle size={15} /></div><div><strong>{shortId(run.id)}</strong><span>{run.input.slice(0, 46)}</span></div></Link></td>
               <td><strong className="table-strong">{run.agent_name}</strong><span className="table-sub">{run.environment}</span></td><td><StatusPill status={run.status} /></td><td><span className="table-time" title={new Date(run.created_at).toLocaleString()}>{formatRelative(run.created_at)}</span></td><td><code>{shortId(run.resolved_plan_id, 6)}</code></td>
             </tr>)}
           </tbody></table></div>

@@ -1,7 +1,7 @@
 export type Json = Record<string, unknown>
 
 export interface PlatformContext {
-  user: { id: string; name: string; role: string }
+  user: { id: string; name: string; role: string; is_super_admin: boolean }
   tenant: { id: string; name: string }
   project: { id: string; name: string }
   environment: { id: string; name: string }
@@ -23,6 +23,81 @@ export interface PlatformContext {
     attachments: boolean
     code_context: boolean
   }
+}
+
+export interface PlatformUser {
+  id: string
+  username: string
+  display_name: string
+  tenant_id: string
+  project_id: string
+  environment_id: string
+  roles: string[]
+  is_super_admin: boolean
+  status: 'ACTIVE' | 'INACTIVE'
+  version: number
+  last_login_at?: string | null
+  password_changed_at?: string | null
+  password_expires_at?: string | null
+  must_change_password: boolean
+  failed_login_count: number
+  locked_until?: string | null
+  deleted_at?: string | null
+  deleted_by?: string | null
+  deletion_reason?: string | null
+  created_at: string
+  updated_at: string
+}
+
+export interface UserListResponse {
+  items: PlatformUser[]
+  page: number
+  page_size: number
+  total: number
+  pages: number
+}
+
+export interface AuthSession {
+  id: string
+  user_id: string
+  expires_at: string
+  revoked_at?: string | null
+  created_at: string
+  last_seen_at: string
+  ip_address?: string | null
+  user_agent?: string | null
+  status: 'ACTIVE' | 'REVOKED' | 'EXPIRED'
+  current: boolean
+}
+
+export interface AuthAuditEvent {
+  id: string
+  actor_user_id?: string | null
+  target_user_id?: string | null
+  tenant_id?: string | null
+  project_id?: string | null
+  action: string
+  outcome: string
+  ip_address?: string | null
+  user_agent?: string | null
+  details: Record<string, unknown>
+  created_at: string
+}
+
+export interface AuthAuditListResponse {
+  items: AuthAuditEvent[]
+  page: number
+  page_size: number
+  total: number
+  pages: number
+}
+
+export interface LoginSession {
+  access_token: string
+  token_type: 'bearer'
+  expires_at: string
+  expires_in: number
+  user: PlatformUser
 }
 
 export interface AgentDraft {

@@ -42,11 +42,17 @@ def platform_context(
     worker_online = bool(
         container.orchestrator.task and not container.orchestrator.task.done()
     )
+    authenticated_user = container.auth.find_user(context.user_id)
     return {
         "user": {
             "id": context.user_id,
-            "name": _display_name(context.user_id),
-            "role": context.roles[0] if context.roles else "member",
+            "name": authenticated_user["display_name"]
+            if authenticated_user
+            else _display_name(context.user_id),
+            "role": "super_admin"
+            if context.is_super_admin
+            else (context.roles[0] if context.roles else "member"),
+            "is_super_admin": context.is_super_admin,
         },
         "tenant": {"id": context.tenant_id, "name": _display_name(context.tenant_id)},
         "project": {"id": context.project_id, "name": _display_name(context.project_id)},
@@ -254,17 +260,21 @@ def list_models(context: TenantContext = Depends(tenant_context), container=Depe
 
 
 @router.get("/plugins")
-def list_plugins(container=Depends(services)):
+def list_plugins(_: TenantContext = Depends(tenant_context), container=Depends(services)):
     return {"items": container.plugins.list_plugins()}
 
 
 @router.get("/skills")
-def list_skills(container=Depends(services)):
+def list_skills(_: TenantContext = Depends(tenant_context), container=Depends(services)):
     return {"items": container.skills.list_skills()}
 
 
 @router.get("/skills/{skill_reference}")
-def get_skill(skill_reference: str, container=Depends(services)):
+def get_skill(
+    skill_reference: str,
+    _: TenantContext = Depends(tenant_context),
+    container=Depends(services),
+):
     skill = container.skills.get_skill(skill_reference)
     if not skill:
         raise NotFoundError("Skill not found")

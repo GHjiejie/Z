@@ -12,6 +12,8 @@
 - 审批后创建新 Attempt，并使用原 Plan Hash 从 Checkpoint 恢复；
 - Artifact、Usage Ledger、模型/工具/SubAgent/审批事件和租户隔离；
 - React 控制台：Overview、Agent Builder、Playground、Runs & Traces、Approvals、Resources；
+- 企业级账号治理：平台超级管理员 / 租户管理员 / 普通用户三级边界、分页检索、乐观锁、带原因软删除、完整审计、首次及过期密码强制修改、登录锁定与限流、服务端会话查看和踢下线；
+- 控制台主路由精简为 **Playground** 与 **Knowledge Base**，Overview、Agents、Coding、Runs、Approvals、Resources、Settings 和 Users 统一归入 `/advanced/*`；
 - 无模型密钥即可运行的确定性 Reference Harness，便于验证平台契约；
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
@@ -34,7 +36,9 @@ Coding Agent 还要求本机 Docker daemon 可用。第一次发布默认 Docker
 
 打开 [http://localhost:8000](http://localhost:8000)。API 文档位于 [http://localhost:8000/docs](http://localhost:8000/docs)。
 
-如果本机没有认证代理，仅用于本地演示时以 `DEEPAGENT_ALLOW_DEMO_IDENTITY=true make api` 启动；生产环境不得启用该开关。
+首次登录使用内置超级管理员：用户名 `admin`，初始密码 `Console1@`。首次登录后系统会强制修改密码；该账号只在不存在时创建，重启不会覆盖已经修改的密码。生产环境首次启动前仍应通过 `DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD` 设置一次性高强度初始密码，并在 HTTPS 部署中设置 `DEEPAGENT_SESSION_COOKIE_SECURE=true`。
+
+`DEEPAGENT_ALLOW_DEMO_IDENTITY` 仅保留给自动化测试或无前端的本地 API 演示；正常控制台必须登录，生产环境不得启用该开关。
 
 开发模式可分别启动：
 
@@ -47,13 +51,13 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 
 ## 演示核心闭环
 
-1. 在 **Agents** 修改 Draft，执行 Validate、Publish；系统创建不可变 Revision、Plan 和 Development Deployment。
+1. 登录后进入 **Advanced features → Agents** 修改 Draft，执行 Validate、Publish；系统创建不可变 Revision、Plan 和 Development Deployment。
 2. 在 **Playground** 保持 `Auto` 并输入首条任务。系统会展示意图、置信度和目标 Agent；需要仓库或人工确认时先弹出确认窗口，创建会话后不再自动切换 Agent。
 3. 输入含有 `deploy to production` 或“部署到生产”的任务，Run 会进入 `WAITING_FOR_APPROVAL`。
-4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
-5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
+4. 在 **Advanced features → Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
+5. 在 **Advanced features → Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
 6. 在 **Knowledge** 创建知识库、上传文件、等待索引完成并测试带 Citation 的检索；把生效的 Knowledge Revision 绑定到 Agent 后，内置 RAG Agent 会对事实型请求检索，对创作等无需知识库的请求自动走模型直答。
-7. 启动后直接进入 **Coding** 使用已发布、已部署的 `Built-in Coding Agent`；点击 `Choose folder` 在允许的本地根目录内选择任意工作目录。Git 是可选能力：Git 目录会自动识别分支，普通目录会创建内容寻址的工作树快照。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
+7. 在 **Advanced features → Coding Workbench** 使用已发布、已部署的 `Built-in Coding Agent`；点击 `Choose folder` 在允许的本地根目录内选择任意工作目录。Git 是可选能力：Git 目录会自动识别分支，普通目录会创建内容寻址的工作树快照。也可以在 **Agents** 用 `Coding Agent starter` 创建自定义实例。Workbench 会展示只读源码、实时事件、命令证据、Diff、验证结果、审批和 Patch。
 
 ## 测试与构建
 
@@ -74,6 +78,7 @@ make verify
 - Docker 非 root、只读根文件系统、默认禁网、密钥隔离、超时/输出/磁盘限制和软链接逃逸；
 - Run 取消终止容器命令、Sandbox 丢失恢复、Patch 防篡改、平台重算文件 Hash，以及宿主工作区不被修改。
 - 首轮意图分类、置信度确认、工作区要求、手动覆盖、Shadow Mode、路由版本和 Tenant / Project 隔离。
+- 用户治理的三级权限边界、分页检索、乐观锁、软删除审计、密码过期与首次改密、登录锁定/限流、会话撤销及旧库版本化迁移。
 
 ## 代码结构
 
@@ -84,6 +89,7 @@ apps/
 packages/
 ├── domain/                稳定领域模型
 ├── application/           Agent 发布与审批用例
+├── auth/                  用户、密码哈希、会话与超级管理员规则
 ├── compiler/              静态验证、依赖锁定、Plan Hash
 ├── runtime/               Orchestrator、Lease、Binder、Executor、Event
 ├── knowledge/             OSS、摄取、解析、分块、Embedding、检索与 Citation
@@ -186,6 +192,31 @@ POST /api/v1/knowledge:search
 上传准备请求必须携带文件 SHA-256。每个新 Knowledge Revision 的 `index_hash` 覆盖文档摘要、Chunk 内容摘要和向量摘要；运行时会校验 Plan 中锁定的模型、维度、Retrieval Profile 与索引哈希。旧版不可验证索引必须重新摄取后才能使用。
 
 运行时身份不会从用户提交的 Run metadata 读取。默认部署既拒绝匿名 demo owner，也拒绝调用者自带的 `X-Tenant-ID`、`X-Project-ID`、`X-User-ID` 和 `X-Roles`；只有在受信认证代理会清理并完整重新注入这些头时，才可显式设置 `DEEPAGENT_TRUST_IDENTITY_HEADERS=true`。纯本地演示可单独设置 `DEEPAGENT_ALLOW_DEMO_IDENTITY=true`，不得用于生产环境。
+
+控制台登录使用服务端会话：浏览器只接收 `HttpOnly` Cookie，无法从前端脚本读取令牌；API 客户端也可使用登录响应中的 Bearer Token。数据库只保存 PBKDF2-SHA256 密码哈希和 SHA-256 会话摘要。退出登录、禁用账号或由管理员重置密码时，服务端会撤销相关会话。
+
+平台超级管理员可跨租户管理用户；拥有 `tenant_admin` 角色的租户管理员只能管理本租户的非超级管理员；普通用户只能修改自己的密码和管理自己的会话。所有用户变更都要求当前 `version`，过期提交返回 `409`。账号停用必须提供原因并保留 `deleted_at`、`deleted_by` 与审计事件。主要接口：
+
+```text
+POST   /api/v1/auth/login
+POST   /api/v1/auth/logout
+GET    /api/v1/auth/me
+PUT    /api/v1/auth/password
+GET    /api/v1/auth/sessions
+DELETE /api/v1/auth/sessions/{session_id}
+DELETE /api/v1/auth/sessions
+GET    /api/v1/users
+POST   /api/v1/users
+GET    /api/v1/users/audit-events
+PATCH  /api/v1/users/{id}
+PUT    /api/v1/users/{id}/password
+DELETE /api/v1/users/{id}             # 请求体包含 version 和停用原因
+GET    /api/v1/users/{id}/sessions
+DELETE /api/v1/users/{id}/sessions/{session_id}
+DELETE /api/v1/users/{id}/sessions
+```
+
+密码有效期、失败次数、锁定时间、限流窗口和会话活动写入频率可分别通过 `DEEPAGENT_PASSWORD_MAX_AGE_DAYS`、`DEEPAGENT_MAX_FAILED_LOGINS`、`DEEPAGENT_LOGIN_LOCKOUT_MINUTES`、`DEEPAGENT_LOGIN_RATE_WINDOW_MINUTES` 和 `DEEPAGENT_SESSION_LAST_SEEN_SECONDS` 调整。数据库启动时按 `schema_migrations` 顺序执行增量迁移。
 
 ## 真实对话模型
 

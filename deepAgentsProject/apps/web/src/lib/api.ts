@@ -25,6 +25,11 @@ import type {
   WorkspaceTreeItem,
   VerificationReport,
   ChangeSet,
+  LoginSession,
+  PlatformUser,
+  UserListResponse,
+  AuthSession,
+  AuthAuditListResponse,
 } from '../types'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
@@ -34,9 +39,22 @@ async function sha256(file: File) {
   return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
 }
 
+export class ApiError extends Error {
+  status: number
+  code?: string
+
+  constructor(message: string, status: number, code?: string) {
+    super(message)
+    this.name = 'ApiError'
+    this.status = status
+    this.code = code
+  }
+}
+
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
+    credentials: 'include',
     headers: {
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
       ...options.headers,
@@ -44,12 +62,62 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    throw new Error(body?.error?.message ?? body?.detail ?? `Request failed (${response.status})`)
+    const error = new ApiError(body?.error?.message ?? body?.detail ?? `Request failed (${response.status})`, response.status, body?.error?.code)
+    if (response.status === 401 && path !== '/api/v1/auth/login' && path !== '/api/v1/auth/me') {
+      window.dispatchEvent(new CustomEvent('deepagent:unauthorized'))
+    }
+    throw error
   }
   return response.json() as Promise<T>
 }
 
 export const api = {
+  login: (username: string, password: string) => request<LoginSession>('/api/v1/auth/login', {
+    method: 'POST', body: JSON.stringify({ username, password }),
+  }),
+  logout: () => request<{ ok: boolean }>('/api/v1/auth/logout', { method: 'POST' }),
+  me: () => request<PlatformUser>('/api/v1/auth/me'),
+  changePassword: (body: { current_password: string; new_password: string; version: number }) =>
+    request<PlatformUser>('/api/v1/auth/password', { method: 'PUT', body: JSON.stringify(body) }),
+  ownSessions: () => request<{ items: AuthSession[] }>('/api/v1/auth/sessions'),
+  revokeOwnSession: (sessionId: string) => request<{ ok: boolean; revoked_count: number; revoked_current: boolean }>(`/api/v1/auth/sessions/${sessionId}`, { method: 'DELETE' }),
+  revokeAllOwnSessions: () => request<{ ok: boolean; revoked_count: number; revoked_current: boolean }>('/api/v1/auth/sessions', { method: 'DELETE' }),
+  users: (params: {
+    page?: number
+    page_size?: number
+    q?: string
+    status?: 'ACTIVE' | 'INACTIVE' | 'ALL'
+    role?: string
+    tenant_id?: string
+    project_id?: string
+    sort_by?: 'username' | 'display_name' | 'status' | 'created_at' | 'updated_at' | 'last_login_at'
+    sort_order?: 'asc' | 'desc'
+  } = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '').map(([key, value]) => [key, String(value)]))
+    return request<UserListResponse>(`/api/v1/users${query.size ? `?${query}` : ''}`)
+  },
+  createUser: (body: {
+    username: string
+    display_name: string
+    password: string
+    tenant_id: string
+    project_id: string
+    environment_id: string
+    roles: string[]
+    is_super_admin: boolean
+  }) => request<PlatformUser>('/api/v1/users', { method: 'POST', body: JSON.stringify(body) }),
+  updateUser: (id: string, body: Partial<Pick<PlatformUser, 'username' | 'display_name' | 'tenant_id' | 'project_id' | 'environment_id' | 'roles' | 'is_super_admin' | 'status'>> & { version: number }) =>
+    request<PlatformUser>(`/api/v1/users/${id}`, { method: 'PATCH', body: JSON.stringify(body) }),
+  resetUserPassword: (id: string, password: string, version: number) =>
+    request<PlatformUser>(`/api/v1/users/${id}/password`, { method: 'PUT', body: JSON.stringify({ password, version }) }),
+  deactivateUser: (id: string, version: number, reason: string) => request<PlatformUser>(`/api/v1/users/${id}`, { method: 'DELETE', body: JSON.stringify({ version, reason }) }),
+  userSessions: (id: string) => request<{ items: AuthSession[] }>(`/api/v1/users/${id}/sessions`),
+  revokeUserSession: (id: string, sessionId: string) => request<{ ok: boolean; revoked_count: number; revoked_current: boolean }>(`/api/v1/users/${id}/sessions/${sessionId}`, { method: 'DELETE' }),
+  revokeAllUserSessions: (id: string) => request<{ ok: boolean; revoked_count: number; revoked_current: boolean }>(`/api/v1/users/${id}/sessions`, { method: 'DELETE' }),
+  userAuditEvents: (params: { page?: number; page_size?: number; q?: string; action?: string; outcome?: string; target_user_id?: string } = {}) => {
+    const query = new URLSearchParams(Object.entries(params).filter(([, value]) => value !== undefined && value !== '').map(([key, value]) => [key, String(value)]))
+    return request<AuthAuditListResponse>(`/api/v1/users/audit-events${query.size ? `?${query}` : ''}`)
+  },
   context: () => request<PlatformContext>('/api/v1/context'),
   overview: () => request<Overview>('/api/v1/overview'),
   agents: () => request<{ items: Agent[] }>('/api/v1/agents'),
@@ -121,6 +189,7 @@ export const api = {
     const platformUpload = preparation.upload.url.startsWith('/')
     const response = await fetch(platformUpload ? `${API_BASE}${preparation.upload.url}` : preparation.upload.url, {
       method: preparation.upload.method,
+      credentials: platformUpload ? 'include' : 'omit',
       body: file,
       headers: {
         'Content-Type': file.type || 'application/octet-stream',

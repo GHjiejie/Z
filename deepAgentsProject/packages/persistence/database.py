@@ -11,6 +11,80 @@ SCHEMA = """
 PRAGMA journal_mode=WAL;
 PRAGMA foreign_keys=ON;
 
+CREATE TABLE IF NOT EXISTS schema_migrations (
+  version INTEGER PRIMARY KEY,
+  name TEXT NOT NULL,
+  applied_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS users (
+  id TEXT PRIMARY KEY,
+  username TEXT NOT NULL COLLATE NOCASE UNIQUE,
+  display_name TEXT NOT NULL,
+  password_hash TEXT NOT NULL,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  roles_json TEXT NOT NULL DEFAULT '[]',
+  is_super_admin INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'ACTIVE',
+  version INTEGER NOT NULL DEFAULT 1,
+  last_login_at TEXT,
+  password_changed_at TEXT,
+  password_expires_at TEXT,
+  must_change_password INTEGER NOT NULL DEFAULT 1,
+  failed_login_count INTEGER NOT NULL DEFAULT 0,
+  last_failed_login_at TEXT,
+  locked_until TEXT,
+  deleted_at TEXT,
+  deleted_by TEXT,
+  deletion_reason TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_users_scope
+  ON users(tenant_id, project_id, status, username);
+
+CREATE TABLE IF NOT EXISTS auth_sessions (
+  id TEXT PRIMARY KEY,
+  token_hash TEXT NOT NULL UNIQUE,
+  user_id TEXT NOT NULL REFERENCES users(id),
+  expires_at TEXT NOT NULL,
+  revoked_at TEXT,
+  created_at TEXT NOT NULL,
+  last_seen_at TEXT NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_auth_sessions_user
+  ON auth_sessions(user_id, expires_at, revoked_at);
+
+CREATE TABLE IF NOT EXISTS auth_audit_events (
+  id TEXT PRIMARY KEY,
+  actor_user_id TEXT,
+  target_user_id TEXT,
+  tenant_id TEXT,
+  project_id TEXT,
+  action TEXT NOT NULL,
+  outcome TEXT NOT NULL,
+  ip_address TEXT,
+  user_agent TEXT,
+  details_json TEXT NOT NULL DEFAULT '{}',
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_events_scope
+  ON auth_audit_events(tenant_id, created_at DESC);
+CREATE INDEX IF NOT EXISTS idx_auth_audit_events_target
+  ON auth_audit_events(target_user_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS auth_login_limits (
+  key_hash TEXT PRIMARY KEY,
+  attempts INTEGER NOT NULL,
+  window_started_at TEXT NOT NULL,
+  blocked_until TEXT,
+  updated_at TEXT NOT NULL
+);
+
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -631,6 +705,8 @@ JSON_COLUMNS = {
     "classification_json": "classification",
     "candidate_deployments_json": "candidate_deployments",
     "requirements_json": "requirements",
+    "roles_json": "roles",
+    "details_json": "details",
 }
 
 
@@ -687,6 +763,7 @@ class Database:
                 "INTEGER NOT NULL DEFAULT 131072",
             )
             self._ensure_column("change_sets", "plan_hash", "TEXT NOT NULL DEFAULT ''")
+            self._run_migrations()
             self.connection.commit()
 
     def close(self) -> None:
@@ -697,6 +774,13 @@ class Database:
         with self.lock:
             self.connection.execute(sql, tuple(params))
             self.connection.commit()
+
+    def execute_count(self, sql: str, params: Iterable[Any] = ()) -> int:
+        """Execute one write and return its affected-row count."""
+        with self.lock:
+            cursor = self.connection.execute(sql, tuple(params))
+            self.connection.commit()
+            return cursor.rowcount
 
     def execute_many(self, sql: str, rows: Iterable[Iterable[Any]]) -> None:
         with self.lock:
@@ -723,6 +807,80 @@ class Database:
         }
         if column not in columns:
             self.connection.execute(f"ALTER TABLE {table} ADD COLUMN {column} {declaration}")
+
+    def _run_migrations(self) -> None:
+        """Apply additive, versioned migrations for databases created by older builds."""
+        applied = {
+            int(row["version"])
+            for row in self.connection.execute(
+                "SELECT version FROM schema_migrations"
+            ).fetchall()
+        }
+        migrations = (
+            (1, "record-existing-platform-schema", self._migration_platform_baseline),
+            (2, "auth-user-governance", self._migration_auth_user_governance),
+        )
+        for version, name, migration in migrations:
+            if version in applied:
+                continue
+            migration()
+            self.connection.execute(
+                "INSERT INTO schema_migrations(version, name, applied_at) VALUES(?,?,datetime('now'))",
+                (version, name),
+            )
+
+    def _migration_platform_baseline(self) -> None:
+        # Version 1 records the original direct-schema baseline so later changes are
+        # independently traceable on both fresh and upgraded installations.
+        return None
+
+    def _migration_auth_user_governance(self) -> None:
+        user_columns = {
+            "version": "INTEGER NOT NULL DEFAULT 1",
+            "password_changed_at": "TEXT",
+            "password_expires_at": "TEXT",
+            "must_change_password": "INTEGER NOT NULL DEFAULT 0",
+            "failed_login_count": "INTEGER NOT NULL DEFAULT 0",
+            "last_failed_login_at": "TEXT",
+            "locked_until": "TEXT",
+            "deleted_at": "TEXT",
+            "deleted_by": "TEXT",
+            "deletion_reason": "TEXT",
+        }
+        for column, declaration in user_columns.items():
+            self._ensure_column("users", column, declaration)
+        self._ensure_column("auth_sessions", "ip_address", "TEXT")
+        self._ensure_column("auth_sessions", "user_agent", "TEXT")
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS auth_audit_events (
+              id TEXT PRIMARY KEY,
+              actor_user_id TEXT,
+              target_user_id TEXT,
+              tenant_id TEXT,
+              project_id TEXT,
+              action TEXT NOT NULL,
+              outcome TEXT NOT NULL,
+              ip_address TEXT,
+              user_agent TEXT,
+              details_json TEXT NOT NULL DEFAULT '{}',
+              created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_auth_audit_events_scope
+              ON auth_audit_events(tenant_id, created_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_auth_audit_events_target
+              ON auth_audit_events(target_user_id, created_at DESC);
+            CREATE TABLE IF NOT EXISTS auth_login_limits (
+              key_hash TEXT PRIMARY KEY,
+              attempts INTEGER NOT NULL,
+              window_started_at TEXT NOT NULL,
+              blocked_until TEXT,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_users_lock_state
+              ON users(status, locked_until, username);
+            """
+        )
 
     @staticmethod
     def encode(value: Any) -> str:

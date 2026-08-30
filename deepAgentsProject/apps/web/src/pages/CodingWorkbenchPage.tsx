@@ -162,7 +162,7 @@ export function CodingWorkbenchPage() {
 
   const openStream = (runId: string, after = 0) => {
     streamRef.current?.close()
-    const source = new EventSource(streamUrl(runId, after))
+    const source = new EventSource(streamUrl(runId, after), { withCredentials: true })
     streamRef.current = source
     source.addEventListener('runtime.event', (message) => {
       const event = JSON.parse((message as MessageEvent).data) as RuntimeEvent
@@ -242,7 +242,7 @@ export function CodingWorkbenchPage() {
         <label>Base ref<input value={baseRef} onChange={(event) => setBaseRef(event.target.value)} /></label>
       </div>
       <div className="coding-task-row"><input aria-label="Task title" value={title} onChange={(event) => setTitle(event.target.value)} /><textarea aria-label="Coding task" rows={2} value={task} onChange={(event) => setTask(event.target.value)} placeholder="Describe the code change and acceptance criteria…" /><button className="button primary" disabled={busy || !task.trim() || !repositoryId || !deploymentId} onClick={() => void start()}>{busy ? <LoaderCircle className="spin" size={15} /> : <Play size={15} />} Start</button>{run && ACTIVE.includes(run.status) && <button className="button danger" onClick={() => void api.cancelRun(run.id).then(setRun)}><Square size={13} /> Cancel</button>}</div>
-      {!deployments.length && <div className="coding-empty-note"><ShieldAlert size={15} /> No Coding Agent deployment. Create one from the <Link to="/agents">Coding Agent starter</Link>.</div>}
+      {!deployments.length && <div className="coding-empty-note"><ShieldAlert size={15} /> No Coding Agent deployment. Create one from the <Link to="/advanced/agents">Coding Agent starter</Link>.</div>}
       {!repositories.length && <div className="coding-empty-note"><FolderOpen size={15} /> Choose a local working directory before starting.</div>}
     </header>
 
