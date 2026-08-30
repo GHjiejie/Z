@@ -61,6 +61,47 @@ CREATE TABLE IF NOT EXISTS agent_deployments (
   updated_at TEXT NOT NULL
 );
 
+CREATE TABLE IF NOT EXISTS intent_router_revisions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  revision_number INTEGER NOT NULL,
+  taxonomy_version TEXT NOT NULL,
+  mode TEXT NOT NULL,
+  config_json TEXT NOT NULL,
+  model_snapshot_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  UNIQUE(tenant_id, project_id, environment_id, revision_number)
+);
+CREATE INDEX IF NOT EXISTS idx_intent_router_revisions_scope
+  ON intent_router_revisions(tenant_id, project_id, environment_id, status);
+
+CREATE TABLE IF NOT EXISTS intent_routing_decisions (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  environment_id TEXT NOT NULL,
+  router_revision_id TEXT NOT NULL REFERENCES intent_router_revisions(id),
+  input_hash TEXT NOT NULL,
+  classification_json TEXT NOT NULL,
+  status TEXT NOT NULL,
+  selected_deployment_id TEXT REFERENCES agent_deployments(id),
+  predicted_deployment_id TEXT REFERENCES agent_deployments(id),
+  candidate_deployments_json TEXT NOT NULL DEFAULT '[]',
+  reason TEXT NOT NULL,
+  requirements_json TEXT NOT NULL DEFAULT '{}',
+  override_deployment_id TEXT REFERENCES agent_deployments(id),
+  thread_id TEXT,
+  run_id TEXT,
+  expires_at TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  committed_at TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_intent_routing_decisions_scope
+  ON intent_routing_decisions(tenant_id, project_id, environment_id, created_at DESC);
+
 CREATE TABLE IF NOT EXISTS repositories (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -105,6 +146,7 @@ CREATE TABLE IF NOT EXISTS threads (
   agent_deployment_id TEXT NOT NULL REFERENCES agent_deployments(id),
   repository_id TEXT REFERENCES repositories(id),
   repository_snapshot_id TEXT REFERENCES repository_snapshots(id),
+  routing_decision_id TEXT REFERENCES intent_routing_decisions(id),
   title TEXT NOT NULL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -178,6 +220,7 @@ CREATE TABLE IF NOT EXISTS runs (
   principal_environment_id TEXT NOT NULL DEFAULT 'env_development',
   principal_verified INTEGER NOT NULL DEFAULT 0,
   coding_workspace_id TEXT REFERENCES coding_workspaces(id),
+  routing_decision_id TEXT REFERENCES intent_routing_decisions(id),
   workspace_generation INTEGER,
   checkpoint_json TEXT NOT NULL DEFAULT '{}',
   current_attempt_id TEXT,
@@ -583,6 +626,11 @@ JSON_COLUMNS = {
     "revision_ids_json": "revision_ids",
     "hits_json": "hits",
     "payload_json": "payload",
+    "config_json": "config",
+    "model_snapshot_json": "model_snapshot",
+    "classification_json": "classification",
+    "candidate_deployments_json": "candidate_deployments",
+    "requirements_json": "requirements",
 }
 
 
@@ -620,7 +668,9 @@ class Database:
             )
             self._ensure_column("threads", "repository_id", "TEXT")
             self._ensure_column("threads", "repository_snapshot_id", "TEXT")
+            self._ensure_column("threads", "routing_decision_id", "TEXT")
             self._ensure_column("runs", "coding_workspace_id", "TEXT")
+            self._ensure_column("runs", "routing_decision_id", "TEXT")
             self._ensure_column("runs", "workspace_generation", "INTEGER")
             self._ensure_column("artifacts", "plan_hash", "TEXT")
             self._ensure_column("artifacts", "base_commit_sha", "TEXT")

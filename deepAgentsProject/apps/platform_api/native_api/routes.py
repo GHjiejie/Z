@@ -68,7 +68,7 @@ def platform_context(
             "workspace_switching": False,
             "environment_switching": False,
             "resource_registration": False,
-            "routing_management": False,
+            "routing_management": True,
             "attachments": False,
             "code_context": False,
         },

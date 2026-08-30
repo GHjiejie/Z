@@ -17,6 +17,7 @@
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
 - Knowledge/RAG：内置 `builtin_rag` Agent 自动判断知识检索或模型直答，支持 OSS 直传授权、持久摄取、不可变索引、混合检索、ACL 与可验证 Citation。
 - Coding Agent：启动时幂等预置并部署 `Built-in Coding Agent`，使用真实 `create_deep_agent()` / LangGraph Tool Loop、内容寻址源码快照、Thread-scoped Workspace、Docker Sandbox、HITL、平台重算 Patch/Diff/Verification 和 Coding Workbench。
+- Intent Router：Playground 新会话默认选择 `Auto`，仅对首条输入进行意图识别并路由到 Coding、Release、Knowledge 或 General Agent；低置信度要求确认，Coding 路由要求先绑定工作目录，后续消息固定使用 Thread 已选部署。
 
 ## 快速启动
 
@@ -47,7 +48,7 @@ React 开发服务器为 [http://localhost:5173](http://localhost:5173)，请求
 ## 演示核心闭环
 
 1. 在 **Agents** 修改 Draft，执行 Validate、Publish；系统创建不可变 Revision、Plan 和 Development Deployment。
-2. 在 **Playground** 运行普通分析任务，观察 Model、Tool、SubAgent、Todo、Artifact 和 Usage 事件。
+2. 在 **Playground** 保持 `Auto` 并输入首条任务。系统会展示意图、置信度和目标 Agent；需要仓库或人工确认时先弹出确认窗口，创建会话后不再自动切换 Agent。
 3. 输入含有 `deploy to production` 或“部署到生产”的任务，Run 会进入 `WAITING_FOR_APPROVAL`。
 4. 在 **Approvals** 批准或拒绝。批准会产生第二个 RunAttempt，从持久 Checkpoint 恢复并完成。
 5. 在 **Runs & traces** 查看 Plan Pin、Attempt、完整事件序列和成本。
@@ -72,6 +73,7 @@ make verify
 - 真实 Deep Agents 文件/命令 Tool Loop、受保护路径审批与 Checkpoint 恢复；
 - Docker 非 root、只读根文件系统、默认禁网、密钥隔离、超时/输出/磁盘限制和软链接逃逸；
 - Run 取消终止容器命令、Sandbox 丢失恢复、Patch 防篡改、平台重算文件 Hash，以及宿主工作区不被修改。
+- 首轮意图分类、置信度确认、工作区要求、手动覆盖、Shadow Mode、路由版本和 Tenant / Project 隔离。
 
 ## 代码结构
 
@@ -86,12 +88,37 @@ packages/
 ├── runtime/               Orchestrator、Lease、Binder、Executor、Event
 ├── knowledge/             OSS、摄取、解析、分块、Embedding、检索与 Citation
 ├── repositories/          Repository 注册与不可变源码快照
+├── routing/               首轮意图分类、版本化策略与可信部署选择
 ├── sandbox/               Docker/Fake Provider、策略、恢复与生命周期
 ├── coding/                Workspace、Verification、ChangeSet 与 API 用例
 ├── adapters/harness/      Deep Agents 稳定适配边界
 └── persistence/           SQLite 参考仓储与 Schema
 tests/                      端到端平台契约测试
 ```
+
+## 首轮意图识别与 Agent 路由
+
+Playground 的 `Auto` 模式只在创建新 Thread 时识别首条用户输入。分类器先处理明确规则，再对不明确请求调用受约束的语义分类；分类调用不携带工具、资源凭据或部署选择权。分类输出只描述 `coding`、`release`、`knowledge`、`general` 或 `ambiguous` 意图，最终部署由服务端根据当前 Tenant、Project、Environment、不可变 Execution Plan 能力和生效 Router Revision 选择。
+
+- 高置信度请求直接创建 routed run；低于自动阈值或属于 `ambiguous` 时要求用户确认。
+- Coding Agent 必须绑定已注册的 Repository / Working Directory，不能在没有 Workspace 的情况下执行。
+- 用户可手动选择或覆盖 Agent，覆盖结果会进入路由决策和 RuntimeEvent 审计记录。
+- Thread 创建后会固定 `agent_deployment_id`；后续输入直接在该 Thread 上创建 Run，不再次分类或静默切换。
+- `active` 模式执行预测结果；`shadow` 模式保留预测但执行 General Agent；`disabled` 模式跳过自动路由并使用 General Agent。
+- Router 配置是不可变修订。Settings 中 owner/admin 可调整模式、阈值、决策有效期及各意图目标，普通成员只能查看。
+
+主要接口：
+
+```text
+GET  /api/v1/intent-routing/profile
+PUT  /api/v1/intent-routing/profile
+POST /api/v1/intent-routing:resolve
+POST /api/v1/routed-runs
+GET  /api/v1/intent-routing/decisions
+GET  /api/v1/intent-routing/decisions/{id}
+```
+
+每个 committed decision 会关联到 Thread 和首个 Run，并产生 `intent.classification.*`、`routing.agent.selected`、`routing.fallback`、`routing.user_overridden` 或 `routing.workspace_required` 事件。输入正文不重复写入决策表，只保存 SHA-256 用于提交时的一致性和幂等校验。模型分类超时可通过 `INTENT_CLASSIFIER_TIMEOUT_SECONDS` 调整，默认 4 秒；超时或无效输出会降级为需要确认的 General 路由。
 
 ## Reference Harness 与真实 Deep Agents
 

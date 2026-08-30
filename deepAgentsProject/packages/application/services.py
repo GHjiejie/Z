@@ -274,10 +274,12 @@ class AgentService:
                 (deployment["resolved_plan_id"],),
             )
             coding_profile = (plan or {}).get("plan", {}).get("coding_profile")
+            knowledge_bindings = (plan or {}).get("plan", {}).get("knowledge_bindings", [])
             deployment["coding_enabled"] = bool(
                 coding_profile and coding_profile.get("enabled")
             )
             deployment["coding_profile"] = coding_profile
+            deployment["knowledge_enabled"] = bool(knowledge_bindings)
         return deployments
 
     def list_models(self, context: TenantContext) -> List[Dict[str, Any]]:

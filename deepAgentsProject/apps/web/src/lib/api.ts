@@ -3,6 +3,8 @@ import type {
   AgentDraft,
   Deployment,
   Interrupt,
+  IntentRoutingDecision,
+  IntentRoutingProfile,
   KnowledgeBase,
   KnowledgeIngestionJob,
   KnowledgeRevision,
@@ -61,6 +63,34 @@ export const api = {
   publishAgent: (id: string) =>
     request<{ revision: { id: string; revision_number: number }; resolved_plan: { id: string; plan_hash: string } }>(`/api/v1/agents/${id}/revisions:publish`, { method: 'POST' }),
   deployments: () => request<{ items: Deployment[] }>('/api/v1/agent-deployments'),
+  routingProfile: () => request<IntentRoutingProfile>('/api/v1/intent-routing/profile'),
+  updateRoutingProfile: (body: {
+    mode: IntentRoutingProfile['mode']
+    auto_route_threshold: number
+    confirmation_threshold: number
+    decision_ttl_seconds: number
+    target_deployments: Partial<IntentRoutingProfile['config']['target_deployments']>
+  }) => request<IntentRoutingProfile>('/api/v1/intent-routing/profile', {
+    method: 'PUT', body: JSON.stringify(body),
+  }),
+  resolveIntentRoute: (body: {
+    input: string
+    preferred_deployment_id?: string
+    workspace?: { repository_id: string; base_ref?: string; source_mode?: 'committed_ref' | 'working_tree_snapshot' }
+  }) => request<IntentRoutingDecision>('/api/v1/intent-routing:resolve', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  createRoutedRun: (body: {
+    decision_id: string
+    input: string
+    title?: string
+    confirmed?: boolean
+    override_deployment_id?: string
+    workspace?: { repository_id: string; base_ref?: string; source_mode?: 'committed_ref' | 'working_tree_snapshot' }
+  }) => request<{ decision: IntentRoutingDecision; thread: ThreadSummary; run: Run }>('/api/v1/routed-runs', {
+    method: 'POST', body: JSON.stringify(body),
+  }),
+  routingDecisions: () => request<{ items: IntentRoutingDecision[] }>('/api/v1/intent-routing/decisions'),
   deploy: (agentRevisionId: string, environment = 'development') =>
     request<Deployment>('/api/v1/agent-deployments', {
       method: 'POST',

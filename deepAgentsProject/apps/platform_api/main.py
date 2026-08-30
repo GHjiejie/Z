@@ -15,6 +15,7 @@ from fastapi.staticfiles import StaticFiles
 from apps.platform_api.native_api.knowledge_routes import router as knowledge_router
 from apps.platform_api.native_api.coding_routes import router as coding_router
 from apps.platform_api.native_api.repository_routes import router as repository_router
+from apps.platform_api.native_api.routing_routes import router as routing_router
 from apps.platform_api.native_api.routes import router as native_router
 from packages.application.approval_service import ApprovalService
 from packages.application.services import (
@@ -44,6 +45,7 @@ from packages.knowledge.storage import create_object_storage
 from packages.persistence import Database
 from packages.plugins import PluginLoader, SkillRegistry
 from packages.repositories import RepositoryService
+from packages.routing import IntentRoutingService
 from packages.runtime import RunOrchestrator, RunService
 from packages.runtime.coding_model import create_coding_chat_model
 from packages.runtime.deepagents_executor import DeepAgentsRuntimeExecutor
@@ -216,6 +218,9 @@ def create_app(
                 knowledge,
             )
         run_service = RunService(db, events, orchestrator, coding)
+        routing = IntentRoutingService(
+            db, active_model_gateway, run_service, events
+        )
         approvals = ApprovalService(db, events, orchestrator)
         application.state.services = SimpleNamespace(
             db=db,
@@ -235,6 +240,7 @@ def create_app(
             orchestrator=orchestrator,
             agents=AgentService(db, compiler),
             runs=run_service,
+            routing=routing,
             approvals=approvals,
         )
         await knowledge.start()
@@ -318,6 +324,7 @@ def create_app(
     application.include_router(knowledge_router)
     application.include_router(repository_router)
     application.include_router(coding_router)
+    application.include_router(routing_router)
 
     # A production web build can be served by the API process for the local
     # reference deployment. Kubernetes deployments may serve it independently.

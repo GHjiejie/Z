@@ -23,6 +23,7 @@ RESERVED_RUN_METADATA = {
     "user_id",
     "roles",
     "principal",
+    "routing_decision_id",
 }
 
 
@@ -42,7 +43,13 @@ class RunService:
     def attach_orchestrator(self, orchestrator: Any) -> None:
         self.orchestrator = orchestrator
 
-    def create_thread(self, payload: ThreadCreate, context: TenantContext) -> Dict[str, Any]:
+    def create_thread(
+        self,
+        payload: ThreadCreate,
+        context: TenantContext,
+        *,
+        routing_decision_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
         deployment = self.db.fetch_one(
             """SELECT * FROM agent_deployments WHERE id=? AND tenant_id=? AND project_id=?
                AND status='ACTIVE'""",
@@ -65,13 +72,15 @@ class RunService:
         now = utc_now()
         self.db.execute(
             """INSERT INTO threads
-               (id, tenant_id, project_id, agent_deployment_id, title, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
+               (id, tenant_id, project_id, agent_deployment_id, routing_decision_id,
+                title, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 thread_id,
                 context.tenant_id,
                 context.project_id,
                 payload.agent_deployment_id,
+                routing_decision_id,
                 payload.title,
                 now,
                 now,
@@ -132,6 +141,7 @@ class RunService:
         payload: RunCreate,
         context: TenantContext,
         idempotency_key: Optional[str] = None,
+        enqueue: bool = True,
     ) -> Dict[str, Any]:
         if idempotency_key:
             previous = self.db.fetch_one(
@@ -166,9 +176,9 @@ class RunService:
                (id, tenant_id, project_id, thread_id, agent_deployment_id, resolved_plan_id,
                 status, input, metadata_json, principal_user_id, principal_roles_json,
                 principal_environment_id, principal_verified, coding_workspace_id,
-                workspace_generation, checkpoint_json,
+                routing_decision_id, workspace_generation, checkpoint_json,
                 current_attempt_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, 1, ?, ?, '{}', ?, ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, 'CREATED', ?, ?, ?, ?, ?, 1, ?, ?, ?, '{}', ?, ?, ?)""",
             (
                 run_id,
                 context.tenant_id,
@@ -182,6 +192,7 @@ class RunService:
                 self.db.encode(context.roles),
                 context.environment_id,
                 workspace["id"] if workspace else None,
+                thread.get("routing_decision_id"),
                 workspace["workspace_generation"] if workspace else None,
                 attempt_id,
                 now,
@@ -214,9 +225,13 @@ class RunService:
                     now,
                 ),
             )
+        if enqueue:
+            await self.enqueue_run(run_id)
+        return result
+
+    async def enqueue_run(self, run_id: str) -> None:
         if self.orchestrator:
             await self.orchestrator.enqueue(run_id)
-        return result
 
     async def provide_input(
         self, run_id: str, payload: RunCreate, context: TenantContext

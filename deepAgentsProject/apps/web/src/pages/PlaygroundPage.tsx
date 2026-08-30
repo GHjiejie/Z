@@ -8,6 +8,7 @@ import {
   ChevronDown,
   Clock3,
   FileText,
+  FolderOpen,
   GitBranch,
   History,
   LoaderCircle,
@@ -29,9 +30,10 @@ import { MarkdownContent } from '../components/MarkdownContent'
 import { ErrorBanner, StatusPill, formatRelative, shortId } from '../components/UI'
 import { usePlatform } from '../context/PlatformContext'
 import { api, streamUrl } from '../lib/api'
-import type { Deployment, Run, RunArtifact, RuntimeEvent, ThreadSummary } from '../types'
+import type { Deployment, IntentRoutingDecision, Repository, Run, RunArtifact, RuntimeEvent, ThreadSummary } from '../types'
 
 const RUNNING_STATUSES = ['CREATED', 'QUEUED', 'PREPARING', 'RUNNING', 'RESUMING']
+const AUTO_DEPLOYMENT = 'auto'
 
 type InspectorTab = 'plan' | 'events' | 'state' | 'artifacts' | 'usage'
 type ConnectionState = 'idle' | 'connecting' | 'connected' | 'reconnecting' | 'ended' | 'disconnected'
@@ -61,8 +63,9 @@ async function loadAllRunEvents(runId: string) {
 export function PlaygroundPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([])
   const [threads, setThreads] = useState<ThreadSummary[]>([])
+  const [repositories, setRepositories] = useState<Repository[]>([])
   const [conversationRuns, setConversationRuns] = useState<Run[]>([])
-  const [deploymentId, setDeploymentId] = useState('')
+  const [deploymentId, setDeploymentId] = useState(AUTO_DEPLOYMENT)
   const [threadId, setThreadId] = useState('')
   const [input, setInput] = useState('')
   const [run, setRun] = useState<Run | null>(null)
@@ -76,26 +79,35 @@ export function PlaygroundPage() {
   const [inspectorOpen, setInspectorOpen] = useState(() => typeof window !== 'undefined' && window.matchMedia('(min-width: 1181px)').matches)
   const [inspectorTab, setInspectorTab] = useState<InspectorTab>('events')
   const [connection, setConnection] = useState<ConnectionState>('idle')
+  const [pendingRoute, setPendingRoute] = useState<{ decision: IntentRoutingDecision; message: string } | null>(null)
+  const [routeOverrideId, setRouteOverrideId] = useState('')
+  const [routeRepositoryId, setRouteRepositoryId] = useState('')
+  const [routeBaseRef, setRouteBaseRef] = useState('main')
+  const [routingNotice, setRoutingNotice] = useState<IntentRoutingDecision | null>(null)
   const streamRef = useRef<EventSource | null>(null)
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const { context } = usePlatform()
 
   const loadThreads = async () => {
     const result = await api.threads()
-    const conversationalThreads = result.items.filter((item) => !item.repository_id)
-    setThreads(conversationalThreads)
-    return conversationalThreads
+    setThreads(result.items)
+    return result.items
   }
 
   useEffect(() => {
-    Promise.all([api.deployments(), api.threads()]).then(([deploymentResult, threadResult]) => {
-      const conversationalDeployments = deploymentResult.items.filter((item) => !item.coding_enabled)
-      setDeployments(conversationalDeployments)
-      setThreads(threadResult.items.filter((item) => !item.repository_id))
-      if (conversationalDeployments[0]) setDeploymentId(conversationalDeployments[0].id)
+    Promise.all([api.deployments(), api.threads(), api.repositories()]).then(([deploymentResult, threadResult, repositoryResult]) => {
+      const environment = context?.environment.id.replace(/^env_/, '')
+      setDeployments(deploymentResult.items.filter((item) => item.status === 'ACTIVE' && (!environment || item.environment === environment)))
+      setThreads(threadResult.items)
+      setRepositories(repositoryResult.items.filter((item) => item.status === 'ACTIVE'))
+      setDeploymentId(AUTO_DEPLOYMENT)
+      if (repositoryResult.items[0]) {
+        setRouteRepositoryId(repositoryResult.items[0].id)
+        setRouteBaseRef(repositoryResult.items[0].default_branch)
+      }
     }).catch((nextError) => setError(nextError.message))
     return () => streamRef.current?.close()
-  }, [])
+  }, [context?.environment.id])
 
   useEffect(() => {
     const scroller = chatScrollRef.current
@@ -160,6 +172,8 @@ export function PlaygroundPage() {
     setArtifacts([])
     setInput('')
     setConnection('idle')
+    setPendingRoute(null)
+    setRoutingNotice(null)
     if (!id) return
     setLoadingThread(true)
     setError('')
@@ -199,6 +213,46 @@ export function PlaygroundPage() {
     setInput('')
     setSidebarOpen(false)
     setConnection('idle')
+    setPendingRoute(null)
+    setRoutingNotice(null)
+    setDeploymentId(AUTO_DEPLOYMENT)
+  }
+
+  const workspaceForRoute = (deploymentIdToUse: string) => {
+    const deployment = deployments.find((item) => item.id === deploymentIdToUse)
+    if (!deployment?.coding_enabled || !routeRepositoryId) return undefined
+    const repository = repositories.find((item) => item.id === routeRepositoryId)
+    return {
+      repository_id: routeRepositoryId,
+      base_ref: routeBaseRef || repository?.default_branch || 'main',
+      source_mode: repository?.provider === 'local_snapshot' ? 'working_tree_snapshot' as const : 'committed_ref' as const,
+    }
+  }
+
+  const commitRouted = async (
+    decision: IntentRoutingDecision,
+    message: string,
+    confirmed = false,
+    overrideDeploymentId?: string,
+  ) => {
+    const targetId = overrideDeploymentId || decision.selected_deployment_id || ''
+    const result = await api.createRoutedRun({
+      decision_id: decision.id,
+      input: message,
+      title: message.slice(0, 80),
+      confirmed,
+      override_deployment_id: overrideDeploymentId,
+      workspace: workspaceForRoute(targetId),
+    })
+    setPendingRoute(null)
+    setRoutingNotice(result.decision)
+    setThreadId(result.thread.id)
+    setDeploymentId(result.thread.agent_deployment_id)
+    setRun(result.run)
+    updateConversationRun(result.run)
+    setInput('')
+    openStream(result.run.id)
+    await loadThreads()
   }
 
   const execute = async () => {
@@ -214,6 +268,17 @@ export function PlaygroundPage() {
     try {
       let activeThreadId = threadId
       if (!activeThreadId) {
+        if (deploymentId === AUTO_DEPLOYMENT) {
+          const decision = await api.resolveIntentRoute({ input: message })
+          setRouteOverrideId(decision.selected_deployment_id ?? '')
+          if (decision.status === 'NEEDS_WORKSPACE' || decision.status === 'NEEDS_CONFIRMATION') {
+            setPendingRoute({ decision, message })
+            setBusy(false)
+            return
+          }
+          await commitRouted(decision, message)
+          return
+        }
         const thread = await api.createThread(deploymentId, message.slice(0, 80))
         activeThreadId = thread.id
         setThreadId(thread.id)
@@ -253,7 +318,9 @@ export function PlaygroundPage() {
     const needle = threadQuery.trim().toLowerCase()
     return needle ? threads.filter((thread) => `${thread.title} ${thread.agent_name ?? ''}`.toLowerCase().includes(needle)) : threads
   }, [threads, threadQuery])
-  const canSend = !!input.trim() && !!deploymentId && !busy && run?.status !== 'WAITING_FOR_APPROVAL'
+  const canSend = !!input.trim() && !!deploymentId && (deploymentId !== AUTO_DEPLOYMENT || deployments.length > 0) && !busy && run?.status !== 'WAITING_FOR_APPROVAL'
+  const pendingTarget = pendingRoute?.decision.candidate_deployments.find((item) => item.id === routeOverrideId)
+  const pickerDeployments = deployments.filter((item) => !item.coding_enabled || (!!threadId && item.id === deploymentId))
 
   return <div className="playground-page">
     {error && <div className="playground-error"><ErrorBanner message={error} /></div>}
@@ -285,7 +352,7 @@ export function PlaygroundPage() {
             <div><strong>{activeThread?.title ?? 'New conversation'}</strong><span>{threadId ? shortId(threadId) : 'Start a new thread'}</span></div>
           </div>
           <div className="conversation-topbar-actions">
-            <label className="agent-picker"><Sparkles size={16} /><select aria-label="Agent deployment" value={deploymentId} onChange={(event) => setDeploymentId(event.target.value)} disabled={busy || !!threadId}>{deployments.map((deployment) => <option value={deployment.id} key={deployment.id}>{deployment.agent_name} · {deployment.environment}</option>)}</select></label>
+            <label className="agent-picker"><Sparkles size={16} /><select aria-label="Agent deployment" value={deploymentId} onChange={(event) => setDeploymentId(event.target.value)} disabled={busy || !!threadId}><option value={AUTO_DEPLOYMENT}>Auto · choose from intent</option>{pickerDeployments.map((deployment) => <option value={deployment.id} key={deployment.id}>{deployment.agent_name} · {deployment.environment}</option>)}</select></label>
             <button className={`connection-button state-${connection}`} disabled={connection !== 'disconnected' || !run} onClick={() => run && openStream(run.id, events.at(-1)?.sequence ?? 0, true)} title={connection === 'disconnected' ? 'Reconnect live events' : `Event stream ${connection}`}><i />{connection === 'disconnected' ? <RefreshCw size={13} /> : null}<span>{connection}</span></button>
             <button className={`icon-button inspector-toggle ${inspectorOpen ? 'active' : ''}`} aria-label={`${inspectorOpen ? 'Close' : 'Open'} live activity`} aria-controls="run-inspector" aria-expanded={inspectorOpen} onClick={() => { setInspectorTab('events'); setInspectorOpen((value) => !value) }}><Activity size={18} />{events.length > 0 && <span className="activity-count-badge">{events.length > 99 ? '99+' : events.length}</span>}</button>
           </div>
@@ -307,6 +374,7 @@ export function PlaygroundPage() {
         <div className="playground-composer-zone">
           {run?.status === 'WAITING_FOR_INPUT' && <div className="composer-context"><MessageSquareText size={15} /><span>A reviewer requested changes. Your next message resumes this run as a new attempt.</span></div>}
           {run?.status === 'WAITING_FOR_APPROVAL' && <div className="composer-context approval"><PauseCircle size={15} /><span>This run is waiting for approval before it can continue.</span><Link to="/approvals">Review request</Link></div>}
+          {routingNotice && <div className={`composer-context routing ${routingNotice.status === 'FALLBACK' ? 'approval' : ''}`}><Sparkles size={15} /><span><strong>{routingNotice.selected_deployment?.agent_name}</strong> selected for {routingNotice.classification.primary_intent.replaceAll('_', ' ')} · {Math.round(routingNotice.classification.confidence * 100)}% confidence</span></div>}
           <div className={`gemini-composer ${busy ? 'busy' : ''}`}>
             <textarea
               rows={2}
@@ -319,12 +387,12 @@ export function PlaygroundPage() {
                   if (canSend) void execute()
                 }
               }}
-              placeholder={run?.status === 'WAITING_FOR_INPUT' ? 'Describe the requested changes…' : `Message ${activeDeployment?.agent_name ?? 'your agent'}…`}
+              placeholder={run?.status === 'WAITING_FOR_INPUT' ? 'Describe the requested changes…' : deploymentId === AUTO_DEPLOYMENT ? 'Describe your task — Auto will choose an agent…' : `Message ${activeDeployment?.agent_name ?? 'your agent'}…`}
               aria-label="Message your agent"
               aria-describedby="playground-disclaimer"
             />
             <div className="gemini-composer-footer">
-              <div><Sparkles size={14} /><span>{activeDeployment ? `${activeDeployment.agent_name} · ${activeDeployment.environment}` : 'No active deployment'}</span></div>
+              <div><Sparkles size={14} /><span>{deploymentId === AUTO_DEPLOYMENT ? 'Auto intent routing · first message only' : activeDeployment ? `${activeDeployment.agent_name} · ${activeDeployment.environment}` : 'No active deployment'}</span></div>
               {busy ? <button className="composer-send stop" aria-label="Stop run" onClick={() => void cancel()}><Square size={14} fill="currentColor" /></button> : <button className="composer-send" aria-label="Send message" disabled={!canSend} onClick={() => void execute()}><ArrowUp size={18} /></button>}
             </div>
           </div>
@@ -334,6 +402,16 @@ export function PlaygroundPage() {
 
       {inspectorOpen && <RunInspector run={run} events={events} artifacts={artifacts} tab={inspectorTab} connection={connection} busy={busy} onTab={setInspectorTab} onClose={() => setInspectorOpen(false)} />}
     </div>
+    {pendingRoute && <div className="modal-backdrop" onMouseDown={() => setPendingRoute(null)}><div className="modal routing-modal" role="dialog" aria-modal="true" aria-label="Confirm intent routing" onMouseDown={(event) => event.stopPropagation()}>
+      <div className="modal-heading"><div><span className="page-eyebrow">INTENT ROUTING</span><h3>{pendingRoute.decision.status === 'NEEDS_WORKSPACE' ? 'Choose a repository' : 'Confirm the recommended agent'}</h3><p>{pendingRoute.decision.classification.summary}</p></div><button aria-label="Close" className="icon-button" onClick={() => setPendingRoute(null)}><X size={18} /></button></div>
+      <div className="form-stack routing-confirmation">
+        <div className="routing-intent-summary"><Sparkles size={19} /><div><strong>{pendingRoute.decision.classification.primary_intent.replaceAll('_', ' ')}</strong><span>{pendingRoute.decision.classification.subtype.replaceAll('_', ' ')} · {Math.round(pendingRoute.decision.classification.confidence * 100)}% confidence</span></div><StatusPill status={pendingRoute.decision.classification.risk_hint} /></div>
+        <label>Agent deployment<select value={routeOverrideId} onChange={(event) => setRouteOverrideId(event.target.value)}>{pendingRoute.decision.candidate_deployments.map((item) => <option value={item.id} key={item.id}>{item.agent_name} · {item.coding_enabled ? 'Coding' : item.knowledge_enabled ? 'Knowledge' : 'General'}</option>)}</select></label>
+        {pendingTarget?.coding_enabled && <><label>Repository<select value={routeRepositoryId} onChange={(event) => { const id = event.target.value; setRouteRepositoryId(id); setRouteBaseRef(repositories.find((item) => item.id === id)?.default_branch ?? 'main') }}><option value="">Select repository…</option>{repositories.map((item) => <option value={item.id} key={item.id}>{item.name}</option>)}</select></label><label>Base ref<input value={routeBaseRef} onChange={(event) => setRouteBaseRef(event.target.value)} /></label>{!repositories.length && <div className="coding-empty-note"><FolderOpen size={15} /> Register a working directory in <Link to="/coding">Coding Workbench</Link> first.</div>}</>}
+        <div className="routing-request-preview"><span>ORIGINAL REQUEST</span><p>{pendingRoute.message}</p></div>
+      </div>
+      <div className="modal-actions"><button className="button secondary" onClick={() => { if (routeOverrideId) setDeploymentId(routeOverrideId); setPendingRoute(null) }}>Choose manually</button><button className="button primary" disabled={pendingTarget?.coding_enabled && !routeRepositoryId} onClick={() => { setBusy(true); setError(''); void commitRouted(pendingRoute.decision, pendingRoute.message, true, routeOverrideId !== pendingRoute.decision.selected_deployment_id ? routeOverrideId : undefined).catch((nextError) => { setError((nextError as Error).message); setBusy(false) }) }}>Continue with {pendingTarget?.agent_name ?? 'selected agent'}</button></div>
+    </div></div>}
   </div>
 }
 

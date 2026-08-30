@@ -101,6 +101,7 @@ export interface Deployment {
   environment: string
   status: string
   coding_enabled?: boolean
+  knowledge_enabled?: boolean
   coding_profile?: AgentDraft['coding']
   created_at: string
 }
@@ -156,6 +157,7 @@ export interface Run {
   output?: string | null
   resolved_plan_id: string
   current_attempt_id: string
+  routing_decision_id?: string | null
   attempt_count?: number
   metadata: Json
   checkpoint: Json
@@ -175,9 +177,71 @@ export interface ThreadSummary {
   runs?: Run[]
   repository_id?: string | null
   repository_snapshot_id?: string | null
+  routing_decision_id?: string | null
   workspace?: CodingWorkspace | null
   created_at: string
   updated_at: string
+}
+
+export type PrimaryIntent = 'coding' | 'release' | 'knowledge' | 'general' | 'ambiguous'
+
+export interface IntentClassification {
+  taxonomy_version: string
+  primary_intent: PrimaryIntent
+  secondary_intents: PrimaryIntent[]
+  subtype: string
+  confidence: number
+  requires_repository: boolean
+  requires_knowledge: boolean
+  risk_hint: 'low' | 'medium' | 'high'
+  summary: string
+  source: 'rules' | 'model' | 'fallback'
+}
+
+export interface RoutingDeploymentSummary {
+  id: string
+  name: string
+  agent_name: string
+  environment: string
+  coding_enabled: boolean
+  knowledge_enabled: boolean
+}
+
+export interface IntentRoutingDecision {
+  id: string
+  router_revision_id: string
+  input_hash: string
+  status: 'READY' | 'NEEDS_WORKSPACE' | 'NEEDS_CONFIRMATION' | 'FALLBACK'
+  classification: IntentClassification
+  selected_deployment_id?: string | null
+  predicted_deployment_id?: string | null
+  selected_deployment?: RoutingDeploymentSummary | null
+  predicted_deployment?: RoutingDeploymentSummary | null
+  candidate_deployments: RoutingDeploymentSummary[]
+  requirements: { workspace: boolean; confirmation: boolean; low_confidence: boolean }
+  reason: string
+  thread_id?: string | null
+  run_id?: string | null
+  committed: boolean
+  expires_at: string
+  created_at: string
+  committed_at?: string | null
+}
+
+export interface IntentRoutingProfile {
+  id: string
+  revision_number: number
+  taxonomy_version: string
+  mode: 'active' | 'shadow' | 'disabled'
+  status: string
+  config: {
+    auto_route_threshold: number
+    confirmation_threshold: number
+    decision_ttl_seconds: number
+    target_deployments: Record<'coding' | 'release' | 'knowledge' | 'general', string | null>
+  }
+  target_details: Record<'coding' | 'release' | 'knowledge' | 'general', RoutingDeploymentSummary | null>
+  created_at: string
 }
 
 export interface Repository {

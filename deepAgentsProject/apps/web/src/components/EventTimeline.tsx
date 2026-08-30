@@ -54,6 +54,8 @@ export function eventCategory(event: RuntimeEvent) {
 function eventMeta(event: RuntimeEvent) {
   const category = eventCategoryKey(event)
   if (event.type.includes('failed') || event.type.includes('cancel')) return { icon: XCircle, label: CATEGORY_LABELS[category], tone: 'rose' }
+  if (event.type.startsWith('intent.')) return { icon: Brain, label: 'Intent', tone: 'violet' }
+  if (event.type.startsWith('routing.')) return { icon: Workflow, label: 'Routing', tone: 'indigo' }
   if (category === 'graph') return { icon: Workflow, label: 'Graph', tone: 'indigo' }
   if (category === 'human') return { icon: UserRound, label: 'Human', tone: 'rose' }
   if (event.type.startsWith('model.reasoning.')) return { icon: Brain, label: 'Reasoning', tone: 'violet' }
@@ -77,6 +79,12 @@ function inline(value: unknown, maxLength = 180) {
 
 function eventSummary(event: RuntimeEvent) {
   const p = event.payload
+  if (event.type === 'intent.classification.started') return `Taxonomy ${p.taxonomy_version ?? 'active'} · decision ${p.decision_id ?? ''}`
+  if (event.type === 'intent.classification.completed') return `${p.primary_intent ?? 'unknown'} · ${Math.round(Number(p.confidence ?? 0) * 100)}% confidence · ${p.summary ?? ''}`
+  if (event.type === 'routing.workspace_required') return `${p.resolved ? 'Workspace supplied' : 'Workspace required'}${p.repository_id ? ` · ${p.repository_id}` : ''}`
+  if (event.type === 'routing.agent.selected') return `${p.agent_name ?? p.deployment_id ?? 'Agent selected'} · ${p.reason ?? 'policy match'}`
+  if (event.type === 'routing.fallback') return `${p.agent_name ?? p.deployment_id ?? 'Fallback Agent'} · ${p.reason ?? 'fallback policy'}`
+  if (event.type === 'routing.user_overridden') return `${p.agent_name ?? p.deployment_id ?? 'Agent selected by user'} · manual override`
   if (event.type === 'graph.started') return `${p.graph_name ?? 'Execution graph'} · entry ${p.entry_node ?? 'main'}`
   if (event.type === 'graph.completed') return `${p.graph_name ?? 'Execution graph'} · ${p.status ?? 'completed'}`
   if (event.type === 'graph.failed' || event.type === 'graph.cancelled') return inline(p.message ?? p.reason ?? p.status)
