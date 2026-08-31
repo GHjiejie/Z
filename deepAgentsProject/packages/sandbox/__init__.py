@@ -2,7 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-__all__ = ["DockerSandboxProvider", "FakeSandboxProvider", "SandboxManager"]
+__all__ = [
+    "DockerSandboxProvider",
+    "FakeSandboxProvider",
+    "RemoteSandboxProvider",
+    "SandboxManager",
+]
 
 
 def __getattr__(name: str) -> Any:
@@ -14,6 +19,10 @@ def __getattr__(name: str) -> Any:
         from packages.sandbox.fake_provider import FakeSandboxProvider
 
         return FakeSandboxProvider
+    if name == "RemoteSandboxProvider":
+        from packages.sandbox.remote_provider import RemoteSandboxProvider
+
+        return RemoteSandboxProvider
     if name == "SandboxManager":
         from packages.sandbox.manager import SandboxManager
 

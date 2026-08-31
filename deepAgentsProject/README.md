@@ -1,23 +1,43 @@
 # DeepAgent Platform
 
-这是 `DESGIN.md` 架构方案的可运行 Phase 1 实现。项目采用模块化单仓库：FastAPI 提供控制面、执行控制面和 Native API，React 提供可视化控制台；SQLite 是本地参考仓储，可通过 `Database` 接口替换成 PostgreSQL。
+这是 `DESGIN.md` 架构方案的可运行实现，正在进行企业化加固。项目采用模块化单仓库：FastAPI 提供控制面和 Native API，React 提供可视化控制台；本地使用 SQLite，生产适配器使用 PostgreSQL、持久队列、独立 Worker 与远程沙箱服务。当前尚未完成全部生产验收，部署边界及待验证项见[生产隔离说明](docs/enterprise-isolation.md)。
+
+生产镜像、带哈希的依赖锁、严格 CI 门禁、部署预检和 Worker 任务监督见[生产交付说明](docs/production-delivery.md)。Schema 18 增加[独立取消收尾](docs/cancellation-finalization.md)，原取消产物缺失问题已有修复与专项验证；完整生产镜像、目标 Linux 及外部依赖验收仍未完成，不应直接上线。
+
+Schema 19 新增请求与持久任务追踪关联，配套脱敏 JSON 日志、受独立凭据保护的指标、OTLP 导出及告警规则。生产新增配置与迁移要求见[可观测性说明](docs/observability.md)；采集平台、实际通知送达和防篡改审计仍待部署验收。
+
+新增[加密备份与隔离恢复工具](docs/disaster-recovery.md)：同快照备份 PostgreSQL/Checkpoint 与固定版本对象，恢复只新建隔离库并复制到不同 bucket；不覆盖业务库，也不自动接管旧任务。异地调度、密钥托管、生产激活和业务 RPO/RTO 演练仍待完成。
+
+Schema 20 增加[上传与扫描容量治理](docs/upload-governance.md)：上传意图/逻辑保留字节额度、过期处理、OSS 精确长度签名及跨进程摄取并发限制。文件仅在持久 Worker 中扫描；上传完成返回 202 表示排队校验，不表示已经安全。物理对象版本回收、真实 OSS 链路和生产容量验收仍待完成。
+
+[仓库网络边界](docs/repository-network.md)增加实际连接的 IP/origin 固定、TLS/主机密钥校验、Git 后续操作禁网及进程退出清理。生产远程仓库需显式批准 origin；公共 CA/SSH 主机公钥可通过受限 overlay 提供，不加载宿主凭据。快照授权、事务、去重与回收仍需继续完善。
 
 ## 已实现功能
 
 - Agent Draft → immutable Revision → ResolvedExecutionPlan → Deployment 完整发布链路；
 - Prompt、模型部署、能力、策略、预算和 Runtime Image 的依赖锁定与 Plan Hash；
+- 按不可变模型 profile 绑定普通/Coding 执行器，支持模型注册、停用和跨项目隔离；见 [模型治理](docs/model-governance.md)；
+- 知识任务、事件及版本元数据继承文档权限，租约和身份快照不外传；见 [资源访问边界](docs/resource-access.md)；
+- 生产发布/回滚使用显式环境授权、独立审批、原子渠道/路由切换与审计；提供发布控制台，见 [生产发布](docs/production-releases.md)；
+- 生产路由配置与回滚同样要求独立审批；Settings 可申请、审核、取消及查看历史。旧路由升级后需重新审核，见 [生产路由治理](docs/production-routing.md)；
+- Run、意图分类与 Embedding 统一预占/结算，租户/项目/用户/模型额度和管理员人工对账 API；见 [费用治理](docs/model-budget.md)；
+- 缓存式存活/就绪检查，任务与摄取的租户/项目/用户容量保护，事务拒绝及重试内容绑定；见 [健康与容量](docs/operational-readiness.md)；
 - Thread、Run、RunAttempt、Worker Lease、Checkpoint 和持久 RuntimeEvent；
 - SSE 流式事件及 `after_sequence` / `Last-Event-ID` 断线续传；
 - HITL 暂停、Approve / Edit / Reject / Respond、乐观锁与幂等决策；
 - 审批后创建新 Attempt，并使用原 Plan Hash 从 Checkpoint 恢复；
+- Coding 使用成对封存的图/文件状态恢复，每个 Attempt 隔离图会话，防止混入后续未提交的工具结果；实际保障及待验收项见 [执行恢复边界](docs/runtime-reliability.md)；
 - Artifact、Usage Ledger、模型/工具/SubAgent/审批事件和租户隔离；
 - React 控制台：Overview、Agent Builder、Playground、Runs & Traces、Approvals、Resources；
-- 企业级账号治理：平台超级管理员 / 租户管理员 / 普通用户三级边界、分页检索、乐观锁、带原因软删除、完整审计、首次及过期密码强制修改、登录锁定与限流、服务端会话查看和踢下线；
+- 账号治理：平台超级管理员 / 租户管理员 / 普通用户三级边界、分页检索、乐观锁、带原因软删除、账号变更审计、首次及过期密码强制修改、登录锁定与限流、服务端会话查看和踢下线；
+- 账号变更、会话撤销与审计同事务提交；并发登录/改密、撤权后的旧请求重新核验，权限或所属范围变化要求重新登录。见 [账号一致性契约](docs/account-consistency.md)；
+- 计费、模型、评测、Agent 编辑/发布、ChangeSet 和非生产路由的敏感写入与账号撤权串行化，事务内复核当前身份，审计失败完整回滚；范围与剩余入口见 [管理写入一致性](docs/management-write-consistency.md)；
 - 控制台主路由精简为 **Playground** 与 **Knowledge Base**，Overview、Agents、Coding、Runs、Approvals、Resources、Settings 和 Users 统一归入 `/advanced/*`；
-- 无模型密钥即可运行的确定性 Reference Harness，便于验证平台契约；
+- 可显式注入确定性测试网关，便于验证平台契约；生产不会自动使用模拟回复；
 - Deep Agents Harness Adapter 与 Runtime Binder 边界，真实 SDK 接入不会侵入 Controller。
 - 内置 Plugin / Skill Registry：启动发现、幂等注册、版本锁定、Artifact Hash 校验与运行时加载。
 - Knowledge/RAG：内置 `builtin_rag` Agent 自动判断知识检索或模型直答，支持 OSS 直传授权、持久摄取、不可变索引、混合检索、ACL 与可验证 Citation。
+- 知识库创建/上传准备使用原子事务，支持 `Idempotency-Key` 防止重复创建；控制台保留失败操作的重试标识，不保存上传凭据。见 [知识写入一致性](docs/knowledge-write-consistency.md)。
 - Coding Agent：启动时幂等预置并部署 `Built-in Coding Agent`，使用真实 `create_deep_agent()` / LangGraph Tool Loop、内容寻址源码快照、Thread-scoped Workspace、Docker Sandbox、HITL、平台重算 Patch/Diff/Verification 和 Coding Workbench。
 - Intent Router：Playground 新会话默认选择 `Auto`，仅对首条输入进行意图识别并路由到 Coding、Release、Knowledge 或 General Agent；低置信度要求确认，Coding 路由要求先绑定工作目录，后续消息固定使用 Thread 已选部署。
 
@@ -36,7 +56,7 @@ Coding Agent 还要求本机 Docker daemon 可用。第一次发布默认 Docker
 
 打开 [http://localhost:8000](http://localhost:8000)。API 文档位于 [http://localhost:8000/docs](http://localhost:8000/docs)。
 
-首次登录使用内置超级管理员：用户名 `admin`，初始密码 `Console1@`。首次登录后系统会强制修改密码；该账号只在不存在时创建，重启不会覆盖已经修改的密码。生产环境首次启动前仍应通过 `DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD` 设置一次性高强度初始密码，并在 HTTPS 部署中设置 `DEEPAGENT_SESSION_COOKIE_SECURE=true`。
+本地首次登录使用内置超级管理员：用户名 `admin`，初始密码 `Console1@`。首次登录后系统会强制修改密码；该账号只在不存在时创建，重启不会覆盖已经修改的密码。生产环境首次启动前必须通过 `DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD_FILE` 挂载一次性高强度初始密码，并在 HTTPS 部署中设置 `DEEPAGENT_SESSION_COOKIE_SECURE=true`。
 
 `DEEPAGENT_ALLOW_DEMO_IDENTITY` 仅保留给自动化测试或无前端的本地 API 演示；正常控制台必须登录，生产环境不得启用该开关。
 
@@ -66,6 +86,8 @@ make verify
 ```
 
 集成测试覆盖：
+
+以下列出测试范围，不表示每个环境均已验收。真实 Docker 用例依赖可用的执行环境，跳过不算通过；最新验证结果和剩余工作见 [企业化实施状态](docs/enterprise-hardening-status.md)。
 
 - Revision 不可变与 Plan Hash；
 - Run 创建幂等；
@@ -128,9 +150,15 @@ GET  /api/v1/intent-routing/decisions/{id}
 
 ## Reference Harness 与真实 Deep Agents
 
-普通 Agent 继续保留确定性 Reference Harness，目的是让发布、调度、流式、HITL、审计和计费在无外部凭据时可验证。`coding-agent-v1` 已接入锁定版本的真实 `create_deep_agent()`、持久 LangGraph Checkpointer 和事件适配器；文件与命令结果来自 Sandbox，Diff、Verification 和 Artifact 由平台重新计算，不能由模型自行声明。
+普通 Agent 使用受治理的模型/RAG 执行器；测试可显式注入确定性网关。普通执行器不再模拟 SubAgent 调用和完成记录；尚未执行的 SubAgent 绑定会明确报告不可用，并阻止其作为生产评测证据。`coding-agent-v1` 已接入锁定版本的真实 `create_deep_agent()`、持久 LangGraph Checkpointer 和事件适配器；文件与命令结果来自 Sandbox，Diff、Verification 和 Artifact 由平台重新计算，不能由模型自行声明。
 
 真实 Credential 禁止进入 Revision、Plan、Checkpoint、Event 或 Prompt。Coding MVP 为 `patch_only`，明确禁止 Commit、Push、PR 和 Deploy，也不会把宿主目录读写挂载进容器。
+
+## 评测与生产发布
+
+评测接口现在读取实际 Run 证据，不再返回固定分数。管理员定义不可变评测集和项目级发布策略；发布人员按用例执行后提交 Run 映射，由服务端计算结果。生产部署及已有生产部署的新 Run 会检查最新结果、计划/评测集绑定、证据真实性和有效期。模拟结果、最新失败结果与过期样本不能用于生产。
+
+使用流程、权限、API 和尚未完成的自动编排/语义评测边界见 [evaluation-gates.md](docs/evaluation-gates.md)。这是一项发布条件，不代表所有生产安全、运维和容量验收已经完成。
 
 ## 内置 Plugin 与 Skill
 

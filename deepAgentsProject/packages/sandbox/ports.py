@@ -2,6 +2,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Protocol
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from packages.sandbox.cancellation_capture import CancellationCapture
 
 from deepagents.backends.protocol import SandboxBackendProtocol
 
@@ -45,6 +49,12 @@ class SandboxProvider(Protocol):
     ) -> SandboxProvisionResult: ...
 
     async def snapshot(self, external_id: str) -> SandboxSnapshot: ...
+
+    async def recovery_snapshot(self, external_id: str) -> SandboxSnapshot: ...
+
+    async def capture_cancellation(self, external_id: str, profile: Dict[str, Any]) -> CancellationCapture: ...
+
+    async def restore(self, external_id: str, snapshot: SandboxSnapshot) -> None: ...
 
     async def interrupt(self, external_id: str) -> None: ...
 

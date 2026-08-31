@@ -18,6 +18,9 @@ from packages.domain.models import (
 )
 from packages.coding.models import CodingProfileSpec, SandboxProfileSpec
 from packages.persistence import Database
+from packages.auth.permissions import Permission, authorize
+from packages.auth.resource_access import refresh_context
+from packages.auth.transactions import authorized_write
 
 
 def new_id(prefix: str) -> str:
@@ -36,6 +39,12 @@ class AgentService:
     def __init__(self, db: Database, compiler: AgentPlanCompiler):
         self.db = db
         self.compiler = compiler
+
+    def _audit(self, context, action, agent_id, details):
+        self.db.execute("""INSERT INTO governance_audit_events
+            (id,tenant_id,project_id,actor_user_id,action,resource_id,details_json,created_at)
+            VALUES(?,?,?,?,?,?,?,?)""", (new_id("audit"), context.tenant_id, context.project_id,
+            context.user_id, action, agent_id, self.db.encode(details), self.db.current_time().isoformat()))
 
     def list_agents(self, context: TenantContext) -> List[Dict[str, Any]]:
         agents = self.db.fetch_all(
@@ -70,6 +79,10 @@ class AgentService:
         return agent
 
     def create_agent(self, payload: AgentCreate, context: TenantContext) -> Dict[str, Any]:
+        with authorized_write(self.db, context, Permission.AGENT_AUTHOR) as context:
+            return self._create_agent(payload, context)
+
+    def _create_agent(self, payload, context):
         agent_id = new_id("agt")
         now = utc_now()
         self.db.execute(
@@ -87,27 +100,36 @@ class AgentService:
                 now,
             ),
         )
+        self._audit(context, "agent.created", agent_id, {"version": 1})
         return self.get_agent(agent_id, context)
 
     def update_draft(
         self, agent_id: str, payload: AgentDraftUpdate, context: TenantContext
     ) -> Dict[str, Any]:
-        agent = self.get_agent(agent_id, context)
-        if payload.version is not None and payload.version != agent["version"]:
-            raise ConflictError(f"Draft changed; current version is {agent['version']}")
-        now = utc_now()
-        self.db.execute(
-            """UPDATE agents SET name=?, description=?, draft_json=?, status='DRAFT',
-               version=version+1, updated_at=? WHERE id=?""",
-            (
-                payload.name if payload.name is not None else agent["name"],
-                payload.description if payload.description is not None else agent["description"],
-                self.db.encode(payload.draft.model_dump()),
-                now,
-                agent_id,
-            ),
-        )
-        return self.get_agent(agent_id, context)
+        with authorized_write(self.db, context, Permission.AGENT_AUTHOR) as context:
+            agent = self.get_agent(agent_id, context)
+            if payload.version != agent["version"]:
+                raise ConflictError(f"Draft changed; current version is {agent['version']}")
+            now = utc_now()
+            updated = self.db.execute_count(
+                """UPDATE agents SET name=?, description=?, draft_json=?, status='DRAFT',
+                   version=version+1, updated_at=?
+                   WHERE id=? AND tenant_id=? AND project_id=? AND version=?""",
+                (
+                    payload.name if payload.name is not None else agent["name"],
+                    payload.description if payload.description is not None else agent["description"],
+                    self.db.encode(payload.draft.model_dump()),
+                    now,
+                    agent_id,
+                    context.tenant_id,
+                    context.project_id,
+                    payload.version,
+                ),
+            )
+            if updated != 1:
+                raise ConflictError("Draft changed; reload it before saving")
+            self._audit(context, "agent.draft.updated", agent_id, {"version": payload.version + 1})
+            return self.get_agent(agent_id, context)
 
     def validate_agent(self, agent_id: str, context: TenantContext) -> Dict[str, Any]:
         agent = self.get_agent(agent_id, context)
@@ -119,15 +141,18 @@ class AgentService:
         }
 
     def publish(self, agent_id: str, context: TenantContext) -> Dict[str, Any]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.AGENT_PUBLISH)
         agent = self.get_agent(agent_id, context)
-        validation = self.validate_agent(agent_id, context)
+        issues = self.compiler.validate(agent["draft"])
+        validation = {
+            "valid": not any(issue.level == "error" for issue in issues),
+            "issues": [issue.as_dict() for issue in issues],
+            "checked_at": utc_now(),
+        }
         if not validation["valid"]:
             raise ConflictError("Agent draft did not pass validation")
 
-        latest = self.db.fetch_one(
-            "SELECT MAX(revision_number) AS value FROM agent_revisions WHERE agent_id=?", (agent_id,)
-        )
-        revision_number = (latest["value"] or 0) + 1
         revision_id = new_id("rev")
         now = utc_now()
         model = self.db.fetch_one(
@@ -137,6 +162,8 @@ class AgentService:
         )
         if not model:
             raise ConflictError("Referenced model deployment does not exist in this project")
+        if model["status"] != "healthy":
+            raise ConflictError("Referenced model deployment is disabled")
         knowledge_snapshots = self._resolve_knowledge_revisions(
             agent["draft"]["capabilities"].get("knowledge_bases", []), context
         )
@@ -151,45 +178,63 @@ class AgentService:
             raise ConflictError(str(exc)) from exc
         plan_id = new_id("plan")
         plan["id"] = plan_id
-        self.db.execute(
-            """INSERT INTO agent_revisions
-               (id, agent_id, tenant_id, project_id, revision_number, spec_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?)""",
-            (
-                revision_id,
-                agent_id,
-                context.tenant_id,
-                context.project_id,
-                revision_number,
-                self.db.encode(agent["draft"]),
-                now,
-            ),
-        )
-        self.db.execute(
-            """INSERT INTO resolved_execution_plans
-               (id, agent_revision_id, tenant_id, project_id, plan_hash, plan_json,
-                runtime_image_digest, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                plan_id,
-                revision_id,
-                context.tenant_id,
-                context.project_id,
-                plan["plan_hash"],
-                self.db.encode(plan),
-                plan["runtime_image_digest"],
-                now,
-            ),
-        )
-        self.db.execute(
-            "UPDATE agents SET status='PUBLISHED', updated_at=? WHERE id=?", (now, agent_id)
-        )
-        return {
-            "revision": self.db.fetch_one("SELECT * FROM agent_revisions WHERE id=?", (revision_id,)),
-            "resolved_plan": self.db.fetch_one(
-                "SELECT * FROM resolved_execution_plans WHERE id=?", (plan_id,)
-            ),
-            "validation": validation,
-        }
+        with authorized_write(self.db, context, Permission.AGENT_PUBLISH) as context:
+            lock = " FOR UPDATE" if self.db.dialect == "postgresql" else ""
+            current = self.db.fetch_one(
+                "SELECT version FROM agents WHERE id=? AND tenant_id=? AND project_id=?" + lock,
+                (agent_id, context.tenant_id, context.project_id),
+            )
+            if not current or current["version"] != agent["version"]:
+                raise ConflictError("Draft changed during compilation; validate and publish it again")
+            latest = self.db.fetch_one(
+                "SELECT MAX(revision_number) AS value FROM agent_revisions WHERE agent_id=?",
+                (agent_id,),
+            )
+            revision_number = (latest["value"] or 0) + 1
+            self.db.execute(
+                """INSERT INTO agent_revisions
+                   (id, agent_id, tenant_id, project_id, revision_number, spec_json, created_at)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    revision_id,
+                    agent_id,
+                    context.tenant_id,
+                    context.project_id,
+                    revision_number,
+                    self.db.encode(agent["draft"]),
+                    now,
+                ),
+            )
+            self.db.execute(
+                """INSERT INTO resolved_execution_plans
+                   (id, agent_revision_id, tenant_id, project_id, plan_hash, plan_json,
+                    runtime_image_digest, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    plan_id,
+                    revision_id,
+                    context.tenant_id,
+                    context.project_id,
+                    plan["plan_hash"],
+                    self.db.encode(plan),
+                    plan["runtime_image_digest"],
+                    now,
+                ),
+            )
+            self.db.execute(
+                "UPDATE agents SET status='PUBLISHED', updated_at=? WHERE id=?",
+                (now, agent_id),
+            )
+            self._audit(context, "agent.revision.published", agent_id,
+                {"revision_id": revision_id, "revision_number": revision_number, "plan_hash": plan["plan_hash"]})
+            return {
+                "revision": self.db.fetch_one(
+                    "SELECT * FROM agent_revisions WHERE id=?", (revision_id,)
+                ),
+                "resolved_plan": self.db.fetch_one(
+                    "SELECT * FROM resolved_execution_plans WHERE id=?", (plan_id,)
+                ),
+                "validation": validation,
+            }
 
     def _resolve_knowledge_revisions(
         self, references: List[str], context: TenantContext
@@ -227,6 +272,26 @@ class AgentService:
         return revision
 
     def deploy(self, payload: DeploymentCreate, context: TenantContext) -> Dict[str, Any]:
+        from packages.releases.service import ReleaseService
+        with self.db.transaction():
+            releases = ReleaseService(self.db)
+            releases.lock_project(context)
+            releases._lock_accounts([context.user_id])
+            context, _ = releases.require_target(context, payload.environment)
+            if payload.environment == "production":
+                raise ConflictError("Production deployments require a release request and independent approval")
+            lock = " FOR UPDATE" if self.db.dialect == "postgresql" else ""
+            revision = self.db.fetch_one(
+                "SELECT id FROM agent_revisions WHERE id=? AND tenant_id=? AND project_id=?" + lock,
+                (payload.agent_revision_id, context.tenant_id, context.project_id),
+            )
+            if not revision:
+                raise NotFoundError("Agent revision not found")
+            return self._deploy_locked(payload, context)
+
+    def _deploy_locked(self, payload: DeploymentCreate, context: TenantContext) -> Dict[str, Any]:
+        if payload.environment == "production":
+            raise ConflictError("Production deployments require a release request and independent approval")
         revision = self.get_revision(payload.agent_revision_id, context)
         plan = revision.get("resolved_plan")
         if not plan:
@@ -244,8 +309,8 @@ class AgentService:
         self.db.execute(
             """INSERT INTO agent_deployments
                (id, tenant_id, project_id, agent_id, agent_revision_id, resolved_plan_id,
-                name, environment, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)""",
+                name, environment, status, created_at, updated_at, evaluation_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?, ?)""",
             (
                 deployment_id,
                 context.tenant_id,
@@ -257,16 +322,20 @@ class AgentService:
                 payload.environment,
                 now,
                 now,
+                None,
             ),
         )
+        from packages.releases.service import ReleaseService
+        ReleaseService(self.db).audit(context, "deployment.created", deployment_id,
+            {"agent_revision_id": revision["id"], "environment": payload.environment, "plan_hash": plan["plan_hash"]})
         return self.db.fetch_one("SELECT * FROM agent_deployments WHERE id=?", (deployment_id,))
 
     def list_deployments(self, context: TenantContext) -> List[Dict[str, Any]]:
         deployments = self.db.fetch_all(
             """SELECT d.*, a.name AS agent_name FROM agent_deployments d
                JOIN agents a ON a.id=d.agent_id
-               WHERE d.tenant_id=? AND d.project_id=? ORDER BY d.created_at DESC""",
-            (context.tenant_id, context.project_id),
+               WHERE d.tenant_id=? AND d.project_id=? AND d.environment=? ORDER BY d.created_at DESC""",
+            (context.tenant_id, context.project_id, context.environment_id.removeprefix("env_")),
         )
         for deployment in deployments:
             plan = self.db.fetch_one(

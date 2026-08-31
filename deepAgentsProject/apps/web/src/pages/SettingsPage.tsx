@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from 'react'
 import { CheckCircle2, CircleSlash2, LoaderCircle, Save, ServerCog, ShieldCheck, Sparkles, UserRound } from 'lucide-react'
 import { ErrorBanner, LoadingBlock, PageHeader, StatusPill } from '../components/UI'
+import { ProductionRoutingPanel } from '../components/ProductionRoutingPanel'
 import { usePlatform } from '../context/PlatformContext'
 import { api } from '../lib/api'
 import type { Deployment, IntentRoutingProfile, PrimaryIntent } from '../types'
@@ -36,8 +37,8 @@ export function SettingsPage() {
   }, [context?.environment.id, context?.features.routing_management, context?.project.id, context?.tenant.id])
 
   const canManageRouting = useMemo(
-    () => ['owner', 'admin'].includes(context?.user.role.toLowerCase() ?? ''),
-    [context?.user.role],
+    () => context?.environment.id !== 'env_production' && !!context?.user.permissions.includes('routing.manage'),
+    [context?.environment.id, context?.user.permissions],
   )
 
   function updateRoutingConfig<K extends keyof IntentRoutingProfile['config']>(key: K, value: IntentRoutingProfile['config'][K]) {
@@ -156,7 +157,7 @@ export function SettingsPage() {
             </div>
           </div>
           <div className="routing-settings-actions">
-            <span>{canManageRouting ? 'Saving creates an immutable routing revision.' : 'Owner or admin role is required to change routing.'}</span>
+            <span>{context.environment.id === 'env_production' ? 'Production changes require independent approval in Production routing reviews below.' : canManageRouting ? 'Saving creates an immutable routing revision.' : 'Routing management permission is required.'}</span>
             <button className="button primary" disabled={!canManageRouting || routingSaving || routingProfile.config.confirmation_threshold > routingProfile.config.auto_route_threshold} onClick={() => void saveRoutingProfile()}>
               {routingSaving ? <LoaderCircle className="spin" size={15} /> : <Save size={15} />} Save routing profile
             </button>
@@ -164,5 +165,6 @@ export function SettingsPage() {
         </>}
       </>}
     </section>}
+    {context.features.routing_management && <ProductionRoutingPanel />}
   </div>
 }

@@ -1,0 +1,30 @@
+# Merge into an existing secured Prometheus deployment; not a public monitoring stack.
+# Each target must map to exactly one process, never a load-balanced pool.
+# Replace placeholders with per-replica discovery and matching TLS SAN/Host rules.
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+rule_files: [alerts.yaml]
+scrape_configs:
+  - job_name: deepagent-api
+    scheme: https
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /run/secrets/deepagent-metrics-token
+    tls_config:
+      ca_file: /run/secrets/deepagent-metrics-ca
+    static_configs:
+      - targets: [api-replica-0.metrics.internal.example.com]
+        labels: {cluster: replace-with-production-cluster}
+  - job_name: deepagent-worker
+    scheme: https
+    metrics_path: /metrics
+    authorization:
+      credentials_file: /run/secrets/deepagent-metrics-token
+    tls_config:
+      ca_file: /run/secrets/deepagent-metrics-ca
+    static_configs:
+      - targets: [worker-replica-0.internal.example.com:9108]
+        labels: {cluster: replace-with-production-cluster}
+# Configure your own Alertmanager destination and receivers. This example never
+# sends notifications or silently picks an external tenant/monitoring account.

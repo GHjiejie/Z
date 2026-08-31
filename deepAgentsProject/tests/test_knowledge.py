@@ -10,6 +10,8 @@ from apps.platform_api.main import create_app
 from packages.knowledge.embedding import HashEmbeddingProvider
 from packages.runtime.executor import ReferenceRuntimeExecutor
 from packages.runtime.model_gateway import DeterministicModelGateway
+from packages.sandbox.fake_provider import FakeSandboxProvider
+from packages.content_security import ContentRejectedError
 
 
 class RecordingModelGateway(DeterministicModelGateway):
@@ -28,6 +30,7 @@ def client_for(tmp_path):
             seed=True,
             model_gateway=DeterministicModelGateway(),
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     )
 
@@ -321,6 +324,49 @@ def test_upload_size_mismatch_is_rejected_before_ingestion(tmp_path):
         assert upload.json()["error"]["code"] == "KNOWLEDGE_VALIDATION_ERROR"
 
 
+def test_rejected_content_fails_durable_validation_and_cannot_be_downloaded(tmp_path):
+    class RejectScanner:
+        name = "reject-test"
+
+        def scan(self, content, *, object_name):
+            raise ContentRejectedError("Content was rejected by malware policy")
+
+    with client_for(tmp_path) as client:
+        client.app.state.services.knowledge.content_scanner = RejectScanner()
+        knowledge_base = client.post(
+            "/api/v1/knowledge-bases", json={"name": "Quarantine test"}
+        ).json()
+        content = b"untrusted fixture"
+        prepared = client.post(
+            f"/api/v1/knowledge-bases/{knowledge_base['id']}/documents:prepare-upload",
+            json={
+                "filename": "fixture.txt", "content_type": "text/plain",
+                "size_bytes": len(content), "sha256": hashlib.sha256(content).hexdigest(),
+            },
+        ).json()
+        uploaded = client.put(
+            prepared["upload"]["url"], content=content,
+            headers={"Content-Type": "text/plain"},
+        )
+        assert uploaded.status_code == 200
+        completed = client.post(
+            f"/api/v1/knowledge-document-versions/{prepared['document_version_id']}:complete",
+            json={},
+        )
+        assert completed.status_code == 202
+        failed = wait_for_job(client, completed.json()['id'])
+        assert failed['status'] == 'FAILED'
+        assert 'malware' in failed['error_message']
+        assert client.app.state.services.db.fetch_one(
+            "SELECT COUNT(*) AS count FROM knowledge_ingestion_jobs"
+        )["count"] == 1
+        assert client.app.state.services.db.fetch_one('SELECT COUNT(*) AS n FROM knowledge_chunks')['n'] == 0
+        download = client.get(
+            f"/api/v1/knowledge-document-versions/{prepared['document_version_id']}/download"
+        )
+        assert download.status_code == 409
+
+
 def job_chunk_count(client: TestClient, knowledge_base_id: str) -> int:
     events = client.get("/api/v1/knowledge-events").json()["items"]
     completed = next(
@@ -342,6 +388,10 @@ def test_run_metadata_cannot_override_authenticated_principal(tmp_path):
             "/api/v1/threads",
             json={"agent_deployment_id": deployment["id"], "title": "principal"},
         ).json()
+        shared = client.put(f"/api/v1/threads/{thread['id']}/access", json={
+            "version": 1, "visibility": "project", "reason": "Test shared-thread metadata isolation",
+        })
+        assert shared.status_code == 200
         response = client.post(
             f"/api/v1/threads/{thread['id']}/runs",
             headers={
@@ -349,7 +399,7 @@ def test_run_metadata_cannot_override_authenticated_principal(tmp_path):
                 "X-Project-ID": "project_atlas",
                 "X-Environment-ID": "env_development",
                 "X-User-ID": "viewer",
-                "X-Roles": "viewer",
+                "X-Roles": "member",
             },
             json={"input": "hello", "metadata": {"user_id": "attacker", "roles": ["owner"]}},
         )
@@ -513,6 +563,7 @@ def test_hitl_resume_retrieves_again_and_preserves_safe_rag_context(tmp_path):
             seed=True,
             model_gateway=gateway,
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         knowledge_base, _, _ = create_indexed_knowledge(client)

@@ -12,3 +12,7 @@ apps/web/node_modules/
 apps/web/dist/
 apps/web/*.tsbuildinfo
 .env
+.release/
+.recovery/
+*.dagbackup
+deploy/*.env

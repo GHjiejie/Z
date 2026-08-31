@@ -1,11 +1,21 @@
 from __future__ import annotations
 
-from typing import Optional
+import hashlib
+import hmac
+import time
+from typing import Callable, Optional
 
 from fastapi import Depends, Header, HTTPException, Request
 
-from packages.auth import AuthenticatedPrincipal, AuthenticationError
+from packages.auth import (
+    AuthenticatedPrincipal,
+    AuthenticationError,
+    Permission,
+    is_allowed,
+    permissions_for_roles,
+)
 from packages.domain.models import TenantContext
+from packages.auth.resource_access import refresh_context
 
 
 def _session_token(request: Request, authorization: Optional[str]) -> Optional[str]:
@@ -62,7 +72,9 @@ def require_user_manager(
             status_code=403,
             detail="Password change is required before accessing platform administration",
         )
-    if not principal.is_super_admin and "tenant_admin" not in principal.roles:
+    if Permission.USER_MANAGE not in permissions_for_roles(
+        principal.roles, is_super_admin=principal.is_super_admin
+    ):
         raise HTTPException(
             status_code=403,
             detail="Platform or tenant administrator access is required",
@@ -78,6 +90,8 @@ def tenant_context(
     x_environment_id: Optional[str] = Header(default=None),
     x_user_id: Optional[str] = Header(default=None),
     x_roles: Optional[str] = Header(default=None),
+    x_identity_timestamp: Optional[str] = Header(default=None),
+    x_identity_signature: Optional[str] = Header(default=None),
 ) -> TenantContext:
     token = _session_token(request, authorization)
     if token:
@@ -101,6 +115,7 @@ def tenant_context(
             user_id=principal.user_id,
             roles=principal.roles,
             is_super_admin=principal.is_super_admin,
+            session_id=principal.session_id,
         )
     supplied = any(
         value is not None
@@ -125,6 +140,42 @@ def tenant_context(
                 status_code=401,
                 detail="Trusted identity headers are incomplete: " + ", ".join(missing),
             )
+        identity_secret = getattr(request.app.state, "identity_header_secret", None)
+        if identity_secret:
+            if not x_identity_timestamp or not x_identity_signature:
+                raise HTTPException(
+                    status_code=401,
+                    detail="Signed identity timestamp and signature are required",
+                )
+            try:
+                timestamp = int(x_identity_timestamp)
+            except ValueError as error:
+                raise HTTPException(
+                    status_code=401, detail="Identity timestamp is invalid"
+                ) from error
+            if abs(int(time.time()) - timestamp) > 60:
+                raise HTTPException(
+                    status_code=401, detail="Identity signature has expired"
+                )
+            canonical = "\n".join(
+                (
+                    x_tenant_id or "",
+                    x_project_id or "",
+                    x_environment_id or "",
+                    x_user_id or "",
+                    x_roles or "",
+                    x_identity_timestamp,
+                )
+            )
+            expected = hmac.new(
+                identity_secret.encode("utf-8"),
+                canonical.encode("utf-8"),
+                hashlib.sha256,
+            ).hexdigest()
+            if not hmac.compare_digest(expected, x_identity_signature):
+                raise HTTPException(
+                    status_code=401, detail="Identity signature is invalid"
+                )
         tenant_id = x_tenant_id
         project_id = x_project_id
         environment_id = x_environment_id
@@ -141,13 +192,31 @@ def tenant_context(
         environment_id = "env_development"
         user_id = "user_demo"
         roles = "owner"
-    return TenantContext(
+    return refresh_context(request.app.state.services.db, TenantContext(
         tenant_id=tenant_id,
         project_id=project_id,
         environment_id=environment_id,
         user_id=user_id,
         roles=[role.strip() for role in roles.split(",") if role.strip()],
-    )
+    ))
+
+
+def require_permission(
+    permission: Permission,
+) -> Callable[..., TenantContext]:
+    """Create a FastAPI dependency for one centrally defined platform action."""
+
+    def authorized_context(
+        context: TenantContext = Depends(tenant_context),
+    ) -> TenantContext:
+        if not is_allowed(context, permission):
+            raise HTTPException(
+                status_code=403,
+                detail=f"Permission is required: {permission.value}",
+            )
+        return context
+
+    return authorized_context
 
 
 def services(request: Request):

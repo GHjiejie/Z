@@ -1,0 +1,19 @@
+# Separate job/configuration: normal API/Worker deployment never needs DDL credentials.
+services:
+  migrate:
+    image: "${MIGRATION_IMAGE:?Use the approved migration image with @sha256 digest}"
+    command: [migrate]
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 1
+    mem_limit: 1g
+    pids_limit: 64
+    restart: "no"
+    environment: {DEEPAGENT_ENVIRONMENT: production, DATABASE_URL_FILE: /run/secrets/migration-database-url}
+    secrets: [migration-database-url]
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=64m,uid=10001,gid=10001,mode=0700
+secrets:
+  migration-database-url: {file: "${MIGRATION_DATABASE_URL_SECRET_FILE:?Separate DDL account required}"}

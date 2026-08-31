@@ -22,7 +22,7 @@ import {
   X,
 } from 'lucide-react'
 import { useEffect, useMemo, useState } from 'react'
-import { Link, useSearchParams } from 'react-router-dom'
+import { Link, useNavigate, useSearchParams } from 'react-router-dom'
 import { api } from '../lib/api'
 import type { Agent, AgentDraft, Deployment, KnowledgeBase, ModelDeployment, Revision, Skill } from '../types'
 import { ErrorBanner, LoadingBlock, PageHeader, StatusPill, formatRelative, shortId } from '../components/UI'
@@ -75,6 +75,7 @@ const tabs: Array<{ id: BuilderTab; label: string; icon: typeof Bot }> = [
 ]
 
 export function AgentsPage() {
+  const navigate = useNavigate()
   const [agents, setAgents] = useState<Agent[]>([])
   const [models, setModels] = useState<ModelDeployment[]>([])
   const [skills, setSkills] = useState<Skill[]>([])
@@ -159,6 +160,10 @@ export function AgentsPage() {
 
   const deployRevision = async () => {
     if (!publishResult) return
+    if (publishEnvironment === 'production' && selected) {
+      navigate(`/advanced/releases?agent=${encodeURIComponent(selected.id)}&revision=${encodeURIComponent(publishResult.revision.id)}`)
+      return
+    }
     setBusy('deploy')
     try {
       const deployment = await api.deploy(publishResult.revision.id, publishEnvironment)
@@ -236,7 +241,7 @@ function ReleaseHistory({ revisions, deployments }: { revisions: Revision[]; dep
 }
 
 function PublishDialog({ result, changedSections, environment, busy, onEnvironment, onPublish, onDeploy, onClose }: { result: PublishResult | null; changedSections: string[]; environment: string; busy: string; onEnvironment: (value: string) => void; onPublish: () => void; onDeploy: () => void; onClose: () => void }) {
-  return <div className="modal-backdrop"><div className="modal publish-modal" role="dialog" aria-modal="true" aria-label="Publish agent revision"><div className="modal-heading"><div><span className="page-eyebrow">IMMUTABLE RELEASE</span><h3>{result ? `Revision ${result.revision.revision_number} published` : 'Review publication'}</h3><p>{result ? 'The revision is immutable. Deployment remains an explicit step.' : 'Confirm the changes that will be locked into this revision.'}</p></div><button aria-label="Close" className="icon-button" onClick={onClose}><X size={18} /></button></div>{!result ? <><div className="publish-review"><h4>Changed sections</h4>{changedSections.length ? changedSections.map((section) => <div key={section}><Check size={16} />{section}</div>) : <p>No differences from the latest revision.</p>}<div className="policy-callout"><ShieldCheck size={20} /><div><strong>Publishing does not deploy automatically</strong><span>You will choose an environment after the revision and plan are created.</span></div></div></div><div className="modal-actions"><button className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={!!busy} onClick={onPublish}>{busy === 'publish' && <LoaderCircle className="spin" size={15} />} Publish revision</button></div></> : <><div className="publish-result"><div><span>Revision</span><code>{result.revision.id}</code></div><div><span>Resolved plan</span><code>{result.resolved_plan.id}</code></div><div><span>Plan hash</span><code>{result.resolved_plan.plan_hash}</code></div>{result.deployment ? <div className="deployment-success"><Check size={18} /><div><strong>Deployed to {result.deployment.environment}</strong><span>{result.deployment.id}</span></div></div> : <label>Deployment target<select value={environment} onChange={(event) => onEnvironment(event.target.value)}><option value="development">Development</option><option value="staging">Staging</option><option value="production">Production</option></select><span className="field-hint">Production runs may trigger additional policy approval.</span></label>}</div><div className="modal-actions"><button className="button secondary" onClick={onClose}>{result.deployment ? 'Done' : 'Deploy later'}</button>{!result.deployment && <button className="button primary" disabled={!!busy} onClick={onDeploy}>{busy === 'deploy' && <LoaderCircle className="spin" size={15} />} Deploy revision</button>}</div></>}</div></div>
+  return <div className="modal-backdrop"><div className="modal publish-modal" role="dialog" aria-modal="true" aria-label="Publish agent revision"><div className="modal-heading"><div><span className="page-eyebrow">IMMUTABLE RELEASE</span><h3>{result ? `Revision ${result.revision.revision_number} published` : 'Review publication'}</h3><p>{result ? 'The revision is immutable. Deployment remains an explicit step.' : 'Confirm the changes that will be locked into this revision.'}</p></div><button aria-label="Close" className="icon-button" onClick={onClose}><X size={18} /></button></div>{!result ? <><div className="publish-review"><h4>Changed sections</h4>{changedSections.length ? changedSections.map((section) => <div key={section}><Check size={16} />{section}</div>) : <p>No differences from the latest revision.</p>}<div className="policy-callout"><ShieldCheck size={20} /><div><strong>Publishing does not deploy automatically</strong><span>You will choose an environment after the revision and plan are created.</span></div></div></div><div className="modal-actions"><button className="button secondary" onClick={onClose}>Cancel</button><button className="button primary" disabled={!!busy} onClick={onPublish}>{busy === 'publish' && <LoaderCircle className="spin" size={15} />} Publish revision</button></div></> : <><div className="publish-result"><div><span>Revision</span><code>{result.revision.id}</code></div><div><span>Resolved plan</span><code>{result.resolved_plan.id}</code></div><div><span>Plan hash</span><code>{result.resolved_plan.plan_hash}</code></div>{result.deployment ? <div className="deployment-success"><Check size={18} /><div><strong>Deployed to {result.deployment.environment}</strong><span>{result.deployment.id}</span></div></div> : <label>Deployment target<select value={environment} onChange={(event) => onEnvironment(event.target.value)}><option value="development">Development</option><option value="staging">Staging</option><option value="production">Production</option></select><span className="field-hint">Production requires current evaluation evidence and independent release approval.</span></label>}</div><div className="modal-actions"><button className="button secondary" onClick={onClose}>{result.deployment ? 'Done' : 'Deploy later'}</button>{!result.deployment && <button className="button primary" disabled={!!busy} onClick={onDeploy}>{busy === 'deploy' && <LoaderCircle className="spin" size={15} />} {environment === 'production' ? 'Request production review' : 'Deploy revision'}</button>}</div></>}</div></div>
 }
 
 function getChangedSections(latest: Revision | undefined, draft: AgentDraft, name: string, description: string, agent: Agent) {

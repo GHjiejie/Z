@@ -6,6 +6,7 @@ import { useAuth } from '../context/AuthContext'
 const features = [
   { to: '/advanced/overview', icon: LayoutDashboard, title: 'Platform overview', description: 'Operational health, usage, recent runs, and items requiring attention.', tone: 'violet' },
   { to: '/advanced/agents', icon: Bot, title: 'Agent registry', description: 'Create, validate, publish, and deploy versioned Agent definitions.', tone: 'blue' },
+  { to: '/advanced/releases', icon: FileCheck2, title: 'Production releases', description: 'Request and independently approve production promotions and rollbacks.', tone: 'amber' },
   { to: '/advanced/coding', icon: CodeXml, title: 'Coding workbench', description: 'Run governed coding tasks against isolated repository snapshots.', tone: 'green' },
   { to: '/advanced/runs', icon: Activity, title: 'Runs & traces', description: 'Inspect execution events, artifacts, attempts, and usage evidence.', tone: 'cyan' },
   { to: '/advanced/approvals', icon: FileCheck2, title: 'Approval center', description: 'Review policy-gated actions and resume checkpointed work.', tone: 'amber' },

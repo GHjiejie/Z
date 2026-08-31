@@ -29,7 +29,7 @@ import { EventTimeline, eventCategoryKey, type EventCategory } from '../componen
 import { MarkdownContent } from '../components/MarkdownContent'
 import { ErrorBanner, StatusPill, formatRelative, shortId } from '../components/UI'
 import { usePlatform } from '../context/PlatformContext'
-import { api, streamUrl } from '../lib/api'
+import { api, ApiError, streamUrl } from '../lib/api'
 import type { Deployment, IntentRoutingDecision, Repository, Run, RunArtifact, RuntimeEvent, ThreadSummary } from '../types'
 
 const RUNNING_STATUSES = ['CREATED', 'QUEUED', 'PREPARING', 'RUNNING', 'RESUMING']
@@ -55,14 +55,17 @@ async function loadAllRunEvents(runId: string) {
   while (true) {
     const page = await api.runEvents(runId, cursor)
     loaded.push(...page.items)
-    if (page.items.length < 500) return loaded
-    cursor = page.items.at(-1)?.sequence ?? cursor
+    if (!page.has_more) return loaded
+    cursor = page.next_sequence
   }
 }
 
 export function PlaygroundPage() {
   const [deployments, setDeployments] = useState<Deployment[]>([])
   const [threads, setThreads] = useState<ThreadSummary[]>([])
+  const [threadCursor, setThreadCursor] = useState<string | null>(null)
+  const [threadsLoading, setThreadsLoading] = useState(false)
+  const threadEpoch = useRef(0)
   const [repositories, setRepositories] = useState<Repository[]>([])
   const [conversationRuns, setConversationRuns] = useState<Run[]>([])
   const [deploymentId, setDeploymentId] = useState(AUTO_DEPLOYMENT)
@@ -88,17 +91,32 @@ export function PlaygroundPage() {
   const chatScrollRef = useRef<HTMLDivElement | null>(null)
   const { context } = usePlatform()
 
-  const loadThreads = async () => {
-    const result = await api.threads()
-    setThreads(result.items)
-    return result.items
+  const loadThreads = async (cursor?: string) => {
+    const epoch = ++threadEpoch.current
+    setThreadsLoading(true)
+    if (!cursor) { setThreadCursor(null); setThreads([]) }
+    try {
+      const result = await api.threads({ cursor, limit: 50, q: threadQuery })
+      if (epoch === threadEpoch.current) {
+        setThreads((previous) => cursor ? [...previous, ...result.items.filter((item) => !previous.some((old) => old.id === item.id))] : result.items)
+        setThreadCursor(result.next_cursor)
+      }
+      return result.items
+    } finally {
+      if (epoch === threadEpoch.current) setThreadsLoading(false)
+    }
   }
 
   useEffect(() => {
-    Promise.all([api.deployments(), api.threads(), api.repositories()]).then(([deploymentResult, threadResult, repositoryResult]) => {
+    ++threadEpoch.current
+    const timeout = window.setTimeout(() => { void loadThreads().catch((nextError: Error) => setError(nextError.message)) }, 200)
+    return () => { window.clearTimeout(timeout); ++threadEpoch.current }
+  }, [threadQuery, context?.environment.id])
+
+  useEffect(() => {
+    Promise.all([api.deployments(), api.repositories()]).then(([deploymentResult, repositoryResult]) => {
       const environment = context?.environment.id.replace(/^env_/, '')
       setDeployments(deploymentResult.items.filter((item) => item.status === 'ACTIVE' && (!environment || item.environment === environment)))
-      setThreads(threadResult.items)
       setRepositories(repositoryResult.items.filter((item) => item.status === 'ACTIVE'))
       setDeploymentId(AUTO_DEPLOYMENT)
       if (repositoryResult.items[0]) {
@@ -122,13 +140,17 @@ export function PlaygroundPage() {
   }
 
   const refreshRun = async (runId: string) => {
-    const [nextRun, nextArtifacts] = await Promise.all([api.run(runId), api.runArtifacts(runId)])
-    setRun(nextRun)
-    setArtifacts(nextArtifacts.items)
-    updateConversationRun(nextRun)
-    if (!RUNNING_STATUSES.includes(nextRun.status)) {
-      setBusy(false)
-      setConnection('ended')
+    try {
+      const [nextRun, nextArtifacts] = await Promise.all([api.run(runId), api.runArtifacts(runId)])
+      setRun(nextRun)
+      setArtifacts(nextArtifacts.items)
+      updateConversationRun(nextRun)
+      if (!RUNNING_STATUSES.includes(nextRun.status)) { setBusy(false); setConnection('ended') }
+    } catch (nextError) {
+      if (nextError instanceof ApiError && [401, 403, 404].includes(nextError.status)) {
+        streamRef.current?.close(); setRun(null); setEvents([]); setArtifacts([]); setConversationRuns([]); setThreadId(''); setBusy(false)
+      }
+      setError((nextError as Error).message)
     }
   }
 
@@ -150,6 +172,10 @@ export function PlaygroundPage() {
       }
     }
     source.addEventListener('runtime.event', onEvent as EventListener)
+    source.addEventListener('stream.access_revoked', () => {
+      source.close(); setConnection('ended'); setBusy(false); setRun(null); setEvents([]); setArtifacts([]); setConversationRuns([]); setThreadId('')
+      setError('Access to this conversation was revoked. Reload your conversations before continuing.')
+    })
     source.addEventListener('stream.idle', () => {
       source.close()
       setConnection('ended')
@@ -338,7 +364,8 @@ export function PlaygroundPage() {
             <span><strong>{thread.title}</strong><small>{thread.agent_name ?? thread.deployment_name ?? 'Agent'} · {formatRelative(thread.updated_at)}</small></span>
             {thread.last_run && <i className={`thread-status status-${thread.last_run.status.toLowerCase().replaceAll('_', '-')}`} title={thread.last_run.status} />}
           </button>)}
-          {!filteredThreads.length && <div className="conversation-list-empty">{threads.length ? 'No matching conversations.' : 'Your conversations will appear here.'}</div>}
+          {!filteredThreads.length && <div className="conversation-list-empty">{threadsLoading ? 'Loading conversations…' : threadQuery ? 'No matching conversations.' : 'Your conversations will appear here.'}</div>}
+          {threadCursor && <button className="button secondary" disabled={threadsLoading} onClick={() => void loadThreads(threadCursor).catch((nextError: Error) => setError(nextError.message))}>{threadsLoading ? 'Loading…' : 'Load older conversations'}</button>}
         </div>
         <div className="conversation-sidebar-foot"><span>{threads.length} conversations</span><Link to="/advanced/runs">View all runs</Link></div>
       </aside>
@@ -536,7 +563,7 @@ function RunInspector({ run, events, artifacts, tab, connection, busy, onTab, on
     </div>}
     <div className="playground-inspector-content" ref={contentRef}>
       {run && <div className="run-summary-card"><div><span>RUN</span><code>{shortId(run.id)}</code></div><StatusPill status={run.status} /><div className="run-summary-meta"><span><GitBranch size={13} />{shortId(run.resolved_plan_id, 6)}</span><span><Clock3 size={13} />Attempt {run.attempts?.length ?? 1}</span></div></div>}
-      {!run ? <InspectorEmpty icon={Activity} title="Waiting for live activity" text="Start or open a conversation. Every backend event will appear here in sequence." /> : tab === 'events' ? (filteredEvents.length ? <EventTimeline events={filteredEvents} /> : <InspectorEmpty icon={Terminal} title="No matching events" text={events.length ? 'Choose another event category.' : 'Backend events appear here as soon as the run starts.'} />) : tab === 'plan' ? <>{graphEvents.length > 0 && <div className="graph-summary-card"><div className="inspector-section-title"><GitBranch size={15} /><strong>Execution graph</strong><span>{graphEvents.length} events</span></div><div className="graph-summary-flow"><span>Main graph</span><i /><span>{new Set(graphEvents.flatMap((event) => event.execution_path.slice(1))).size} nodes</span><i /><span>{subagentEvents.length ? `${new Set(subagentEvents.map((event) => event.execution_path.join('/'))).size} subgraph` : 'No subgraph'}</span></div></div>}{todoEvent && <div className="todo-card"><div className="inspector-section-title"><CheckCircle2 size={15} /><strong>Agent plan</strong><span>{todoEvent.payload.items.filter((item: any) => item.status === 'completed').length}/{todoEvent.payload.items.length}</span></div>{todoEvent.payload.items.map((item: any) => <div className={`todo-item ${item.status}`} key={item.id}><span>{item.status === 'completed' ? <CheckCircle2 size={14} /> : item.status === 'in_progress' ? <LoaderCircle className="spin" size={14} /> : <Clock3 size={14} />}</span><p>{item.title}</p></div>)}</div>}{subagentEvents.length > 0 && <div className="subagent-card"><div className="inspector-section-title"><Bot size={15} /><strong>SubAgent tree</strong><span>{new Set(subagentEvents.map((event) => event.execution_path.join('/'))).size} child</span></div><div className="subagent-node"><div className="tree-line" /><div className="agent-logo tiny"><Bot size={13} /></div><div><strong>{String(subagentEvents[0]?.payload.name ?? subagentEvents[0]?.payload.agent_name ?? 'researcher')}</strong><span>{subagentEvents.at(-1)?.type === 'subagent.completed' ? 'Completed' : 'Working'}</span></div></div></div>}{!todoEvent && !subagentEvents.length && !graphEvents.length && <InspectorEmpty icon={CheckCircle2} title="No plan yet" text="Graph, plan, and SubAgent activity appear here during a run." />}</> : tab === 'state' ? <pre className="state-view">{JSON.stringify({ status: run.status, checkpoint: run.checkpoint, metadata: run.metadata, attempts: run.attempts }, null, 2)}</pre> : tab === 'artifacts' ? (artifacts.length ? artifacts.map((artifact) => <a className="artifact-card" href={artifact.uri} target="_blank" rel="noreferrer" key={artifact.id}><div className="artifact-icon"><FileText size={18} /></div><div><strong>{artifact.name}</strong><span>{artifact.media_type} · {artifact.size_bytes} bytes</span><code>{artifact.content_hash.slice(0, 18)}…</code></div></a>) : <InspectorEmpty icon={FileText} title="No artifacts yet" text="Run outputs appear here with their content hash." />) : run.usage ? <div className="usage-detail compact"><div><span>Input tokens</span><strong>{run.usage.input_tokens}</strong></div><div><span>Output tokens</span><strong>{run.usage.output_tokens}</strong></div><div><span>Model calls</span><strong>{run.usage.model_calls}</strong></div><div><span>Tool calls</span><strong>{run.usage.tool_calls}</strong></div><div><span>SubAgent calls</span><strong>{run.usage.subagent_calls}</strong></div><div><span>Cost</span><strong>${run.usage.cost.toFixed(4)}</strong></div></div> : <InspectorEmpty icon={Clock3} title="No usage yet" text="Usage appears after the runtime reports it." />}
+      {!run ? <InspectorEmpty icon={Activity} title="Waiting for live activity" text="Start or open a conversation. Every backend event will appear here in sequence." /> : tab === 'events' ? (filteredEvents.length ? <EventTimeline events={filteredEvents} /> : <InspectorEmpty icon={Terminal} title="No matching events" text={events.length ? 'Choose another event category.' : 'Backend events appear here as soon as the run starts.'} />) : tab === 'plan' ? <>{graphEvents.length > 0 && <div className="graph-summary-card"><div className="inspector-section-title"><GitBranch size={15} /><strong>Execution graph</strong><span>{graphEvents.length} events</span></div><div className="graph-summary-flow"><span>Main graph</span><i /><span>{new Set(graphEvents.flatMap((event) => event.execution_path.slice(1))).size} nodes</span><i /><span>{subagentEvents.length ? `${new Set(subagentEvents.map((event) => event.execution_path.join('/'))).size} subgraph` : 'No subgraph'}</span></div></div>}{todoEvent && <div className="todo-card"><div className="inspector-section-title"><CheckCircle2 size={15} /><strong>Agent plan</strong><span>{todoEvent.payload.items.filter((item: any) => item.status === 'completed').length}/{todoEvent.payload.items.length}</span></div>{todoEvent.payload.items.map((item: any) => <div className={`todo-item ${item.status}`} key={item.id}><span>{item.status === 'completed' ? <CheckCircle2 size={14} /> : item.status === 'in_progress' ? <LoaderCircle className="spin" size={14} /> : <Clock3 size={14} />}</span><p>{item.title}</p></div>)}</div>}{subagentEvents.length > 0 && <div className="subagent-card"><div className="inspector-section-title"><Bot size={15} /><strong>SubAgent tree</strong><span>{new Set(subagentEvents.map((event) => event.execution_path.join('/'))).size} child</span></div><div className="subagent-node"><div className="tree-line" /><div className="agent-logo tiny"><Bot size={13} /></div><div><strong>{String(subagentEvents[0]?.payload.name ?? subagentEvents[0]?.payload.agent_name ?? 'researcher')}</strong><span>{subagentEvents.at(-1)?.type === 'subagent.completed' ? 'Completed' : 'Working'}</span></div></div></div>}{!todoEvent && !subagentEvents.length && !graphEvents.length && <InspectorEmpty icon={CheckCircle2} title="No plan yet" text="Graph, plan, and SubAgent activity appear here during a run." />}</> : tab === 'state' ? <pre className="state-view">{JSON.stringify({ status: run.status, checkpoint: run.checkpoint, metadata: run.metadata, attempts: run.attempts }, null, 2)}</pre> : tab === 'artifacts' ? (artifacts.length ? artifacts.map((artifact) => <a className="artifact-card" href={artifact.uri} target="_blank" rel="noreferrer" key={artifact.id}><div className="artifact-icon"><FileText size={18} /></div><div><strong>{artifact.name}</strong><span>{artifact.media_type} · {artifact.size_bytes} bytes</span><code>{artifact.content_hash.slice(0, 18)}…</code></div></a>) : <InspectorEmpty icon={FileText} title="No artifacts yet" text="Run outputs appear here with their content hash." />) : run.usage ? <div className="usage-detail compact"><div><span>Input tokens</span><strong>{run.usage.input_tokens}</strong></div><div><span>Output tokens</span><strong>{run.usage.output_tokens}</strong></div><div><span>Model calls</span><strong>{run.usage.model_calls}</strong></div><div><span>Tool calls</span><strong>{run.usage.tool_calls}</strong></div><div><span>SubAgent calls</span><strong>{run.usage.subagent_calls}</strong></div><div><span>{run.usage.unsettled_model_calls ? 'Cost incl. pending charges' : 'Cost'}</span><strong>${run.usage.cost.toFixed(4)}</strong></div></div> : <InspectorEmpty icon={Clock3} title="No usage yet" text="Usage appears after the runtime reports it." />}
     </div>
   </aside>
 }

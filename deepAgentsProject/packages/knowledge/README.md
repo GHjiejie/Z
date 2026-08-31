@@ -41,6 +41,8 @@ FastAPI Knowledge API
 
 浏览器先计算强制 SHA-256，API 再生成有效期 15 分钟的 PUT URL。上传后浏览器调用 complete，服务端通过 HeadObject 校验对象大小、类型和可选 ETag，摄取时强制复核 SHA-256。下载时才生成短期 GET URL。AK/SK、STS Token 和签名 URL 都不会进入数据库、Execution Plan、Checkpoint 或事件。
 
+Schema 20 将准确文件长度绑定到 OSS 签名，并加入上传意图期限、逻辑保留字节额度和摄取执行并发限制。complete 的 202 仅表示校验任务入队：完整文件只在 Worker 内下载、校验 SHA-256 并扫描，扫描失败不会解析/索引或获得下载权限。完整契约及未完成的物理对象回收见 [上传治理](../../docs/upload-governance.md)。
+
 Object key 格式：
 
 ```text
@@ -56,6 +58,7 @@ PENDING_UPLOAD
     → UPLOADED
     → QUEUED
     → DOWNLOADING
+    → SECURITY_SCAN
     → PARSING
     → EMBEDDING
     → INDEXING
@@ -71,6 +74,8 @@ PENDING_UPLOAD
 - Agent 发布时只允许选择当前 `ACTIVE` Revision，并把完整检索快照锁入执行计划。
 
 Worker 通过原子 compare-and-set 独占 `QUEUED` 任务；只有超过租期的 `RUNNING` 任务会在重启后恢复。Chunk 写入、版本 READY、Revision 发布和 Job 完成位于同一事务中。
+
+PENDING_UPLOAD 未在期限内完成会变为 EXPIRED；它只释放待上传数量，不代表对象已删除或字节额度已释放。生产领取还通过数据库事务锁检查全局和租户/项目/用户的 RUNNING 上限。
 
 ## 检索与 Citation
 

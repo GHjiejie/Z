@@ -110,6 +110,12 @@ class UserUpdate(BaseModel):
     is_super_admin: Optional[bool] = None
     status: Optional[Literal["ACTIVE"]] = None
 
+    @model_validator(mode="after")
+    def supplied_fields_must_not_be_null(self) -> "UserUpdate":
+        if any(getattr(self, name) is None for name in self.model_fields_set):
+            raise ValueError("User fields may be omitted, but cannot be null")
+        return self
+
     @field_validator("username")
     @classmethod
     def username_is_valid(cls, value: Optional[str]) -> Optional[str]:

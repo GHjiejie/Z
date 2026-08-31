@@ -1,7 +1,51 @@
 export type Json = Record<string, unknown>
 
+export interface CursorPage<T> {
+  items: T[]
+  has_more: boolean
+  next_cursor: string | null
+}
+
+export interface EnvironmentGrant {
+  user_id: string
+  environment: 'development' | 'staging' | 'production'
+  can_deploy: number
+  can_approve: number
+  version: number
+}
+
+export interface ReleaseChannel {
+  agent_id: string
+  environment: 'production'
+  version: number
+  active_deployment_id: string | null
+}
+
+export interface ReleaseRequest {
+  id: string
+  agent_id: string
+  agent_revision_id: string
+  environment: 'production'
+  action: 'promote' | 'rollback'
+  status: 'PENDING' | 'APPLIED' | 'REJECTED' | 'CANCELLED'
+  version: number
+  expected_channel_version: number
+  requested_by: string
+  decided_by: string | null
+  decision_reason: string | null
+  deployment_id: string | null
+  rollback_deployment_id: string | null
+  plan_hash: string
+  evaluation_id: string
+  reason: string
+  created_at: string
+  expires_at: string
+  expired: boolean
+  routing: { router_id: string | null; config_hash: string | null; targets: string[] }
+}
+
 export interface PlatformContext {
-  user: { id: string; name: string; role: string; is_super_admin: boolean }
+  user: { id: string; name: string; role: string; is_super_admin: boolean; permissions: string[] }
   tenant: { id: string; name: string }
   project: { id: string; name: string }
   environment: { id: string; name: string }
@@ -9,6 +53,7 @@ export interface PlatformContext {
     status: string
     workers_online: number
     workers_total: number
+    workers_by_type: Record<string, number>
     queue_depth: number
     event_lag_ms: number | null
     updated_at: string
@@ -213,6 +258,7 @@ export interface ResolvedPlan {
 }
 
 export interface Usage {
+  unsettled_model_calls?: number
   input_tokens: number
   output_tokens: number
   model_calls: number
@@ -237,6 +283,14 @@ export interface Run {
   metadata: Json
   checkpoint: Json
   attempts?: Array<Record<string, unknown>>
+  cancellation?: {
+    status: 'PENDING' | 'RUNNING' | 'COMPLETED'
+    attempts: number
+    last_error: string | null
+    available_at: string
+    workspace_snapshot_id: string | null
+    recovery_point_id: string | null
+  } | null
   usage?: Usage
   created_at: string
   updated_at: string
@@ -244,6 +298,8 @@ export interface Run {
 
 export interface ThreadSummary {
   id: string
+  owner_user_id: string | null
+  visibility: 'private' | 'members' | 'project'
   agent_deployment_id: string
   title: string
   deployment_name?: string
@@ -256,6 +312,17 @@ export interface ThreadSummary {
   workspace?: CodingWorkspace | null
   created_at: string
   updated_at: string
+}
+
+export interface ThreadAccess {
+  thread_id: string
+  owner_user_id: string
+  visibility: 'private' | 'members' | 'project'
+  version: number
+  legacy_access: boolean
+  can_manage: boolean
+  source_restricted: boolean
+  members: Array<{ user_id: string; access: 'read' | 'write' }>
 }
 
 export type PrimaryIntent = 'coding' | 'release' | 'knowledge' | 'general' | 'ambiguous'
@@ -319,6 +386,31 @@ export interface IntentRoutingProfile {
   created_at: string
 }
 
+export type RoutingChangeDraft = IntentRoutingProfile['config'] & { mode: IntentRoutingProfile['mode'] }
+export type ProductionRoutingProfile = Pick<IntentRoutingProfile, 'id' | 'revision_number' | 'mode' | 'config' | 'created_at'> & {
+  approval_state: 'LEGACY' | 'APPROVED'
+}
+export interface RoutingChangeRequest {
+  id: string
+  environment: 'production'
+  requested_by: string
+  status: 'PENDING' | 'APPLIED' | 'REJECTED' | 'CANCELLED'
+  version: number
+  action: 'update' | 'rollback'
+  reason: string
+  rollback_revision_id: string | null
+  before: ProductionRoutingProfile
+  after: RoutingChangeDraft
+  targets: Record<string, { deployment_id: string; plan_hash: string; evaluation_id: string }>
+  router_revision_id: string | null
+  decided_by: string | null
+  decision_reason: string | null
+  created_at: string
+  expires_at: string
+  expired: boolean
+  snapshot_hash: string
+}
+
 export interface Repository {
   id: string
   name: string
@@ -373,6 +465,7 @@ export interface VerificationReport {
 
 export interface ChangeSet {
   id: string
+  version: number
   run_id: string
   base_commit_sha: string
   workspace_generation: number
@@ -504,7 +597,6 @@ export interface KnowledgeRevision {
   knowledge_base_id: string
   revision_number: number
   status: string
-  manifest: Record<string, unknown>
   retrieval_profile: Record<string, unknown>
   embedding_model: string
   embedding_dimensions: number
@@ -531,6 +623,7 @@ export interface KnowledgeBase {
 export interface KnowledgeUploadPreparation {
   document_id: string
   document_version_id: string
+  status: string
   storage: {
     provider: string
     bucket: string
@@ -542,7 +635,7 @@ export interface KnowledgeUploadPreparation {
     url: string
     expires_at: string
     required_headers: Record<string, string>
-  }
+  } | null
 }
 
 export interface KnowledgeIngestionJob {

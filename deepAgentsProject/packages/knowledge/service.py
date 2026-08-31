@@ -1,23 +1,33 @@
 from __future__ import annotations
 
+from packages.auth.resource_access import ResourceAccess, document_allowed, refresh_context
+from packages.auth.permissions import Permission, authorize
+from packages.billing.calls import embed as metered_embed
+
 import asyncio
 import hashlib
 import json
+import logging
+import os
 import math
+import re
 import secrets
 import time
+import threading
 from collections import defaultdict
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
 
 from packages.domain.models import TenantContext, utc_now
+from packages.content_security import ContentRejectedError, ContentScanError, ContentScanner, NoopContentScanner
 from packages.knowledge.embedding import lexical_tokens
 from packages.knowledge.errors import (
     KnowledgeConflictError,
     KnowledgeNotFoundError,
     KnowledgeValidationError,
 )
-from packages.knowledge.ingestion import DocumentParser, StructureAwareChunker
+from packages.knowledge.ingestion.isolated import IsolatedDocumentParser
 from packages.knowledge.models import (
     KnowledgeBaseCreate,
     KnowledgeSearchFilters,
@@ -26,8 +36,19 @@ from packages.knowledge.models import (
     UploadPrepare,
 )
 from packages.knowledge.ports import EmbeddingProvider, ObjectStorage
+from packages.knowledge.presentation import EVENT_FIELDS, event_view, job_view, revision_view, version_view
 from packages.knowledge.storage.object_keys import build_object_key
 from packages.persistence import Database
+from packages.persistence.pagination import authorized_page
+from packages.persistence.fencing import IngestionWriteFence, LeaseLostError, execution_scope
+from packages.coding.redaction import redact_text
+from packages.runtime.task_queue import InMemoryTaskQueue, TaskQueue
+from packages.runtime.worker_lease import WorkerLease
+from packages.runtime.admission import TaskAdmission
+from packages.knowledge.upload_governance import UploadGovernance
+
+
+logger = logging.getLogger(__name__)
 
 
 def _new_id(prefix: str) -> str:
@@ -58,8 +79,13 @@ class KnowledgeService:
         db: Database,
         storage: ObjectStorage,
         embedding: EmbeddingProvider,
+        queue: TaskQueue | None = None,
+        content_scanner: ContentScanner | None = None,
     ):
         self.db = db
+        self.admission = TaskAdmission(db)
+        self.uploads = UploadGovernance(db, self.admission)
+        self._metadata_slots = threading.BoundedSemaphore(self.uploads.settings.metadata_per_process)
         self.storage = storage
         self.embedding = embedding
         self.retrieval_profile = {
@@ -70,50 +96,165 @@ class KnowledgeService:
                 "deepagent-hash-embedding-"
             ),
         }
-        self.parser = DocumentParser()
-        self.chunker = StructureAwareChunker()
-        self.queue: asyncio.Queue[str] = asyncio.Queue()
+        self.parser = IsolatedDocumentParser()
+        self.queue = queue or InMemoryTaskQueue()
+        self.content_scanner = content_scanner or NoopContentScanner()
         self.worker_id = f"knowledge_worker_{secrets.token_hex(4)}"
+        self.worker_lease = WorkerLease(
+            db, self.worker_id, "knowledge", {"queue": "knowledge-ingestion"}
+        )
         self.task: Optional[asyncio.Task] = None
+        self.reconcile_task: Optional[asyncio.Task] = None
+        self.lease_seconds = max(3, int(os.getenv("DEEPAGENT_INGESTION_LEASE_SECONDS", "30")))
 
     async def start(self) -> None:
-        stale_before = datetime.now(timezone.utc) - timedelta(minutes=5)
-        running = self.db.fetch_all(
-            "SELECT id, heartbeat_at FROM knowledge_ingestion_jobs WHERE status='RUNNING'"
-        )
-        for job in running:
-            heartbeat = job.get("heartbeat_at")
-            try:
-                stale = not heartbeat or datetime.fromisoformat(heartbeat) < stale_before
-            except ValueError:
-                stale = True
-            if not stale:
-                continue
-            self.db.execute(
-                """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
-                   worker_id=NULL, lease_token=NULL, updated_at=?
-                   WHERE id=? AND status='RUNNING'
-                     AND (heartbeat_at IS NULL OR heartbeat_at=?)""",
-                (utc_now(), job["id"], heartbeat),
-            )
-        recoverable = self.db.fetch_all(
-            "SELECT id FROM knowledge_ingestion_jobs WHERE status='QUEUED'"
-        )
+        # Fail before publishing a heartbeat or consuming durable jobs. API-only
+        # processes do not start ingestion and need not host parser isolation.
+        await self.parser.validate_runtime()
+        await self.worker_lease.start()
+        await self.reconcile()
         if self.task is None:
             self.task = asyncio.create_task(self._worker_loop())
-        for job in recoverable:
-            await self.queue.put(job["id"])
+            self.reconcile_task = asyncio.create_task(self._reconcile_loop())
+            self.worker_lease.consumers = (self.task, self.reconcile_task)
 
     async def stop(self) -> None:
-        if self.task is not None:
-            self.task.cancel()
+        for task in (self.reconcile_task, self.task):
+            if task:
+                task.cancel()
+        await asyncio.gather(
+            *(task for task in (self.reconcile_task, self.task) if task), return_exceptions=True,
+        )
+        self.task = self.reconcile_task = None
+        await self.worker_lease.stop()
+
+    def _enqueue_in_transaction(self, job_id: str) -> bool:
+        put = getattr(self.queue, "put_transactional", None)
+        if put is None:
+            return False
+        job = self.db.fetch_one("SELECT attempts FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
+        put(job_id, dedupe_key=f"{job_id}:{job['attempts'] + 1}")
+        return True
+
+    async def _enqueue(self, job_id: str) -> None:
+        job = self.db.fetch_one("SELECT attempts FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
+        await self.queue.put(job_id, dedupe_key=f"{job_id}:{job['attempts'] + 1}")
+
+    async def reconcile(self) -> None:
+        self.uploads.expire_intents()
+        cutoff = (self.db.current_time() - timedelta(seconds=self.lease_seconds)).isoformat()
+        stale = self.db.fetch_all(
+            "SELECT id FROM knowledge_ingestion_jobs WHERE status='RUNNING' AND (heartbeat_at IS NULL OR heartbeat_at<=?)",
+            (cutoff,),
+        )
+        for candidate in stale:
+            with self.db.transaction():
+                suffix = " FOR UPDATE" if self.db.dialect == "postgresql" else ""
+                job = self.db.fetch_one("SELECT * FROM knowledge_ingestion_jobs WHERE id=?" + suffix, (candidate["id"],))
+                if job["status"] != "RUNNING" or (job["heartbeat_at"] and job["heartbeat_at"] > cutoff):
+                    continue
+                now = self.db.current_time().isoformat()
+                if job["attempts"] >= int(os.getenv("DEEPAGENT_INGESTION_RECOVERY_LIMIT", "3")):
+                    self.db.execute(
+                        """UPDATE knowledge_ingestion_jobs SET status='FAILED', stage='FAILED',
+                           worker_id=NULL, lease_token=NULL, error_code='RECOVERY_EXHAUSTED',
+                           error_message='Worker recovery limit exhausted; explicit retry required', updated_at=?
+                           WHERE id=?""",
+                        (now, job["id"]),
+                    )
+                    self.db.execute(
+                        """UPDATE knowledge_document_versions SET status='FAILED', error_code='RECOVERY_EXHAUSTED'
+                           WHERE id=? AND status<>'READY'""", (job["document_version_id"],),
+                    )
+                else:
+                    self.db.execute(
+                        """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
+                           worker_id=NULL, lease_token=NULL, updated_at=? WHERE id=?""", (now, job["id"]),
+                    )
+                    self._enqueue_in_transaction(job["id"])
+        for job in self.db.fetch_all("SELECT id FROM knowledge_ingestion_jobs WHERE status='QUEUED'"):
+            await self._enqueue(job["id"])
+
+    async def _reconcile_loop(self) -> None:
+        while True:
+            await asyncio.sleep(2)
             try:
-                await self.task
+                await self.reconcile()
             except asyncio.CancelledError:
-                pass
-            self.task = None
+                raise
+            except Exception:
+                logger.exception("Knowledge reconciliation failed; retrying on next interval")
+
+    @contextmanager
+    def _write_scope(self, context: TenantContext):
+        with self.db.transaction():
+            # Match account governance's users -> resource lock ordering. A
+            # concurrent account/session revocation either wins before this
+            # check or waits for the complete authorized write to commit.
+            if self.db.dialect == "postgresql":
+                self.db.fetch_one("SELECT id FROM users WHERE id=? FOR UPDATE", (context.user_id,))
+            current = refresh_context(self.db, context)
+            authorize(current, Permission.KNOWLEDGE_MANAGE)
+            yield current
+
+    def _request_identity(self, operation, payload, context, key):
+        if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,199}", key)):
+            raise KnowledgeValidationError("Idempotency-Key must contain 1-200 ASCII letters, digits, dots, underscores, colons or hyphens, starting with a letter or digit")
+
+        def digest(value):
+            return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+        scope = "knowledge-write-v1:" + digest([operation, context.project_id, context.environment_id])
+        request_hash = digest({"actor": context.user_id, "body": payload.model_dump()})
+        return scope, request_hash
+
+    def _request_replay(self, context, scope, request_hash, key):
+        if key is None:
+            return None
+        if self.db.dialect == "postgresql":
+            # The row may not yet exist. Serialize its unique identity across
+            # processes rather than relying on SELECT FOR UPDATE on no rows.
+            identity = json.dumps([context.tenant_id, scope, key], separators=(",", ":"))
+            lock_key = int.from_bytes(hashlib.sha256(identity.encode()).digest()[:8], "big", signed=True)
+            self.db.fetch_one("SELECT pg_advisory_xact_lock(?)", (lock_key,))
+        row = self.db.fetch_one(
+            "SELECT response_json FROM idempotency_records WHERE tenant_id=? AND scope=? AND key=?",
+            (context.tenant_id, scope, key),
+        )
+        if not row:
+            return None
+        try:
+            record = json.loads(row["response_json"])
+        except (TypeError, ValueError) as exc:
+            raise KnowledgeConflictError("Stored idempotency record is invalid") from exc
+        if (not isinstance(record, dict) or record.get("version") != 1
+                or record.get("request_hash") != request_hash or not isinstance(record.get("resource_id"), str)):
+            raise KnowledgeConflictError("Idempotency key was used for different content or principal")
+        return record["resource_id"]
+
+    def _record_request(self, context, scope, request_hash, key, resource_id):
+        if key is not None:
+            # Never persist signed URLs, provider headers or source contents.
+            self.db.execute(
+                """INSERT INTO idempotency_records(tenant_id,scope,key,response_json,created_at)
+                   VALUES(?,?,?,?,?)""",
+                (context.tenant_id, scope, key, self.db.encode({"version": 1,
+                    "request_hash": request_hash, "resource_id": resource_id}), utc_now()),
+            )
 
     def create_knowledge_base(
+        self, payload: KnowledgeBaseCreate, context: TenantContext, idempotency_key: Optional[str] = None
+    ) -> Dict[str, Any]:
+        scope, request_hash = self._request_identity("create-base", payload, context, idempotency_key)
+        with self._write_scope(context) as current:
+            previous = self._request_replay(current, scope, request_hash, idempotency_key)
+            if previous:
+                return self.get_knowledge_base(previous, current)
+            result = self._create_knowledge_base(payload, current)
+            self._record_request(current, scope, request_hash, idempotency_key, result["id"])
+            return result
+
+    def _create_knowledge_base(
         self, payload: KnowledgeBaseCreate, context: TenantContext
     ) -> Dict[str, Any]:
         knowledge_base_id = _new_id("kb")
@@ -141,22 +282,17 @@ class KnowledgeService:
         return self.get_knowledge_base(knowledge_base_id, context)
 
     def list_knowledge_bases(self, context: TenantContext) -> List[Dict[str, Any]]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.KNOWLEDGE_READ)
         items = self.db.fetch_all(
             """SELECT * FROM knowledge_bases WHERE tenant_id=? AND project_id=?
                ORDER BY updated_at DESC""",
             (context.tenant_id, context.project_id),
         )
         for item in items:
-            item["document_count"] = self.db.fetch_one(
-                """SELECT COUNT(*) AS count FROM knowledge_documents
-                   WHERE knowledge_base_id=? AND tenant_id=? AND project_id=?""",
-                (item["id"], context.tenant_id, context.project_id),
-            )["count"]
-            item["ready_document_count"] = self.db.fetch_one(
-                """SELECT COUNT(*) AS count FROM knowledge_documents
-                   WHERE knowledge_base_id=? AND tenant_id=? AND project_id=? AND status='READY'""",
-                (item["id"], context.tenant_id, context.project_id),
-            )["count"]
+            documents = self.list_documents(item["id"], context)
+            item["document_count"] = len(documents)
+            item["ready_document_count"] = sum(document["status"] == "READY" for document in documents)
         return items
 
     def get_knowledge_base(self, knowledge_base_id: str, context: TenantContext) -> Dict[str, Any]:
@@ -172,6 +308,8 @@ class KnowledgeService:
         return item
 
     def list_documents(self, knowledge_base_id: str, context: TenantContext) -> List[Dict[str, Any]]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.KNOWLEDGE_READ)
         self._require_knowledge_base(knowledge_base_id, context)
         items = self.db.fetch_all(
             """SELECT d.*, v.content_type, v.size_bytes, v.content_sha256, v.canonical_uri,
@@ -185,18 +323,35 @@ class KnowledgeService:
         return [item for item in items if self._document_allowed(item, context)]
 
     def list_revisions(self, knowledge_base_id: str, context: TenantContext) -> List[Dict[str, Any]]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.KNOWLEDGE_READ)
         self._require_knowledge_base(knowledge_base_id, context)
-        return self.db.fetch_all(
+        return [revision_view(row) for row in self.db.fetch_all(
             """SELECT * FROM knowledge_base_revisions
                WHERE knowledge_base_id=? AND tenant_id=? AND project_id=?
                ORDER BY revision_number DESC""",
             (knowledge_base_id, context.tenant_id, context.project_id),
-        )
+        )]
 
     def prepare_upload(
-        self, knowledge_base_id: str, payload: UploadPrepare, context: TenantContext
+        self, knowledge_base_id: str, payload: UploadPrepare, context: TenantContext,
+        idempotency_key: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        scope, request_hash = self._request_identity("prepare-upload:" + knowledge_base_id, payload, context, idempotency_key)
+        with self._write_scope(context) as current:
+            self._require_knowledge_base(knowledge_base_id, current)
+            previous = self._request_replay(current, scope, request_hash, idempotency_key)
+            if previous:
+                return self._upload_preparation(previous, current)
+            result = self._prepare_upload(knowledge_base_id, payload, current)
+            self._record_request(current, scope, request_hash, idempotency_key, result["document_version_id"])
+            return result
+
+    def _prepare_upload(
+        self, knowledge_base_id: str, payload: UploadPrepare, context: TenantContext,
     ) -> Dict[str, Any]:
         self._require_knowledge_base(knowledge_base_id, context)
+        expires_at = self.uploads.reserve(context, payload.size_bytes)
         document_id = _new_id("doc")
         version_id = _new_id("docver")
         object_key = build_object_key(
@@ -207,11 +362,6 @@ class KnowledgeService:
             version_id,
             payload.filename,
         )
-        authorization = self.storage.create_upload_authorization(
-            object_key, payload.content_type, expires_seconds=900
-        )
-        if authorization.url.startswith("local://"):
-            authorization.url = f"/api/v1/knowledge-document-versions/{version_id}/content"
         now = utc_now()
         self.db.execute(
             """INSERT INTO knowledge_documents
@@ -236,8 +386,8 @@ class KnowledgeService:
             """INSERT INTO knowledge_document_versions
                (id, document_id, tenant_id, project_id, revision_number, storage_provider,
                 bucket, region, object_key, canonical_uri, expected_sha256, content_type,
-                expected_size_bytes, status, created_at)
-               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_UPLOAD', ?)""",
+                expected_size_bytes, status, created_at, upload_expires_at)
+               VALUES (?, ?, ?, ?, 1, ?, ?, ?, ?, ?, ?, ?, ?, 'PENDING_UPLOAD', ?, ?)""",
             (
                 version_id,
                 document_id,
@@ -252,6 +402,7 @@ class KnowledgeService:
                 payload.content_type,
                 payload.size_bytes,
                 now,
+                expires_at,
             ),
         )
         self._append_event(
@@ -266,21 +417,39 @@ class KnowledgeService:
             knowledge_base_id=knowledge_base_id,
             document_version_id=version_id,
         )
+        return self._upload_preparation(version_id, context)
+
+    def _upload_preparation(self, version_id: str, context: TenantContext) -> Dict[str, Any]:
+        if self.db.dialect == "postgresql":
+            self.db.fetch_one("""SELECT id FROM knowledge_document_versions
+                WHERE id=? AND tenant_id=? AND project_id=? FOR UPDATE""",
+                (version_id, context.tenant_id, context.project_id))
+        version = self._require_version(version_id, context)
+        # Do not replay stale document permissions or expose a signed grant from
+        # another operation. Fresh grants are only for still-pending uploads.
+        self.get_document(version["document_id"], context)
+        upload = None
+        if version["status"] == "PENDING_UPLOAD":
+            authorization = self.storage.create_upload_authorization(
+                version["object_key"], version["content_type"],
+                expires_seconds=self.uploads.grant_lifetime(version),
+                size_bytes=version['expected_size_bytes'],
+            )
+            if authorization.url.startswith("local://"):
+                authorization.url = f"/api/v1/knowledge-document-versions/{version_id}/content"
+            upload = {"method": authorization.method, "url": authorization.url,
+                      "expires_at": authorization.expires_at, "required_headers": authorization.headers}
         return {
-            "document_id": document_id,
+            "document_id": version["document_id"],
             "document_version_id": version_id,
+            "status": version["status"],
             "storage": {
-                "provider": self.storage.provider,
-                "bucket": self.storage.bucket,
-                "region": self.storage.region,
-                "canonical_uri": self.storage.canonical_uri(object_key),
+                "provider": version["storage_provider"],
+                "bucket": version["bucket"],
+                "region": version["region"],
+                "canonical_uri": version["canonical_uri"],
             },
-            "upload": {
-                "method": authorization.method,
-                "url": authorization.url,
-                "expires_at": authorization.expires_at,
-                "required_headers": authorization.headers,
-            },
+            "upload": upload,
         }
 
     def upload_content(
@@ -291,6 +460,8 @@ class KnowledgeService:
             raise KnowledgeConflictError("Direct platform upload is only available for local storage")
         if version["status"] not in {"PENDING_UPLOAD", "UPLOADED"}:
             raise KnowledgeConflictError(f"Document version cannot be uploaded from {version['status']}")
+        if version['status'] == 'PENDING_UPLOAD':
+            self.uploads.grant_lifetime(version)
         if len(content) != version["expected_size_bytes"]:
             raise KnowledgeValidationError(
                 f"Uploaded size {len(content)} does not match expected {version['expected_size_bytes']}"
@@ -311,111 +482,197 @@ class KnowledgeService:
     async def complete_upload(
         self, version_id: str, payload: UploadComplete, context: TenantContext
     ) -> Dict[str, Any]:
-        version = self._require_version(version_id, context)
-        existing_job = self.db.fetch_one(
-            "SELECT * FROM knowledge_ingestion_jobs WHERE document_version_id=?", (version_id,)
-        )
-        if existing_job and existing_job["status"] != "FAILED":
-            return existing_job
-        if version["status"] not in {"PENDING_UPLOAD", "UPLOADED", "FAILED"}:
-            raise KnowledgeConflictError(
-                f"Document version cannot be completed from {version['status']}"
+        # A 202 means validation was durably accepted, not that the file is safe.
+        # Only bounded metadata IO happens here; bytes and scans belong to workers.
+        request_hash = hashlib.sha256(self.db.encode({
+            'actor': context.user_id, 'tenant': context.tenant_id,
+            'project': context.project_id, 'environment': context.environment_id,
+            'document_version': version_id,
+        }).encode()).hexdigest()
+        with self._write_scope(context) as context:
+            version = self._require_version(version_id, context)
+            self.get_document(version['document_id'], context)
+            if version.get('upload_request_hash') and version['upload_request_hash'] != request_hash:
+                raise KnowledgeConflictError('Upload completion was already bound to different content or principal')
+            self._assert_completion_source(version, payload)
+            existing_job = self.db.fetch_one(
+                'SELECT * FROM knowledge_ingestion_jobs WHERE document_version_id=?', (version_id,))
+            if existing_job and existing_job['status'] != 'FAILED':
+                return self.get_ingestion_job(existing_job['id'], context)
+            if version['status'] not in {'PENDING_UPLOAD', 'UPLOADED', 'FAILED'}:
+                raise KnowledgeConflictError('Document version cannot be completed from ' + version['status'])
+            if version['status'] == 'PENDING_UPLOAD':
+                self.uploads.grant_lifetime(version)
+            if (version.get('object_version_id') and payload.object_version_id
+                    and version['object_version_id'] != payload.object_version_id):
+                raise KnowledgeConflictError('A pinned object version cannot be replaced on retry')
+            self.admission.ingestion(context, ignore_job_id=existing_job['id'] if existing_job else '')
+        if not self._metadata_slots.acquire(blocking=False):
+            from packages.runtime.admission import CapacityExceeded
+            raise CapacityExceeded('Upload metadata concurrency reached; retry later')
+        try:
+            metadata = await self._owned_io(self.storage.head_object, version['object_key'],
+                version.get('object_version_id') or payload.object_version_id)
+        finally:
+            self._metadata_slots.release()
+        if metadata.bucket != version['bucket'] or metadata.object_key != version['object_key']:
+            raise KnowledgeValidationError('Object metadata does not match the upload destination')
+        if self.storage.provider != 'local' and (not metadata.version_id or metadata.version_id == 'null'):
+            raise KnowledgeConflictError('Object storage versioning must be enabled before completing uploads')
+        requested_version = version.get('object_version_id') or payload.object_version_id
+        if requested_version and metadata.version_id != requested_version:
+            raise KnowledgeValidationError('Object metadata does not match the requested fixed version')
+        if metadata.size_bytes != version['expected_size_bytes']:
+            raise KnowledgeValidationError('Stored object size does not match the upload declaration')
+        if metadata.content_type.split(';', 1)[0].strip().lower() != version['content_type'].split(';', 1)[0].strip().lower():
+            raise KnowledgeValidationError('Stored content type does not match the upload declaration')
+        if payload.etag and (not metadata.etag or payload.etag.strip('"') != metadata.etag.strip('"')):
+            raise KnowledgeValidationError('Object ETag does not match the upload completion request')
+        with self._write_scope(context) as context:
+            self.admission.lock_tenant(context.tenant_id)
+            if self.db.dialect == "postgresql":
+                self.db.fetch_one("SELECT id FROM knowledge_document_versions WHERE id=? FOR UPDATE", (version_id,))
+            version = self._require_version(version_id, context)
+            self.get_document(version['document_id'], context)
+            if version.get('upload_request_hash') and version['upload_request_hash'] != request_hash:
+                raise KnowledgeConflictError('Upload completion was already bound to different content or principal')
+            self._assert_completion_source(version, payload)
+            existing_job = self.db.fetch_one(
+                "SELECT * FROM knowledge_ingestion_jobs WHERE document_version_id=?", (version_id,),
             )
-        metadata = await asyncio.to_thread(
-            self.storage.head_object, version["object_key"], payload.object_version_id
-        )
-        if metadata.size_bytes != version["expected_size_bytes"]:
-            raise KnowledgeValidationError(
-                f"OSS object size {metadata.size_bytes} does not match expected {version['expected_size_bytes']}"
+            if existing_job and existing_job["status"] != "FAILED":
+                return self.get_ingestion_job(existing_job["id"], context)
+            if version["status"] not in {"PENDING_UPLOAD", "UPLOADED", "FAILED"}:
+                raise KnowledgeConflictError("Document version changed during upload completion")
+            if version['status'] == 'PENDING_UPLOAD':
+                self.uploads.grant_lifetime(version)
+            if (version.get('object_version_id') and payload.object_version_id
+                    and version['object_version_id'] != payload.object_version_id):
+                raise KnowledgeConflictError('A pinned object version cannot be replaced on retry')
+            self.admission.ingestion(context, ignore_job_id=existing_job["id"] if existing_job else "")
+            now = utc_now()
+            self.db.execute(
+                """UPDATE knowledge_document_versions
+                   SET status='UPLOADED', object_version_id=COALESCE(object_version_id,?),
+                       etag=COALESCE(etag,?), upload_request_hash=?, size_bytes=?, storage_class=?,
+                       uploaded_at=?, error_code=NULL, error_message=NULL
+                   WHERE id=?""",
+                (
+                    metadata.version_id,
+                    metadata.etag,
+                    request_hash,
+                    metadata.size_bytes,
+                    metadata.storage_class,
+                    now,
+                    version_id,
+                ),
             )
-        expected_type = version["content_type"].split(";", 1)[0].strip().lower()
-        actual_type = metadata.content_type.split(";", 1)[0].strip().lower()
-        if actual_type != expected_type:
-            raise KnowledgeValidationError(
-                f"Stored content type {actual_type} does not match expected {expected_type}"
+            self.db.execute(
+                "UPDATE knowledge_documents SET status='UPLOADED', updated_at=? WHERE id=?",
+                (now, version["document_id"]),
             )
-        if payload.etag and metadata.etag and payload.etag.strip('"') != metadata.etag.strip('"'):
-            raise KnowledgeValidationError("OSS object ETag does not match the upload completion request")
-        now = utc_now()
-        self.db.execute(
-            """UPDATE knowledge_document_versions
-               SET status='UPLOADED', object_version_id=?, etag=?, content_type=?, size_bytes=?,
-                   storage_class=?, uploaded_at=?, error_code=NULL, error_message=NULL
-               WHERE id=?""",
-            (
-                metadata.version_id,
-                metadata.etag,
-                metadata.content_type or version["content_type"],
-                metadata.size_bytes,
-                metadata.storage_class,
-                now,
-                version_id,
-            ),
-        )
-        self.db.execute(
-            "UPDATE knowledge_documents SET status='UPLOADED', updated_at=? WHERE id=?",
-            (now, version["document_id"]),
-        )
-        job_id = existing_job["id"] if existing_job else _new_id("kjob")
-        if existing_job:
+            job_id = existing_job["id"] if existing_job else _new_id("kjob")
+            if existing_job:
+                self.db.execute(
+                    """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
+                       worker_id=NULL, lease_token=NULL, error_code=NULL, error_message=NULL,
+                       updated_at=? WHERE id=?""",
+                    (now, job_id),
+                )
+            else:
+                self.db.execute(
+                    """INSERT OR IGNORE INTO knowledge_ingestion_jobs
+                       (id, tenant_id, project_id, knowledge_base_id, document_version_id,
+                        status, stage, attempts, created_at, updated_at)
+                       VALUES (?, ?, ?, ?, ?, 'QUEUED', 'QUEUED', 0, ?, ?)""",
+                    (
+                        job_id,
+                        context.tenant_id,
+                        context.project_id,
+                        version["knowledge_base_id"],
+                        version_id,
+                        now,
+                        now,
+                    ),
+                )
+                actual_job = self.db.fetch_one(
+                    "SELECT id FROM knowledge_ingestion_jobs WHERE document_version_id=?",
+                    (version_id,),
+                )
+                job_id = actual_job["id"]
+            from packages.operations.telemetry import persist_origin
+            persist_origin(self.db, 'ingestion', job_id)
+            self._set_ingestion_principal(job_id, context)
+            self._append_event(
+                context,
+                "knowledge.ingestion.queued",
+                {"job_id": job_id, "document_version_id": version_id},
+                knowledge_base_id=version["knowledge_base_id"],
+                document_version_id=version_id,
+                ingestion_job_id=job_id,
+            )
+            enqueued = self._enqueue_in_transaction(job_id)
+        if not enqueued:
+            await self._enqueue(job_id)
+        return self.get_ingestion_job(job_id, context)
+
+    @staticmethod
+    def _assert_completion_source(version, payload):
+        # A replay may omit optional provider hints (e.g. browser response loss),
+        # but may not replace a fixed source already accepted for this document.
+        if ((version.get('object_version_id') and payload.object_version_id
+                and version['object_version_id'] != payload.object_version_id)
+                or (version.get('etag') and payload.etag
+                    and version['etag'].strip('"') != payload.etag.strip('"'))):
+            raise KnowledgeConflictError('Upload completion was already bound to different content or principal')
+
+    async def retry_ingestion_job(self, job_id: str, context: TenantContext) -> Dict[str, Any]:
+        with self._write_scope(context) as context:
+            self.admission.lock_tenant(context.tenant_id)
+            if self.db.dialect == "postgresql":
+                self.db.fetch_one("SELECT id FROM knowledge_ingestion_jobs WHERE id=? FOR UPDATE", (job_id,))
+            job = self.get_ingestion_job(job_id, context)
+            version = self._require_version(job["document_version_id"], context)
+            self.get_document(version["document_id"], context)
+            if job["status"] != "FAILED":
+                raise KnowledgeConflictError("Only failed ingestion jobs can be retried")
+            self.admission.ingestion(context, ignore_job_id=job_id)
+            now = utc_now()
             self.db.execute(
                 """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
                    worker_id=NULL, lease_token=NULL, error_code=NULL, error_message=NULL,
                    updated_at=? WHERE id=?""",
                 (now, job_id),
             )
-        else:
             self.db.execute(
-                """INSERT OR IGNORE INTO knowledge_ingestion_jobs
-                   (id, tenant_id, project_id, knowledge_base_id, document_version_id,
-                    status, stage, attempts, created_at, updated_at)
-                   VALUES (?, ?, ?, ?, ?, 'QUEUED', 'QUEUED', 0, ?, ?)""",
-                (
-                    job_id,
-                    context.tenant_id,
-                    context.project_id,
-                    version["knowledge_base_id"],
-                    version_id,
-                    now,
-                    now,
-                ),
+                """UPDATE knowledge_document_versions SET status='UPLOADED', error_code=NULL,
+                   error_message=NULL WHERE id=?""",
+                (job["document_version_id"],),
             )
-            actual_job = self.db.fetch_one(
-                "SELECT id FROM knowledge_ingestion_jobs WHERE document_version_id=?",
-                (version_id,),
-            )
-            job_id = actual_job["id"]
-        self._append_event(
-            context,
-            "knowledge.ingestion.queued",
-            {"job_id": job_id, "document_version_id": version_id},
-            knowledge_base_id=version["knowledge_base_id"],
-            document_version_id=version_id,
-            ingestion_job_id=job_id,
-        )
-        await self.queue.put(job_id)
+            self._set_ingestion_principal(job_id, context)
+            enqueued = self._enqueue_in_transaction(job_id)
+        if not enqueued:
+            await self._enqueue(job_id)
         return self.get_ingestion_job(job_id, context)
 
-    async def retry_ingestion_job(self, job_id: str, context: TenantContext) -> Dict[str, Any]:
-        job = self.get_ingestion_job(job_id, context)
-        if job["status"] != "FAILED":
-            raise KnowledgeConflictError("Only failed ingestion jobs can be retried")
-        now = utc_now()
-        self.db.execute(
-            """UPDATE knowledge_ingestion_jobs SET status='QUEUED', stage='QUEUED',
-               worker_id=NULL, lease_token=NULL, error_code=NULL, error_message=NULL,
-               updated_at=? WHERE id=?""",
-            (now, job_id),
-        )
-        self.db.execute(
-            """UPDATE knowledge_document_versions SET status='UPLOADED', error_code=NULL,
-               error_message=NULL WHERE id=?""",
-            (job["document_version_id"],),
-        )
-        await self.queue.put(job_id)
-        return self.get_ingestion_job(job_id, context)
+    def _set_ingestion_principal(self, job_id, context):
+        self.db.execute("""UPDATE knowledge_ingestion_jobs SET requested_by=?,
+            requested_environment_id=?,requested_roles_json=? WHERE id=?""",
+            (context.user_id,context.environment_id,self.db.encode(context.roles),job_id))
+
+    def _ingestion_principal(self, job):
+        if not job.get("requested_by") or not job.get("requested_environment_id") or not job.get("requested_roles"):
+            raise KnowledgeConflictError("Legacy ingestion requires an authorized retry to establish its billing principal")
+        context = refresh_context(self.db, TenantContext(tenant_id=job["tenant_id"],project_id=job["project_id"],
+            user_id=job["requested_by"],environment_id=job["requested_environment_id"],roles=job["requested_roles"]))
+        authorize(context, Permission.KNOWLEDGE_MANAGE)
+        version = self._require_version(job["document_version_id"], context)
+        self.get_document(version["document_id"], context)
+        return context
 
     def get_ingestion_job(self, job_id: str, context: TenantContext) -> Dict[str, Any]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.KNOWLEDGE_READ)
         job = self.db.fetch_one(
             """SELECT * FROM knowledge_ingestion_jobs
                WHERE id=? AND tenant_id=? AND project_id=?""",
@@ -423,9 +680,50 @@ class KnowledgeService:
         )
         if not job:
             raise KnowledgeNotFoundError("Knowledge ingestion job not found")
-        return job
+        version = self._require_version(job["document_version_id"], context)
+        self.get_document(version["document_id"], context)
+        return job_view(job)
+
+    def list_events(self, context: TenantContext, *, limit=100, cursor=None):
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.KNOWLEDGE_READ)
+
+        def visible(event):
+            current = refresh_context(self.db, context)
+            authorize(current, Permission.KNOWLEDGE_READ)
+            if event["type"] not in EVENT_FIELDS:
+                return False
+            if event["type"] == "knowledge.search.completed":
+                # Historical unattributed searches are not guessed to belong to anyone.
+                return event.get("actor_user_id") == current.user_id
+            if event.get("document_version_id") or event.get("ingestion_job_id"):
+                version_id = event.get("document_version_id")
+                if event.get("ingestion_job_id"):
+                    job = self.db.fetch_one("""SELECT document_version_id FROM knowledge_ingestion_jobs
+                        WHERE id=? AND tenant_id=? AND project_id=?""",
+                        (event["ingestion_job_id"], current.tenant_id, current.project_id))
+                    if not job or (version_id and version_id != job["document_version_id"]):
+                        return False
+                    version_id = job["document_version_id"]
+                document = self.db.fetch_one("""SELECT d.* FROM knowledge_documents d
+                    JOIN knowledge_document_versions v ON v.document_id=d.id
+                    WHERE d.tenant_id=? AND d.project_id=? AND v.id=?""",
+                    (current.tenant_id, current.project_id, version_id))
+                return bool(document and self._document_allowed(document, current))
+            # Unknown/malformed unbound document events fail closed.
+            return event["type"] == "knowledge.base.created" and bool(self.db.fetch_one(
+                "SELECT id FROM knowledge_bases WHERE id=? AND tenant_id=? AND project_id=?",
+                (event.get("knowledge_base_id"), current.tenant_id, current.project_id)))
+
+        page = authorized_page(self.db, query="SELECT r.* FROM knowledge_events r WHERE r.tenant_id=? AND r.project_id=?",
+            params=(context.tenant_id, context.project_id), alias="r", resource="knowledge-events",
+            context=context, visible=visible, limit=limit, cursor=cursor)
+        page["items"] = [event_view(row) for row in page["items"]]
+        return page
 
     def get_document(self, document_id: str, context: TenantContext) -> Dict[str, Any]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.KNOWLEDGE_READ)
         document = self.db.fetch_one(
             """SELECT * FROM knowledge_documents
                WHERE id=? AND tenant_id=? AND project_id=?""",
@@ -435,10 +733,10 @@ class KnowledgeService:
             raise KnowledgeNotFoundError("Knowledge document not found")
         if not self._document_allowed(document, context):
             raise KnowledgeNotFoundError("Knowledge document not found")
-        document["versions"] = self.db.fetch_all(
+        document["versions"] = [version_view(row) for row in self.db.fetch_all(
             "SELECT * FROM knowledge_document_versions WHERE document_id=? ORDER BY revision_number DESC",
             (document_id,),
-        )
+        )]
         return document
 
     def download_document(self, document_id: str, context: TenantContext) -> Dict[str, Any]:
@@ -460,6 +758,8 @@ class KnowledgeService:
         )
         if not document or not self._document_allowed(document, context):
             raise KnowledgeNotFoundError("Knowledge document not found")
+        if version["status"] != "READY":
+            raise KnowledgeConflictError("Document version has not passed ingestion and security checks")
         signed_url = self.storage.create_download_url(
             version["object_key"], version.get("object_version_id"), expires_seconds=300
         )
@@ -480,6 +780,7 @@ class KnowledgeService:
         run_id: Optional[str] = None,
         expected_bindings: Optional[List[Dict[str, Any]]] = None,
     ) -> Dict[str, Any]:
+        context = refresh_context(self.db, context)
         started = time.perf_counter()
         revision_ids = list(dict.fromkeys(payload.revision_ids))
         if payload.knowledge_base_id:
@@ -515,7 +816,8 @@ class KnowledgeService:
             )
         rows = self._candidate_rows(revision_ids, payload.filters, context)
         rows = [row for row in rows if self._document_allowed(row, context)]
-        query_vector = self.embedding.embed_query(payload.query)
+        query_vector = metered_embed(self.db, self.embedding, [payload.query], context,
+            purpose="query_embedding", resource_id=run_id or revision_ids[0])[0]
         query_terms = set(lexical_tokens(payload.query))
         scored: Dict[str, Dict[str, Any]] = {}
         for row in rows:
@@ -618,23 +920,116 @@ class KnowledgeService:
 
     async def _worker_loop(self) -> None:
         while True:
-            job_id = await self.queue.get()
             try:
-                await self._process_job(job_id)
+                job_id = await self.queue.get()
             except asyncio.CancelledError:
                 raise
+            except Exception:
+                logger.exception("Knowledge queue claim failed")
+                await asyncio.sleep(1)
+                continue
+            retry = False
+            failed = False
+            error = None
+            try:
+                await self._process_job(job_id)
+                job = self.db.fetch_one("SELECT status, error_message FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
+                failed = bool(job and job["status"] == "FAILED")
+                error = job.get("error_message") if failed else None
+            except asyncio.CancelledError:
+                retry = True
+                raise
             except Exception as exc:
-                self._fail_job(job_id, exc)
+                retry = True
+                error = redact_text(str(exc))[:1000]
+                logger.exception("Knowledge execution interrupted; lease reconciliation will recover it")
             finally:
-                self.queue.task_done()
+                try:
+                    if retry:
+                        self.queue.release(error=error or "Worker stopped")
+                    else:
+                        self.queue.task_done(failed=failed, error=error)
+                except Exception:
+                    logger.exception("Could not settle knowledge queue delivery")
+
+    async def _heartbeat(self, fence: IngestionWriteFence) -> None:
+        while True:
+            with execution_scope(fence), self.db.transaction():
+                self.db.execute(
+                    "UPDATE knowledge_ingestion_jobs SET heartbeat_at=? WHERE id=?",
+                    (self.db.current_time().isoformat(), fence.job_id),
+                )
+            await self.queue.heartbeat()
+            await asyncio.sleep(min(10, self.lease_seconds / 3))
+
+    @staticmethod
+    async def _owned_io(function, *args, **kwargs):
+        # Cancelling asyncio.to_thread does not stop its native thread. Retain
+        # ownership until it really ends, so a stopped consumer cannot immediately
+        # reuse its slot while an old download/scan still occupies memory/sockets.
+        task = asyncio.create_task(asyncio.to_thread(function, *args, **kwargs))
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    continue
+                except Exception:
+                    break
+            if not task.cancelled():
+                task.exception()
+            raise
 
     async def _process_job(self, job_id: str) -> None:
         lease_token = _new_id("lease")
         if not self._claim_job(job_id, lease_token):
             return
+        fence = IngestionWriteFence(job_id, self.worker_id, lease_token, self.lease_seconds)
+
+        async def invoke():
+            from packages.operations.telemetry import task_operation
+            with task_operation(self.db, 'ingestion', job_id, 'knowledge.ingestion') as span, execution_scope(fence):
+                try:
+                    await self._ingest_job(job_id, lease_token)
+                except (asyncio.CancelledError, LeaseLostError):
+                    raise
+                except Exception as exc:
+                    if span is not None:
+                        from opentelemetry.trace import StatusCode
+                        span.set_status(StatusCode.ERROR)
+                    self._fail_job(job_id, exc)
+
+        execution = asyncio.create_task(invoke())
+        monitor = asyncio.create_task(self._heartbeat(fence))
+        try:
+            done, _ = await asyncio.wait((execution, monitor), return_when=asyncio.FIRST_COMPLETED)
+            if monitor in done:
+                await monitor
+            await execution
+        finally:
+            if not execution.done():
+                execution.cancel()
+            # Keep heartbeating during owned-IO drain on ordinary shutdown. If
+            # authority was lost, all subsequent writes remain fenced out.
+            await asyncio.gather(execution, return_exceptions=True)
+            monitor.cancel()
+            try:
+                self.db.execute(
+                    """UPDATE knowledge_ingestion_jobs SET heartbeat_at=?
+                       WHERE id=? AND status='RUNNING' AND worker_id=? AND lease_token=?""",
+                    ((self.db.current_time() - timedelta(seconds=self.lease_seconds + 1)).isoformat(),
+                     job_id, self.worker_id, lease_token),
+                )
+            finally:
+                await asyncio.gather(monitor, return_exceptions=True)
+
+    async def _ingest_job(self, job_id: str, lease_token: str) -> None:
         job = self.db.fetch_one("SELECT * FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
         if not job:
             return
+        billing_context = self._ingestion_principal(job)
         version = self.db.fetch_one(
             """SELECT v.*, d.display_name, d.id AS document_id, d.knowledge_base_id
                FROM knowledge_document_versions v
@@ -657,28 +1052,38 @@ class KnowledgeService:
             document_version_id=job["document_version_id"],
             ingestion_job_id=job_id,
         )
-        content = await asyncio.to_thread(
+        content = await self._owned_io(
             self.storage.get_content,
             version["object_key"],
             version.get("object_version_id"),
         )
         digest = hashlib.sha256(content).hexdigest()
+        if len(content) != version['expected_size_bytes']:
+            raise KnowledgeValidationError('Stored document size does not match the upload declaration')
         if digest != version.get("expected_sha256"):
             raise KnowledgeValidationError("Document SHA-256 does not match the upload declaration")
+        self._set_job_stage(job_id, "SECURITY_SCAN")
+        from packages.operations.telemetry import operation
+        with operation('knowledge.scan'):
+            await self._owned_io(
+                self.content_scanner.scan,
+                content,
+                object_name=f"knowledge/{version['id']}",
+            )
         self._set_job_stage(job_id, "PARSING")
-        blocks = await asyncio.to_thread(
-            self.parser.parse, content, version["content_type"], version["display_name"]
-        )
-        chunks = self.chunker.chunk(blocks)
+        with operation('knowledge.parse'):
+            chunks = await self.parser.parse(content, version["content_type"], version["display_name"])
         if not chunks:
             raise KnowledgeValidationError("Document produced no indexable chunks")
         self._set_job_stage(job_id, "EMBEDDING")
         vectors: List[List[float]] = []
         for start in range(0, len(chunks), 64):
+            billing_context = self._ingestion_principal(job)
             vectors.extend(
                 await asyncio.to_thread(
-                    self.embedding.embed_documents,
+                    metered_embed, self.db, self.embedding,
                     [chunk.text for chunk in chunks[start : start + 64]],
+                    billing_context, purpose="document_embedding", resource_id=job_id,
                 )
             )
         if len(vectors) != len(chunks):
@@ -708,42 +1113,53 @@ class KnowledgeService:
                     created_at,
                 )
             )
-        indexed_at = utc_now()
-        revision = self._commit_ingestion(
-            job,
-            version,
-            rows,
-            digest,
-            indexed_at,
-            len(chunks),
-            lease_token,
-            context,
-        )
-        self._append_event(
-            context,
-            "knowledge.ingestion.completed",
-            {
-                "job_id": job_id,
-                "chunk_count": len(chunks),
-                "knowledge_base_revision_id": revision["id"],
-                "index_hash": revision["index_hash"],
-            },
-            knowledge_base_id=job["knowledge_base_id"],
-            document_version_id=job["document_version_id"],
-            ingestion_job_id=job_id,
-        )
+        with self.db.transaction():
+            indexed_at = utc_now()
+            revision = self._commit_ingestion(
+                job,
+                version,
+                rows,
+                digest,
+                indexed_at,
+                len(chunks),
+                lease_token,
+                context,
+            )
+            self._append_event(
+                context,
+                "knowledge.ingestion.completed",
+                {
+                    "job_id": job_id,
+                    "chunk_count": len(chunks),
+                    "knowledge_base_revision_id": revision["id"],
+                    "index_hash": revision["index_hash"],
+                },
+                knowledge_base_id=job["knowledge_base_id"],
+                document_version_id=job["document_version_id"],
+                ingestion_job_id=job_id,
+            )
 
     def _claim_job(self, job_id: str, lease_token: str) -> bool:
-        now = utc_now()
-        with self.db.lock:
-            cursor = self.db.connection.execute(
-                """UPDATE knowledge_ingestion_jobs SET status='RUNNING', stage='DOWNLOADING',
-                   attempts=attempts+1, worker_id=?, lease_token=?, heartbeat_at=?, updated_at=?
-                   WHERE id=? AND status='QUEUED'""",
-                (self.worker_id, lease_token, now, now, job_id),
-            )
-            self.db.connection.commit()
-            return cursor.rowcount == 1
+        with self.db.transaction():
+            job = self.db.fetch_one('SELECT * FROM knowledge_ingestion_jobs WHERE id=?', (job_id,))
+            if not job or job['status'] != 'QUEUED' or not self.uploads.running_available(job):
+                return False
+            return self._claim_job_unlocked(job_id, lease_token)
+
+    def _claim_job_unlocked(self, job_id: str, lease_token: str) -> bool:
+        now = self.db.current_time().isoformat()
+        job = self.db.fetch_one("SELECT attempts FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
+        if not job:
+            return False
+        key = getattr(self.queue, "delivery_key", None)
+        if key and key != f"{job_id}:{job['attempts'] + 1}":
+            return False
+        return self.db.execute_count(
+            """UPDATE knowledge_ingestion_jobs SET status='RUNNING', stage='DOWNLOADING',
+               attempts=attempts+1, worker_id=?, lease_token=?, heartbeat_at=?, updated_at=?
+               WHERE id=? AND status='QUEUED' AND attempts=?""",
+            (self.worker_id, lease_token, now, now, job_id, job["attempts"]),
+        ) == 1
 
     def _commit_ingestion(
         self,
@@ -756,10 +1172,10 @@ class KnowledgeService:
         lease_token: str,
         context: TenantContext,
     ) -> Dict[str, Any]:
-        with self.db.lock:
-            connection = self.db.connection
+        with self.db.transaction() as connection:
+            if self.db.dialect == "postgresql":
+                connection.execute("SELECT id FROM knowledge_bases WHERE id=? FOR UPDATE", (job["knowledge_base_id"],))
             try:
-                connection.execute("BEGIN IMMEDIATE")
                 claimed = connection.execute(
                     """SELECT status, worker_id, lease_token FROM knowledge_ingestion_jobs
                        WHERE id=?""",
@@ -800,8 +1216,8 @@ class KnowledgeService:
                            error_message=NULL WHERE id=?""",
                     (
                         digest,
-                        self.parser.version,
-                        self.chunker.version,
+                        self.parser.parser_version,
+                        self.parser.chunker_version,
                         self.embedding.model_revision,
                         indexed_at,
                         version["id"],
@@ -830,31 +1246,27 @@ class KnowledgeService:
                 )
                 if completed.rowcount != 1:
                     raise KnowledgeConflictError("Ingestion job lease was lost during commit")
-                connection.commit()
                 return revision
             except Exception:
-                connection.rollback()
                 raise
 
     def _publish_revision(
         self, knowledge_base_id: str, context: TenantContext
     ) -> Dict[str, Any]:
-        with self.db.lock:
-            connection = self.db.connection
+        with self.db.transaction() as connection:
             try:
-                connection.execute("BEGIN IMMEDIATE")
                 revision = self._publish_revision_in_connection(
                     connection, knowledge_base_id, context
                 )
-                connection.commit()
                 return revision
             except Exception:
-                connection.rollback()
                 raise
 
     def _publish_revision_in_connection(
         self, connection: Any, knowledge_base_id: str, context: TenantContext
     ) -> Dict[str, Any]:
+        if self.db.dialect == "postgresql":
+            connection.execute("SELECT id FROM knowledge_bases WHERE id=? FOR UPDATE", (knowledge_base_id,))
         rows = connection.execute(
             """SELECT v.id, v.content_sha256, v.parser_version, v.chunker_version,
                       v.embedding_revision_id
@@ -1016,14 +1428,14 @@ class KnowledgeService:
             )
 
     def _fail_job(self, job_id: str, exc: Exception) -> None:
-        job = self.db.fetch_one("SELECT * FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
-        if not job or job["status"] != "RUNNING" or job.get("worker_id") != self.worker_id:
-            return
-        code = getattr(exc, "code", "KNOWLEDGE_INGESTION_FAILED")
-        message = str(exc)[:2000]
-        now = utc_now()
-        with self.db.lock:
-            cursor = self.db.connection.execute(
+        with self.db.transaction():
+            job = self.db.fetch_one("SELECT * FROM knowledge_ingestion_jobs WHERE id=?", (job_id,))
+            if not job or job["status"] != "RUNNING" or job.get("worker_id") != self.worker_id:
+                return
+            code = getattr(exc, "code", "KNOWLEDGE_INGESTION_FAILED")
+            message = redact_text(str(exc))[:2000]
+            now = utc_now()
+            updated = self.db.execute_count(
                 """UPDATE knowledge_ingestion_jobs SET status='FAILED', stage='FAILED',
                    error_code=?, error_message=?, heartbeat_at=?, updated_at=?
                    WHERE id=? AND status='RUNNING' AND worker_id=? AND lease_token=?""",
@@ -1037,40 +1449,39 @@ class KnowledgeService:
                     job.get("lease_token"),
                 ),
             )
-            self.db.connection.commit()
-        if cursor.rowcount != 1:
-            return
-        self.db.execute(
-            """UPDATE knowledge_document_versions SET status='FAILED', error_code=?,
-               error_message=? WHERE id=? AND NOT EXISTS (
-                 SELECT 1 FROM knowledge_revision_documents rd
-                 WHERE rd.document_version_id=knowledge_document_versions.id
-               )""",
-            (code, message, job["document_version_id"]),
-        )
-        version = self.db.fetch_one(
-            "SELECT document_id FROM knowledge_document_versions WHERE id=?",
-            (job["document_version_id"],),
-        )
-        if version:
+            if updated != 1:
+                return
             self.db.execute(
-                "UPDATE knowledge_documents SET status='FAILED', updated_at=? WHERE id=? AND current_version_id IS NULL",
-                (now, version["document_id"]),
+                """UPDATE knowledge_document_versions SET status='FAILED', error_code=?,
+                   error_message=? WHERE id=? AND NOT EXISTS (
+                     SELECT 1 FROM knowledge_revision_documents rd
+                     WHERE rd.document_version_id=knowledge_document_versions.id
+                   )""",
+                (code, message, job["document_version_id"]),
             )
-        context = TenantContext(
-            tenant_id=job["tenant_id"],
-            project_id=job["project_id"],
-            user_id="knowledge_worker",
-            roles=["system"],
-        )
-        self._append_event(
-            context,
-            "knowledge.ingestion.failed",
-            {"job_id": job_id, "code": code, "message": message},
-            knowledge_base_id=job["knowledge_base_id"],
-            document_version_id=job["document_version_id"],
-            ingestion_job_id=job_id,
-        )
+            version = self.db.fetch_one(
+                "SELECT document_id FROM knowledge_document_versions WHERE id=?",
+                (job["document_version_id"],),
+            )
+            if version:
+                self.db.execute(
+                    "UPDATE knowledge_documents SET status='FAILED', updated_at=? WHERE id=? AND current_version_id IS NULL",
+                    (now, version["document_id"]),
+                )
+            context = TenantContext(
+                tenant_id=job["tenant_id"],
+                project_id=job["project_id"],
+                user_id="knowledge_worker",
+                roles=["system"],
+            )
+            self._append_event(
+                context,
+                "knowledge.ingestion.failed",
+                {"job_id": job_id, "code": code, "message": message},
+                knowledge_base_id=job["knowledge_base_id"],
+                document_version_id=job["document_version_id"],
+                ingestion_job_id=job_id,
+            )
 
     def _set_job_stage(self, job_id: str, stage: str) -> None:
         now = utc_now()
@@ -1189,10 +1600,7 @@ class KnowledgeService:
 
     @staticmethod
     def _document_allowed(document: Dict[str, Any], context: TenantContext) -> bool:
-        if document.get("visibility") == "private" and document.get("created_by") != context.user_id:
-            return False
-        allowed_roles = document.get("allowed_roles") or []
-        return not allowed_roles or bool(set(allowed_roles).intersection(context.roles)) or "owner" in context.roles
+        return document_allowed(document, context)
 
     @staticmethod
     def _cosine(left: List[float], right: List[float]) -> float:
@@ -1213,6 +1621,10 @@ class KnowledgeService:
         latency_ms: int,
         run_id: Optional[str],
     ) -> str:
+        # Must commit before references leave the retrieval boundary, including
+        # Coding tools, failed attempts and later turns in this same workspace.
+        if run_id:
+            ResourceAccess(self.db).acquire_sources(run_id, context, hits)
         audit_id = _new_id("kaudit")
         self.db.execute(
             """INSERT INTO knowledge_retrieval_audits
@@ -1250,8 +1662,8 @@ class KnowledgeService:
         self.db.execute(
             """INSERT INTO knowledge_events
                (id, tenant_id, project_id, knowledge_base_id, document_version_id,
-                ingestion_job_id, type, payload_json, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                ingestion_job_id, type, payload_json, created_at, actor_user_id)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
             (
                 _new_id("kevt"),
                 context.tenant_id,
@@ -1262,5 +1674,6 @@ class KnowledgeService:
                 event_type,
                 self.db.encode(payload),
                 utc_now(),
+                context.user_id,
             ),
         )

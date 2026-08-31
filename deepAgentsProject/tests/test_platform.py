@@ -2,10 +2,13 @@ from __future__ import annotations
 
 import time
 
+import pytest
+
 from fastapi.testclient import TestClient
 
 from apps.platform_api.main import create_app
 from packages.runtime.model_gateway import DeterministicModelGateway
+from packages.sandbox.fake_provider import FakeSandboxProvider
 
 
 class RecordingModelGateway(DeterministicModelGateway):
@@ -36,6 +39,7 @@ def client_for(tmp_path):
             seed=True,
             model_gateway=DeterministicModelGateway(),
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     )
 
@@ -102,6 +106,7 @@ def test_untrusted_deployment_rejects_caller_supplied_identity_headers(tmp_path)
             load_env=False,
             trust_identity_headers=False,
             allow_demo_identity=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         assert client.get("/api/v1/context").status_code == 401
@@ -120,6 +125,7 @@ def test_trusted_identity_adapter_requires_complete_principal(tmp_path):
             load_env=False,
             trust_identity_headers=True,
             allow_demo_identity=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         assert (
@@ -148,6 +154,7 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
             seed=True,
             model_gateway=DeterministicModelGateway(),
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         health = client.get("/health").json()
@@ -181,6 +188,7 @@ def test_builtin_plugins_are_loaded_pinned_and_idempotent(tmp_path):
             seed=True,
             model_gateway=DeterministicModelGateway(),
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         assert {
@@ -274,20 +282,22 @@ def test_run_is_idempotent_stream_is_sequenced_and_usage_is_recorded(tmp_path):
             "graph.started",
             "graph.node.started",
             "graph.node.completed",
-            "graph.subgraph.started",
-            "graph.subgraph.completed",
             "model.started",
             "model.reasoning.started",
             "model.reasoning.delta",
             "model.reasoning.completed",
             "rag.agent.routed",
-            "subagent.completed",
+            "runtime.execution.bound",
+            "runtime.capability.unavailable",
             "artifact.created",
             "graph.completed",
             "run.completed",
         }.issubset(
             {event["type"] for event in events}
         )
+        assert not any(event["type"].startswith("subagent.") for event in events)
+        assert not any(event["type"] == "todo.updated" for event in events)
+        assert run["usage"]["subagent_calls"] == 0
         route = next(event for event in events if event["type"] == "rag.agent.routed")
         assert route["payload"]["route"] == "model_only"
         loaded_skills = [event for event in events if event["type"] == "skill.loaded"]
@@ -333,6 +343,7 @@ def test_second_run_sends_prior_successful_turns_to_model(tmp_path):
             seed=True,
             model_gateway=gateway,
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         deployment = reference_deployment(client)
@@ -386,6 +397,17 @@ def test_hitl_checkpoint_decision_and_new_attempt_resume(tmp_path):
         assert first.status_code == 200
         assert repeated.status_code == 200
 
+        changed = client.post(
+            f"/api/v1/interrupts/{interrupt['id']}/decisions", headers=decision_headers,
+            json={"decisions": [{**payload["decisions"][0], "type": "reject"}]},
+        )
+        assert changed.status_code == 409
+        changed_version = client.post(
+            f"/api/v1/interrupts/{interrupt['id']}/decisions",
+            headers={**decision_headers, "If-Match": "999"}, json=payload,
+        )
+        assert changed_version.status_code == 409
+
         finished = wait_for_status(client, created["id"], {"SUCCEEDED"})
         assert len(finished["attempts"]) == 2
         events = client.get(f"/api/v1/runs/{created['id']}/events").json()["items"]
@@ -396,6 +418,43 @@ def test_hitl_checkpoint_decision_and_new_attempt_resume(tmp_path):
         assert "graph.resumed" in types
         assert "run.resumed" in types
         assert types[-1] == "run.completed"
+        write = next(event for event in events if event["type"] == "tool.completed" and event["payload"]["tool_name"] == "artifact_write")
+        artifact = client.app.state.services.db.fetch_one("SELECT * FROM artifacts WHERE id=?", (write["payload"]["artifact_id"],))
+        assert artifact["name"] == "release-plan.md"
+        assert artifact["content_hash"] == write["payload"]["content_hash"]
+        assert write["payload"]["storage"] == "platform_artifact"
+        assert types.index("artifact.created") < types.index("tool.completed")
+
+
+@pytest.mark.parametrize("failure_stage", ["provider", "artifact_persistence"])
+def test_failed_approved_write_cannot_emit_a_completed_tool(tmp_path, monkeypatch, failure_stage):
+    gateway = RecordingModelGateway()
+    app = create_app(str(tmp_path / "failed-artifact.db"), seed=True, model_gateway=gateway,
+                     load_env=False, sandbox_providers=[FakeSandboxProvider()])
+    with TestClient(app) as client:
+        created, interrupt = create_run_waiting_for_approval(client)
+        if failure_stage == "provider":
+            async def fail_model(*args, **kwargs):
+                raise RuntimeError("Controlled provider failure")
+            monkeypatch.setattr(gateway, "complete", fail_model)
+        else:
+            execute = app.state.services.db.execute
+
+            def fail_artifact(sql, params=()):
+                if "INSERT INTO artifacts" in sql:
+                    raise RuntimeError("Controlled artifact persistence failure")
+                return execute(sql, params)
+
+            monkeypatch.setattr(app.state.services.db, "execute", fail_artifact)
+        approved = client.post(f"/api/v1/interrupts/{interrupt['id']}/decisions",
+            headers={"If-Match": str(interrupt["version"]), "Idempotency-Key": "approved-write-failure"},
+            json={"decisions": [{"action_id": interrupt["actions"][0]["action_id"], "type": "approve"}]})
+        assert approved.status_code == 200, approved.text
+        failed = wait_for_status(client, created["id"], {"FAILED"})
+        events = client.get(f"/api/v1/runs/{created['id']}/events").json()["items"]
+        assert not any(event["type"] == "tool.completed" for event in events)
+        assert not client.get(f"/api/v1/runs/{created['id']}/artifacts").json()["items"]
+        assert failed["usage"]["model_calls"] == 1
 
 
 def test_rejecting_approval_cancels_without_creating_an_attempt(tmp_path):

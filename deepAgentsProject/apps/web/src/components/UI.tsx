@@ -17,7 +17,7 @@ export function PageHeader({ eyebrow, title, description, actions }: { eyebrow?:
 
 export function StatusPill({ status }: { status: string }) {
   const normalized = status.toLowerCase()
-  const icon = normalized.includes('succeed') || normalized === 'active' || normalized === 'healthy'
+  const icon = normalized.includes('succeed') || normalized === 'active' || normalized === 'healthy' || normalized === 'applied'
     ? <CheckCircle2 size={13} />
     : normalized.includes('fail') || normalized.includes('cancel') || normalized === 'unhealthy'
       ? <XCircle size={13} />
@@ -69,4 +69,3 @@ export function shortId(id: string, length = 8) {
   const parts = id.split('_')
   return parts.length > 1 ? `${parts[0]}_${parts[1].slice(0, length)}` : id.slice(0, length)
 }
-

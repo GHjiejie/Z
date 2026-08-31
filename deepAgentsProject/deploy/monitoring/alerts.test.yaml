@@ -1,0 +1,63 @@
+rule_files: [alerts.yaml]
+evaluation_interval: 1m
+tests:
+  - name: target outage fires and recovery clears
+    interval: 1m
+    input_series:
+      - series: up{job="deepagent-api",instance="api",cluster="test"}
+        values: 0x3 1x5
+    promql_expr_test:
+      - {expr: 'count(ALERTS{alertname="DeepAgentTargetDown",alertstate="firing"})', eval_time: 3m, exp_samples: [{labels: '{}', value: 1}]}
+      - {expr: 'ALERTS{alertname="DeepAgentTargetDown",alertstate="firing"}', eval_time: 5m, exp_samples: []}
+  - name: stale observation does not invent a healthy worker
+    interval: 1m
+    input_series:
+      - series: deepagent_observation_fresh{instance="api",cluster="test"}
+        values: 0x5
+    promql_expr_test:
+      - {expr: 'count(ALERTS{alertname="DeepAgentObservationStale",alertstate="firing"})', eval_time: 2m, exp_samples: [{labels: '{}', value: 1}]}
+  - name: cluster worker gauge is not summed per scrape replica
+    interval: 1m
+    input_series:
+      - series: deepagent_workers_online{kind="runtime",instance="api-1",cluster="test"}
+        values: 0x8
+      - series: deepagent_workers_online{kind="runtime",instance="api-2",cluster="test"}
+        values: 0x8
+    promql_expr_test:
+      - {expr: 'count(ALERTS{alertname="DeepAgentWorkersUnavailable",alertstate="firing"})', eval_time: 2m, exp_samples: [{labels: '{}', value: 1}]}
+  - name: queue and cancellation age are actionable
+    interval: 1m
+    input_series:
+      - series: deepagent_queue_oldest_seconds{kind="runtime",instance="api",cluster="test"}
+        values: 301x8
+      - series: deepagent_queue_oldest_seconds{kind="knowledge",instance="api",cluster="test"}
+        values: 901x8
+      - series: deepagent_cancellation_oldest_seconds{instance="api",cluster="test"}
+        values: 301x8
+      - series: deepagent_cancellation_oldest_seconds{instance="worker",cluster="test"}
+        values: 301x8
+    promql_expr_test:
+      - {expr: 'count(ALERTS{alertname="DeepAgentQueueStalled",alertstate="firing"})', eval_time: 3m, exp_samples: [{labels: '{}', value: 2}]}
+      - {expr: 'count(ALERTS{alertname="DeepAgentCancellationStalled",alertstate="firing"})', eval_time: 3m, exp_samples: [{labels: '{}', value: 1}]}
+  - name: HTTP errors exclude low volume noise
+    interval: 1m
+    input_series:
+      - series: deepagent_http_requests_total{status="500",instance="api",cluster="test"}
+        values: 0+10x15
+      - series: deepagent_http_requests_total{status="200",instance="api",cluster="test"}
+        values: 0+90x15
+      - series: deepagent_http_requests_total{status="500",instance="api",cluster="idle"}
+        values: 0 1x14
+    promql_expr_test:
+      - {expr: 'count(ALERTS{alertname="DeepAgentHttpErrors",alertstate="firing",cluster="test"})', eval_time: 10m, exp_samples: [{labels: '{}', value: 1}]}
+      - {expr: 'ALERTS{alertname="DeepAgentHttpErrors",alertstate="firing",cluster="idle"}', eval_time: 10m, exp_samples: []}
+  - name: failed exports and bounded queue losses are visible
+    interval: 1m
+    input_series:
+      - series: deepagent_trace_export_batches_total{outcome="error",instance="worker",cluster="test"}
+        values: 0+1x8
+      - series: deepagent_trace_queue_dropped_total{instance="worker",cluster="test"}
+        values: 0+1x8
+    promql_expr_test:
+      - {expr: 'count(ALERTS{alertname="DeepAgentTraceExportFailing",alertstate="firing"})', eval_time: 4m, exp_samples: [{labels: '{}', value: 1}]}
+      - {expr: 'count(ALERTS{alertname="DeepAgentTraceQueueDropping",alertstate="firing"})', eval_time: 4m, exp_samples: [{labels: '{}', value: 1}]}

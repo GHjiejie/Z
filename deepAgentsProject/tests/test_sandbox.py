@@ -12,6 +12,7 @@ from packages.adapters.harness.deepagents.governed_backend import GovernedSandbo
 from packages.sandbox.docker_provider import DockerSandboxProvider
 from packages.sandbox.policy import SandboxPolicy
 from packages.sandbox.ports import SandboxProvisionRequest
+from test_runtime_concurrency import runtime, new_thread
 
 
 def test_path_and_command_policy_rejects_escape_and_delivery_side_effects():
@@ -81,7 +82,13 @@ def _source_archive(*, empty: bool = False) -> bytes:
 
 
 @pytest.mark.asyncio
-async def test_docker_sandbox_is_non_root_secret_free_offline_and_bounded(monkeypatch):
+async def test_docker_sandbox_is_non_root_secret_free_offline_and_bounded(monkeypatch, runtime):
+    from packages.domain.models import RunCreate
+
+    _, services, context, *_ = runtime
+    database = services.db
+    thread = new_thread(runtime)
+    run = await services.runs.create_run(thread['id'], RunCreate(input='Inspect sandbox isolation'), context)
     provider = DockerSandboxProvider(
         image="deepagent/coding-runtime:0.1.0",
         dockerfile_root="docker/coding-runtime",
@@ -147,9 +154,9 @@ async def test_docker_sandbox_is_non_root_secret_free_offline_and_bounded(monkey
             policy=SandboxPolicy(
                 workspace_root="/workspace/repo", protected_paths=()
             ),
-            db=None,
+            db=database,
             events=NoopEvents(),
-            run={"id": "run", "tenant_id": "tenant", "project_id": "project"},
+            run=run,
             workspace={"id": "workspace"},
         )
         with pytest.raises(SandboxPolicyError):

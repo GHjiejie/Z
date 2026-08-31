@@ -3,8 +3,12 @@ from __future__ import annotations
 import json
 import sqlite3
 import threading
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
+
+from packages.persistence.fencing import current_write_fence, validate_write_fence
 
 
 SCHEMA = """
@@ -84,6 +88,38 @@ CREATE TABLE IF NOT EXISTS auth_login_limits (
   blocked_until TEXT,
   updated_at TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS task_queue (
+  id TEXT PRIMARY KEY,
+  queue_name TEXT NOT NULL,
+  payload_json TEXT NOT NULL,
+  dedupe_key TEXT NOT NULL,
+  active_key TEXT UNIQUE,
+  status TEXT NOT NULL,
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0,
+  max_attempts INTEGER NOT NULL DEFAULT 3,
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_task_queue_claim
+  ON task_queue(queue_name, status, available_at, priority DESC, created_at);
+
+CREATE TABLE IF NOT EXISTS worker_nodes (
+  id TEXT PRIMARY KEY,
+  worker_type TEXT NOT NULL,
+  status TEXT NOT NULL,
+  started_at TEXT NOT NULL,
+  heartbeat_at TEXT NOT NULL,
+  stopped_at TEXT,
+  metadata_json TEXT NOT NULL DEFAULT '{}'
+);
+CREATE INDEX IF NOT EXISTS idx_worker_nodes_health
+  ON worker_nodes(status, heartbeat_at DESC, worker_type);
 
 CREATE TABLE IF NOT EXISTS agents (
   id TEXT PRIMARY KEY,
@@ -260,24 +296,6 @@ CREATE TABLE IF NOT EXISTS coding_workspaces (
 CREATE INDEX IF NOT EXISTS idx_coding_workspaces_scope
   ON coding_workspaces(tenant_id, project_id, status, updated_at DESC);
 
-CREATE TABLE IF NOT EXISTS workspace_snapshots (
-  id TEXT PRIMARY KEY,
-  tenant_id TEXT NOT NULL,
-  project_id TEXT NOT NULL,
-  run_id TEXT NOT NULL REFERENCES runs(id),
-  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
-  base_commit_sha TEXT NOT NULL,
-  workspace_generation INTEGER NOT NULL,
-  plan_hash TEXT NOT NULL,
-  reason TEXT NOT NULL,
-  archive_path TEXT NOT NULL,
-  archive_sha256 TEXT NOT NULL,
-  size_bytes INTEGER NOT NULL,
-  created_at TEXT NOT NULL
-);
-CREATE INDEX IF NOT EXISTS idx_workspace_snapshots_workspace
-  ON workspace_snapshots(workspace_id, workspace_generation DESC, created_at DESC);
-
 CREATE TABLE IF NOT EXISTS runs (
   id TEXT PRIMARY KEY,
   tenant_id TEXT NOT NULL,
@@ -303,6 +321,24 @@ CREATE TABLE IF NOT EXISTS runs (
   updated_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_runs_scope ON runs(tenant_id, project_id, created_at DESC);
+
+CREATE TABLE IF NOT EXISTS workspace_snapshots (
+  id TEXT PRIMARY KEY,
+  tenant_id TEXT NOT NULL,
+  project_id TEXT NOT NULL,
+  run_id TEXT NOT NULL REFERENCES runs(id),
+  workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+  base_commit_sha TEXT NOT NULL,
+  workspace_generation INTEGER NOT NULL,
+  plan_hash TEXT NOT NULL,
+  reason TEXT NOT NULL,
+  archive_path TEXT NOT NULL,
+  archive_sha256 TEXT NOT NULL,
+  size_bytes INTEGER NOT NULL,
+  created_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_workspace_snapshots_workspace
+  ON workspace_snapshots(workspace_id, workspace_generation DESC, created_at DESC);
 
 CREATE TABLE IF NOT EXISTS run_attempts (
   id TEXT PRIMARY KEY,
@@ -672,6 +708,7 @@ CREATE INDEX IF NOT EXISTS idx_knowledge_events_scope
 
 
 JSON_COLUMNS = {
+    "limits_json": "limits",
     "draft_json": "draft",
     "spec_json": "spec",
     "plan_json": "plan",
@@ -707,7 +744,15 @@ JSON_COLUMNS = {
     "requirements_json": "requirements",
     "roles_json": "roles",
     "details_json": "details",
+    "cases_json": "cases",
+    "evidence_json": "evidence",
+    "model_identity_json": "model_identity",
+    "limits_json": "limits",
+    "requested_roles_json": "requested_roles",
+    "runtime_binding_json": "runtime_binding",
 }
+
+LATEST_SCHEMA_VERSION = 21
 
 
 class Database:
@@ -722,8 +767,13 @@ class Database:
         self.connection = sqlite3.connect(path, check_same_thread=False)
         self.connection.row_factory = sqlite3.Row
         self.lock = threading.RLock()
+        self._transaction_state = threading.local()
+        self.dialect = "sqlite"
 
-    def initialize(self) -> None:
+    def initialize(self, *, auto_migrate: bool = True) -> None:
+        if not auto_migrate:
+            self.assert_schema_current()
+            return
         with self.lock:
             self.connection.executescript(SCHEMA)
             self._ensure_column("knowledge_base_revisions", "deprecated_at", "TEXT")
@@ -766,26 +816,52 @@ class Database:
             self._run_migrations()
             self.connection.commit()
 
+    def schema_versions(self) -> list[int]:
+        try:
+            rows = self.fetch_all("SELECT version FROM schema_migrations ORDER BY version")
+        except sqlite3.DatabaseError:
+            return []
+        return [int(row["version"]) for row in rows]
+
+    def assert_schema_current(self) -> None:
+        versions = self.schema_versions()
+        if not versions or versions[-1] != LATEST_SCHEMA_VERSION:
+            current = versions[-1] if versions else 0
+            raise RuntimeError(
+                f"Database schema is at version {current}; run the migration job for version {LATEST_SCHEMA_VERSION}"
+            )
+
     def close(self) -> None:
         with self.lock:
             self.connection.close()
 
     def execute(self, sql: str, params: Iterable[Any] = ()) -> None:
+        if current_write_fence() is not None:
+            with self.transaction() as connection:
+                connection.execute(sql, tuple(params))
+            return
         with self.lock:
             self.connection.execute(sql, tuple(params))
-            self.connection.commit()
+            self._commit_if_outside_transaction()
 
     def execute_count(self, sql: str, params: Iterable[Any] = ()) -> int:
         """Execute one write and return its affected-row count."""
+        if current_write_fence() is not None:
+            with self.transaction() as connection:
+                return connection.execute(sql, tuple(params)).rowcount
         with self.lock:
             cursor = self.connection.execute(sql, tuple(params))
-            self.connection.commit()
+            self._commit_if_outside_transaction()
             return cursor.rowcount
 
     def execute_many(self, sql: str, rows: Iterable[Iterable[Any]]) -> None:
+        if current_write_fence() is not None:
+            with self.transaction() as connection:
+                connection.executemany(sql, rows)
+            return
         with self.lock:
             self.connection.executemany(sql, rows)
-            self.connection.commit()
+            self._commit_if_outside_transaction()
 
     def fetch_one(self, sql: str, params: Iterable[Any] = ()) -> Optional[Dict[str, Any]]:
         with self.lock:
@@ -797,8 +873,45 @@ class Database:
             rows = self.connection.execute(sql, tuple(params)).fetchall()
         return [self._decode(row) for row in rows]
 
+    @property
+    def in_transaction(self):
+        return bool(getattr(self._transaction_state, "depth", 0))
+
+    @contextmanager
     def transaction(self):
-        return self.connection
+        """Run a unit of work atomically, nesting safely within one thread."""
+
+        with self.lock:
+            depth = int(getattr(self._transaction_state, "depth", 0))
+            if depth:
+                self._transaction_state.depth = depth + 1
+                try:
+                    yield self.connection
+                finally:
+                    self._transaction_state.depth = depth
+                return
+            self.connection.execute("BEGIN IMMEDIATE")
+            self._transaction_state.depth = 1
+            try:
+                validate_write_fence(self.connection, self.dialect)
+                yield self.connection
+                self.connection.commit()
+            except Exception:
+                self.connection.rollback()
+                raise
+            finally:
+                self._transaction_state.depth = 0
+
+    def current_time(self) -> datetime:
+        return datetime.now(timezone.utc)
+
+    def assert_execution_fence(self) -> None:
+        with self.transaction():
+            pass
+
+    def _commit_if_outside_transaction(self) -> None:
+        if not int(getattr(self._transaction_state, "depth", 0)):
+            self.connection.commit()
 
     def _ensure_column(self, table: str, column: str, declaration: str) -> None:
         columns = {
@@ -819,6 +932,25 @@ class Database:
         migrations = (
             (1, "record-existing-platform-schema", self._migration_platform_baseline),
             (2, "auth-user-governance", self._migration_auth_user_governance),
+            (3, "durable-task-queue", self._migration_durable_task_queue),
+            (4, "worker-heartbeats", self._migration_worker_heartbeats),
+            (5, "sandbox-execution-lease-authority", self._migration_sandbox_lease_authority),
+            (6, "durable-model-budget", self._migration_model_budget),
+            (7, "evaluation-release-gates", self._migration_evaluation_gates),
+            (8, "coding-consistent-recovery", self._migration_coding_recovery),
+            (9, "unified-metering-and-quotas", self._migration_billing),
+            (10, "thread-access-and-source-provenance", self._migration_thread_access),
+            (11, "routing-ownership-and-atomic-review", self._migration_atomic_review),
+            (12, "complete-metering-attribution", self._migration_metering_attribution),
+            (13, "immutable-model-bindings", self._migration_model_bindings),
+            (14, "knowledge-metadata-access", self._migration_knowledge_metadata_access),
+            (15, "governed-production-releases", self._migration_production_releases),
+            (16, "outstanding-work-admission-indexes", self._migration_admission_indexes),
+            (17, "governed-production-routing", self._migration_production_routing),
+            (18, "durable-cancellation-finalization", self._migration_cancellation_finalization),
+            (19, "durable-trace-origins", self._migration_trace_origins),
+            (20, "bounded-knowledge-upload-pipeline", self._migration_upload_pipeline),
+            (21, "repository-object-materializations", self._migration_repository_objects),
         )
         for version, name, migration in migrations:
             if version in applied:
@@ -828,6 +960,71 @@ class Database:
                 "INSERT INTO schema_migrations(version, name, applied_at) VALUES(?,?,datetime('now'))",
                 (version, name),
             )
+
+    def _migration_repository_objects(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS repository_objects (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                archive_sha256 TEXT NOT NULL, size_bytes INTEGER NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('UPLOADING','READY','UNCERTAIN')),
+                archive_path TEXT, owner_token TEXT NOT NULL, created_by TEXT NOT NULL,
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(tenant_id,project_id,archive_sha256)
+            );
+            CREATE INDEX IF NOT EXISTS idx_repository_objects_scope
+                ON repository_objects(tenant_id,project_id,status);
+        """)
+
+    def _migration_upload_pipeline(self) -> None:
+        self._ensure_column('knowledge_document_versions', 'upload_expires_at', 'TEXT')
+        self._ensure_column('knowledge_document_versions', 'upload_request_hash', 'TEXT')
+        # Give legacy pending grants one bounded migration window, never renew it
+        # on application startup. Already accepted jobs retain their pinned source.
+        self.connection.execute("""UPDATE knowledge_document_versions SET upload_expires_at=?
+            WHERE upload_expires_at IS NULL AND status='PENDING_UPLOAD'""",
+            ((datetime.now(timezone.utc) + timedelta(days=1)).isoformat(),))
+        self.connection.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_upload_intent_expiry
+                ON knowledge_document_versions(upload_expires_at,id) WHERE status='PENDING_UPLOAD';
+            CREATE INDEX IF NOT EXISTS idx_upload_retained_scope
+                ON knowledge_document_versions(tenant_id,project_id,document_id);
+            CREATE INDEX IF NOT EXISTS idx_ingestion_running_capacity
+                ON knowledge_ingestion_jobs(tenant_id,project_id,requested_by) WHERE status='RUNNING';
+        """)
+
+    def _migration_production_routing(self) -> None:
+        # Existing production profiles retain their data, not inferred approval.
+        self._ensure_column("intent_router_revisions", "approval_state", "TEXT NOT NULL DEFAULT 'LEGACY'")
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS routing_change_requests (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                environment TEXT NOT NULL CHECK(environment='production'), requested_by TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL, snapshot_hash TEXT NOT NULL,
+                status TEXT NOT NULL CHECK(status IN ('PENDING','APPLIED','REJECTED','CANCELLED')),
+                version INTEGER NOT NULL DEFAULT 1, router_revision_id TEXT,
+                decided_by TEXT, decision_reason TEXT, decided_at TEXT,
+                created_at TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_routing_changes_scope
+                ON routing_change_requests(tenant_id,project_id,created_at,id);
+        """)
+
+    def _migration_admission_indexes(self) -> None:
+        # Keep quota and probe scans bounded by outstanding work, not all
+        # retained conversations or historical ingestion jobs.
+        self.connection.executescript("""
+            CREATE INDEX IF NOT EXISTS idx_runs_outstanding_admission
+                ON runs(tenant_id,project_id,principal_user_id,status)
+                WHERE status NOT IN ('CANCELLED','TIMED_OUT','FAILED','FAILED_BUDGET','SUCCEEDED');
+            CREATE INDEX IF NOT EXISTS idx_runs_pending_health
+                ON runs(current_attempt_id)
+                WHERE status IN ('CREATED','QUEUED','ORPHANED');
+            CREATE INDEX IF NOT EXISTS idx_ingestion_outstanding_admission
+                ON knowledge_ingestion_jobs(tenant_id,project_id,requested_by,status,updated_at)
+                WHERE status IN ('QUEUED','RUNNING');
+            CREATE INDEX IF NOT EXISTS idx_ingestion_pending_health
+                ON knowledge_ingestion_jobs(updated_at) WHERE status='QUEUED';
+        """)
 
     def _migration_platform_baseline(self) -> None:
         # Version 1 records the original direct-schema baseline so later changes are
@@ -881,6 +1078,365 @@ class Database:
               ON users(status, locked_until, username);
             """
         )
+
+    def _migration_durable_task_queue(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS task_queue (
+              id TEXT PRIMARY KEY,
+              queue_name TEXT NOT NULL,
+              payload_json TEXT NOT NULL,
+              dedupe_key TEXT NOT NULL,
+              active_key TEXT UNIQUE,
+              status TEXT NOT NULL,
+              priority INTEGER NOT NULL DEFAULT 0,
+              attempts INTEGER NOT NULL DEFAULT 0,
+              max_attempts INTEGER NOT NULL DEFAULT 3,
+              available_at TEXT NOT NULL,
+              lease_owner TEXT,
+              lease_expires_at TEXT,
+              last_error TEXT,
+              created_at TEXT NOT NULL,
+              updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_task_queue_claim
+              ON task_queue(queue_name, status, available_at, priority DESC, created_at);
+            """
+        )
+
+    def _migration_trace_origins(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS run_trace_origins (
+                entity_id TEXT PRIMARY KEY REFERENCES runs(id) ON DELETE CASCADE,
+                trace_id TEXT NOT NULL, parent_span_id TEXT NOT NULL,
+                sampled INTEGER NOT NULL CHECK(sampled IN (0,1)),
+                request_id TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS ingestion_trace_origins (
+                entity_id TEXT PRIMARY KEY REFERENCES knowledge_ingestion_jobs(id) ON DELETE CASCADE,
+                trace_id TEXT NOT NULL, parent_span_id TEXT NOT NULL,
+                sampled INTEGER NOT NULL CHECK(sampled IN (0,1)),
+                request_id TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+        """)
+
+    def _migration_cancellation_finalization(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS run_cancellations (
+                run_id TEXT PRIMARY KEY REFERENCES runs(id),
+                attempt_id TEXT NOT NULL REFERENCES run_attempts(id),
+                workspace_id TEXT REFERENCES coding_workspaces(id),
+                sandbox_instance_id TEXT REFERENCES sandbox_instances(id),
+                workspace_generation INTEGER,
+                status TEXT NOT NULL CHECK(status IN ('PENDING','RUNNING','COMPLETED')),
+                worker_id TEXT, lease_token TEXT, expires_at TEXT,
+                attempts INTEGER NOT NULL DEFAULT 0, available_at TEXT NOT NULL,
+                last_error TEXT, workspace_snapshot_id TEXT REFERENCES workspace_snapshots(id),
+                recovery_point_id TEXT REFERENCES coding_recovery_points(id),
+                created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_run_cancellations_pending
+                ON run_cancellations(status, available_at) WHERE status!='COMPLETED';
+        """)
+        self.connection.execute(
+            ("CREATE OR REPLACE VIEW" if self.dialect == "postgresql" else "CREATE VIEW IF NOT EXISTS")
+            + """ sandbox_cancellation_leases AS
+                SELECT c.sandbox_instance_id AS sandbox_request_id, c.workspace_id,
+                       c.run_id, r.status AS run_status, c.attempt_id,
+                       c.lease_token, c.expires_at, c.status AS finalization_status,
+                       c.workspace_generation
+                FROM run_cancellations c JOIN runs r ON r.id=c.run_id
+                JOIN coding_workspaces w ON w.id=c.workspace_id
+                JOIN run_attempts a ON a.id=c.attempt_id
+                WHERE r.current_attempt_id=c.attempt_id AND r.status='CANCELLING'
+                  AND r.coding_workspace_id=w.id AND a.lease_token IS NULL
+                  AND w.sandbox_instance_id=c.sandbox_instance_id
+                  AND w.workspace_generation=c.workspace_generation"""
+        )
+
+    def _migration_worker_heartbeats(self) -> None:
+        self.connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS worker_nodes (
+              id TEXT PRIMARY KEY,
+              worker_type TEXT NOT NULL,
+              status TEXT NOT NULL,
+              started_at TEXT NOT NULL,
+              heartbeat_at TEXT NOT NULL,
+              stopped_at TEXT,
+              metadata_json TEXT NOT NULL DEFAULT '{}'
+            );
+            CREATE INDEX IF NOT EXISTS idx_worker_nodes_health
+              ON worker_nodes(status, heartbeat_at DESC, worker_type);
+            """
+        )
+
+    def _migration_sandbox_lease_authority(self) -> None:
+        self.connection.execute(
+            ("CREATE OR REPLACE VIEW" if self.dialect == "postgresql" else "CREATE VIEW IF NOT EXISTS")
+            + """ sandbox_execution_leases AS
+               SELECT w.sandbox_instance_id AS sandbox_request_id, w.id AS workspace_id,
+                      r.id AS run_id, r.status AS run_status,
+                      a.id AS attempt_id, a.lease_token, a.expires_at
+               FROM coding_workspaces w JOIN runs r ON r.coding_workspace_id=w.id
+               JOIN run_attempts a ON a.id=r.current_attempt_id
+               WHERE r.status IN ('CREATED','QUEUED','ORPHANED','PREPARING','RUNNING',
+                                  'RESUMING','CANCELLING','WAITING_FOR_APPROVAL','WAITING_FOR_INPUT')"""
+        )
+
+    def _migration_model_budget(self) -> None:
+        columns = {
+            "metering_version": "INTEGER NOT NULL DEFAULT 0",
+            "attempt_id": "TEXT",
+            "billing_status": "TEXT NOT NULL DEFAULT 'ACTUAL'",
+            "reserved_micro_usd": "BIGINT NOT NULL DEFAULT 0",
+            "charged_micro_usd": "BIGINT NOT NULL DEFAULT 0",
+            "pricing_json": "TEXT NOT NULL DEFAULT '{}'",
+            "model_identity_json": "TEXT NOT NULL DEFAULT '{}'",
+        }
+        for column, declaration in columns.items():
+            self._ensure_column("usage_ledger", column, declaration)
+        self.connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_usage_ledger_budget ON usage_ledger(run_id, billing_status)"
+        )
+
+    def _migration_evaluation_gates(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS evaluation_suites (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                name TEXT NOT NULL, cases_json TEXT NOT NULL, suite_hash TEXT NOT NULL,
+                created_by TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_evaluation_suites_scope
+                ON evaluation_suites(tenant_id, project_id, created_at);
+            CREATE TABLE IF NOT EXISTS evaluation_policies (
+                tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                suite_id TEXT NOT NULL REFERENCES evaluation_suites(id),
+                version INTEGER NOT NULL, max_age_seconds INTEGER NOT NULL,
+                updated_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, project_id)
+            );
+            CREATE TABLE IF NOT EXISTS evaluation_results (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                agent_revision_id TEXT NOT NULL REFERENCES agent_revisions(id),
+                sequence INTEGER NOT NULL, plan_hash TEXT NOT NULL,
+                suite_id TEXT NOT NULL REFERENCES evaluation_suites(id), suite_hash TEXT NOT NULL,
+                status TEXT NOT NULL, score DOUBLE PRECISION NOT NULL, production_eligible INTEGER NOT NULL,
+                checks_json TEXT NOT NULL, evidence_json TEXT NOT NULL,
+                result_hash TEXT NOT NULL, created_by TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(agent_revision_id, sequence)
+            );
+            CREATE INDEX IF NOT EXISTS idx_evaluation_results_gate
+                ON evaluation_results(tenant_id, project_id, agent_revision_id, suite_id, sequence);
+            CREATE TABLE IF NOT EXISTS governance_audit_events (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                actor_user_id TEXT NOT NULL, action TEXT NOT NULL, resource_id TEXT NOT NULL,
+                details_json TEXT NOT NULL, created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_governance_audit_scope
+                ON governance_audit_events(tenant_id, project_id, created_at);
+        """)
+        self._ensure_column("agent_deployments", "evaluation_id", "TEXT REFERENCES evaluation_results(id)")
+
+    def _migration_coding_recovery(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS coding_graph_sessions (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                thread_id TEXT NOT NULL REFERENCES threads(id),
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                attempt_id TEXT NOT NULL UNIQUE REFERENCES run_attempts(id),
+                workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+                graph_thread_id TEXT NOT NULL UNIQUE, plan_hash TEXT NOT NULL,
+                source_point_id TEXT, created_at TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS coding_recovery_points (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                run_id TEXT NOT NULL REFERENCES runs(id),
+                session_id TEXT NOT NULL REFERENCES coding_graph_sessions(id),
+                workspace_id TEXT NOT NULL REFERENCES coding_workspaces(id),
+                sequence INTEGER NOT NULL, plan_hash TEXT NOT NULL,
+                workspace_generation INTEGER NOT NULL, base_commit_sha TEXT NOT NULL,
+                workspace_snapshot_id TEXT NOT NULL REFERENCES workspace_snapshots(id),
+                checkpoint_id TEXT NOT NULL, phase TEXT NOT NULL,
+                graph_state TEXT NOT NULL, graph_sha256 TEXT NOT NULL,
+                manifest_hash TEXT NOT NULL, created_at TEXT NOT NULL,
+                UNIQUE(workspace_id, sequence)
+            );
+            CREATE INDEX IF NOT EXISTS idx_coding_recovery_run
+                ON coding_recovery_points(run_id, sequence DESC);
+        """)
+
+    def _migration_billing(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS billing_tenants (tenant_id TEXT PRIMARY KEY);
+            CREATE TABLE IF NOT EXISTS billing_quota_policies (
+                tenant_id TEXT NOT NULL, scope_type TEXT NOT NULL, subject_id TEXT NOT NULL,
+                period TEXT NOT NULL, version INTEGER NOT NULL, enabled INTEGER NOT NULL,
+                limits_json TEXT NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, scope_type, subject_id, period)
+            );
+            CREATE TABLE IF NOT EXISTS billing_price_policies (
+                tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, model_key TEXT NOT NULL,
+                version INTEGER NOT NULL, enabled INTEGER NOT NULL,
+                model_identity_json TEXT NOT NULL, pricing_json TEXT NOT NULL,
+                updated_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id, project_id, model_key)
+            );
+            CREATE TABLE IF NOT EXISTS metered_calls (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                user_id TEXT NOT NULL, run_id TEXT REFERENCES runs(id),
+                purpose TEXT NOT NULL, resource_id TEXT NOT NULL, model_key TEXT NOT NULL,
+                model_identity_json TEXT NOT NULL, pricing_json TEXT NOT NULL,
+                billing_status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+                owner_kind TEXT NOT NULL, owner_id TEXT NOT NULL, owner_token_hash TEXT NOT NULL,
+                reserved_input_tokens BIGINT NOT NULL, reserved_output_tokens BIGINT NOT NULL,
+                reserved_micro_usd BIGINT NOT NULL, charged_input_tokens BIGINT NOT NULL,
+                charged_output_tokens BIGINT NOT NULL, charged_micro_usd BIGINT NOT NULL,
+                input_tokens BIGINT NOT NULL DEFAULT 0, output_tokens BIGINT NOT NULL DEFAULT 0,
+                call_count INTEGER NOT NULL DEFAULT 1, request_fingerprint TEXT NOT NULL,
+                admitted_at TEXT NOT NULL, day_key TEXT NOT NULL, month_key TEXT NOT NULL,
+                active_until TEXT, settled_at TEXT, provider_receipt TEXT
+            );
+            CREATE INDEX IF NOT EXISTS idx_metered_scope_month ON metered_calls(tenant_id, month_key, project_id, user_id, model_key);
+            CREATE INDEX IF NOT EXISTS idx_metered_scope_day ON metered_calls(tenant_id, day_key);
+            CREATE INDEX IF NOT EXISTS idx_metered_run ON metered_calls(run_id);
+        """)
+        self._ensure_column("knowledge_ingestion_jobs", "requested_by", "TEXT")
+        self.connection.execute("""UPDATE knowledge_ingestion_jobs SET requested_by=(
+            SELECT d.created_by FROM knowledge_document_versions v
+            JOIN knowledge_documents d ON d.id=v.document_id
+            WHERE v.id=knowledge_ingestion_jobs.document_version_id) WHERE requested_by IS NULL""")
+        # Existing spend continues to count. Never reset a tenant's allowance by
+        # introducing the unified ledger. Missing attribution remains explicit.
+        from decimal import Decimal, ROUND_CEILING
+        from packages.billing.models import model_key
+
+        rows = self.connection.execute("""SELECT u.*, r.principal_user_id FROM usage_ledger u
+            JOIN runs r ON r.id=u.run_id WHERE u.model_calls>0 OR u.cost>0""").fetchall()
+        for source in rows:
+            row = dict(source)
+            identity = json.loads(row.get("model_identity_json") or "{}")
+            at = datetime.fromisoformat(row["created_at"].replace("Z", "+00:00")).astimezone(timezone.utc)
+            amount = int(row["charged_micro_usd"]) if row["metering_version"] else int(
+                (Decimal(str(row["cost"])) * 1_000_000).to_integral_value(rounding=ROUND_CEILING))
+            self.connection.execute("""INSERT INTO metered_calls
+                (id, tenant_id, project_id, user_id, run_id, purpose, resource_id, model_key,
+                 model_identity_json, pricing_json, billing_status, owner_kind, owner_id, owner_token_hash,
+                 reserved_input_tokens, reserved_output_tokens, reserved_micro_usd,
+                 charged_input_tokens, charged_output_tokens, charged_micro_usd, input_tokens, output_tokens,
+                 call_count, request_fingerprint, admitted_at, day_key, month_key)
+                VALUES (?,?,?,?,?,'legacy_run',?,?,?,?,'LEGACY','legacy',?,'',?,?,?,?,?,?,?,?,?,'',?,?,?)""",
+                (row["id"], row["tenant_id"], row["project_id"], row.get("principal_user_id") or "legacy_unattributed",
+                 row["run_id"], row["run_id"], model_key(identity), self.encode(identity), row.get("pricing_json") or "{}",
+                 row.get("attempt_id") or row["run_id"], row["input_tokens"], row["output_tokens"], amount,
+                 row["input_tokens"], row["output_tokens"], amount, row["input_tokens"], row["output_tokens"],
+                 row["model_calls"], at.isoformat(), at.strftime("%Y-%m-%d"), at.strftime("%Y-%m")))
+
+    def _migration_metering_attribution(self) -> None:
+        self._ensure_column("usage_ledger", "purpose", "TEXT NOT NULL DEFAULT 'run_model'")
+        self._ensure_column("knowledge_ingestion_jobs", "requested_environment_id", "TEXT")
+        self._ensure_column("knowledge_ingestion_jobs", "requested_roles_json", "TEXT")
+        # Restore only already verified historical measurements. Unknown legacy
+        # spend is retained and must be explicitly reconciled, never zeroed.
+        self.connection.execute("""UPDATE metered_calls SET billing_status='ACTUAL',version=version+1
+            WHERE owner_kind='legacy' AND billing_status='LEGACY' AND id IN (
+                SELECT id FROM usage_ledger WHERE metering_version>0 AND billing_status='ACTUAL')""")
+
+    def _migration_knowledge_metadata_access(self) -> None:
+        self._ensure_column("knowledge_events", "actor_user_id", "TEXT")
+
+    def _migration_production_releases(self) -> None:
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS release_projects (
+                tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                PRIMARY KEY(tenant_id,project_id)
+            );
+            CREATE TABLE IF NOT EXISTS deployment_environment_grants (
+                tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, environment TEXT NOT NULL,
+                user_id TEXT NOT NULL, can_deploy INTEGER NOT NULL, can_approve INTEGER NOT NULL,
+                version INTEGER NOT NULL, updated_by TEXT NOT NULL, updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id,project_id,environment,user_id)
+            );
+            CREATE TABLE IF NOT EXISTS release_channels (
+                tenant_id TEXT NOT NULL, project_id TEXT NOT NULL, agent_id TEXT NOT NULL,
+                environment TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 0,
+                active_deployment_id TEXT, updated_at TEXT NOT NULL,
+                PRIMARY KEY(tenant_id,project_id,agent_id,environment)
+            );
+            CREATE TABLE IF NOT EXISTS release_requests (
+                id TEXT PRIMARY KEY, tenant_id TEXT NOT NULL, project_id TEXT NOT NULL,
+                agent_id TEXT NOT NULL, environment TEXT NOT NULL, requested_by TEXT NOT NULL,
+                snapshot_json TEXT NOT NULL, snapshot_hash TEXT NOT NULL,
+                status TEXT NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+                deployment_id TEXT, decided_by TEXT, decision_reason TEXT, decided_at TEXT,
+                created_at TEXT NOT NULL, expires_at TEXT NOT NULL, updated_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_release_requests_scope
+                ON release_requests(tenant_id,project_id,created_at,id);
+        """)
+        self._ensure_column("agent_deployments", "release_request_id", "TEXT")
+
+    def _migration_model_bindings(self) -> None:
+        self._ensure_column("model_deployments","runtime_binding_json","TEXT")
+        self._ensure_column("model_deployments","version","INTEGER NOT NULL DEFAULT 1")
+
+    def _migration_thread_access(self) -> None:
+        self._ensure_column("threads", "owner_user_id", "TEXT")
+        self._ensure_column("threads", "visibility", "TEXT NOT NULL DEFAULT 'private'")
+        self._ensure_column("threads", "access_version", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("threads", "access_state", "TEXT NOT NULL DEFAULT 'ACTIVE'")
+        self._ensure_column("threads", "legacy_access", "INTEGER NOT NULL DEFAULT 1")
+        self.connection.executescript("""
+            CREATE TABLE IF NOT EXISTS thread_members (
+              thread_id TEXT NOT NULL REFERENCES threads(id), user_id TEXT NOT NULL,
+              access TEXT NOT NULL, PRIMARY KEY(thread_id,user_id)
+            );
+            CREATE TABLE IF NOT EXISTS thread_knowledge_sources (
+              thread_id TEXT NOT NULL REFERENCES threads(id), document_id TEXT NOT NULL,
+              document_version_id TEXT NOT NULL, policy_hash TEXT NOT NULL,
+              policy_json TEXT NOT NULL, acquired_by TEXT NOT NULL, created_at TEXT NOT NULL,
+              PRIMARY KEY(thread_id,document_version_id,policy_hash)
+            );
+            CREATE INDEX IF NOT EXISTS idx_thread_access_owner ON threads(tenant_id,project_id,owner_user_id);
+            CREATE INDEX IF NOT EXISTS idx_thread_member_user ON thread_members(user_id,thread_id);
+        """)
+        # Never infer that old project-wide visibility was explicit consent.
+        # Threads without a verified creator remain quarantined, not assigned
+        # to an administrator. Retain source restrictions on historical answers.
+        self.connection.execute("""UPDATE threads SET owner_user_id=(
+            SELECT principal_user_id FROM runs WHERE runs.thread_id=threads.id
+              AND principal_verified=1 AND principal_user_id IS NOT NULL
+            ORDER BY created_at,id LIMIT 1) WHERE owner_user_id IS NULL""")
+        self.connection.execute("UPDATE threads SET access_state='QUARANTINED' WHERE owner_user_id IS NULL")
+        from packages.auth.resource_access import document_policy, policy_digest
+
+        audits = self.connection.execute("""SELECT k.*,r.thread_id FROM knowledge_retrieval_audits k
+            JOIN runs r ON r.id=k.run_id""").fetchall()
+        for source in audits:
+            audit = dict(source)
+            for hit in json.loads(audit["hits_json"]):
+                source_row = self.connection.execute("""SELECT d.*,c.document_version_id FROM knowledge_chunks c
+                    JOIN knowledge_documents d ON d.id=c.document_id WHERE c.id=?""", (hit["chunk_id"],)).fetchone()
+                if not source_row:
+                    self.connection.execute("UPDATE threads SET access_state='QUARANTINED' WHERE id=?", (audit["thread_id"],))
+                    continue
+                document = dict(source_row)
+                document["allowed_roles"] = json.loads(document["allowed_roles_json"])
+                policy = document_policy(document)
+                self.connection.execute("""INSERT INTO thread_knowledge_sources
+                    (thread_id,document_id,document_version_id,policy_hash,policy_json,acquired_by,created_at)
+                    VALUES(?,?,?,?,?,?,?) ON CONFLICT DO NOTHING""", (
+                    audit["thread_id"], document["id"], document["document_version_id"], policy_digest(policy),
+                    self.encode(policy), audit["user_id"], audit["created_at"],
+                ))
+
+    def _migration_atomic_review(self) -> None:
+        self._ensure_column("intent_routing_decisions", "owner_user_id", "TEXT")
+        self.connection.execute("""UPDATE intent_routing_decisions SET owner_user_id=(
+            SELECT owner_user_id FROM threads WHERE threads.id=intent_routing_decisions.thread_id)
+            WHERE owner_user_id IS NULL""")
+        self._ensure_column("change_sets", "version", "INTEGER NOT NULL DEFAULT 1")
+        self._ensure_column("change_sets", "decision_hash", "TEXT")
 
     @staticmethod
     def encode(value: Any) -> str:

@@ -12,12 +12,15 @@ from deepagents.backends.protocol import SandboxBackendProtocol
 from packages.adapters.harness.deepagents.governed_backend import GovernedSandboxBackend
 from packages.application.services import new_id
 from packages.coding.errors import CodingConflictError, SandboxUnavailableError
+from packages.content_security import ContentRejectedError, ContentScanner, NoopContentScanner
 from packages.domain.models import utc_now
 from packages.persistence import Database
+from packages.persistence.archive_store import SharedArchiveStore
 from packages.repositories import RepositoryService
 from packages.runtime.event_emitter import EventEmitter
 from packages.sandbox.policy import SandboxPolicy
-from packages.sandbox.ports import SandboxProvider, SandboxProvisionRequest
+from packages.sandbox.ports import SandboxProvider, SandboxProvisionRequest, SandboxSnapshot
+from packages.sandbox.recovery_archive import normalize_recovery_archive
 
 
 @dataclass(frozen=True)
@@ -26,6 +29,7 @@ class BoundCodingWorkspace:
     sandbox_instance: Dict[str, Any]
     backend: GovernedSandboxBackend
     skill_paths: list[str]
+    recovery: Any = None
 
 
 class SandboxManager:
@@ -36,13 +40,17 @@ class SandboxManager:
         repositories: RepositoryService,
         providers: Iterable[SandboxProvider],
         snapshot_root: Path,
+        content_scanner: ContentScanner | None = None,
+        archive_store: SharedArchiveStore | None = None,
     ):
         self.db = db
+        self.archive_store = archive_store
         self.events = events
         self.repositories = repositories
         self.providers = {provider.name: provider for provider in providers}
         self.snapshot_root = snapshot_root.resolve()
         self.snapshot_root.mkdir(parents=True, exist_ok=True)
+        self.content_scanner = content_scanner or NoopContentScanner()
         self._cleanup_task: asyncio.Task | None = None
         self._stop_cleanup = asyncio.Event()
 
@@ -55,7 +63,8 @@ class SandboxManager:
         if self._cleanup_task is None:
             return
         self._stop_cleanup.set()
-        await self._cleanup_task
+        self._cleanup_task.cancel()
+        await asyncio.gather(self._cleanup_task, return_exceptions=True)
         self._cleanup_task = None
 
     async def _cleanup_loop(self) -> None:
@@ -70,6 +79,8 @@ class SandboxManager:
         self,
         run: Dict[str, Any],
         plan: Dict[str, Any],
+        *,
+        recovery: Dict[str, Any] | None = None,
     ) -> BoundCodingWorkspace:
         workspace_id = run.get("coding_workspace_id")
         if not workspace_id:
@@ -96,6 +107,9 @@ class SandboxManager:
             )
             if instance and instance["status"] == "ACTIVE" and instance.get("external_id"):
                 try:
+                    if run["status"] == "ORPHANED" or recovery is not None:
+                        await provider.destroy(instance["external_id"])
+                        raise SandboxUnavailableError("Replacing a sandbox owned by an expired attempt")
                     result = await provider.resume(instance["external_id"], sandbox_profile)
                     self.events.append(
                         run["id"],
@@ -174,22 +188,61 @@ class SandboxManager:
                     (utc_now(), workspace["id"]),
                 )
                 raise
-            self.db.execute(
-                """UPDATE sandbox_instances SET external_id=?, provider_metadata_json=?, status='ACTIVE',
-                   updated_at=? WHERE id=?""",
-                (result.external_id, self.db.encode(result.metadata), utc_now(), instance_id),
-            )
-            self.db.execute(
-                """UPDATE coding_workspaces SET status='READY', updated_at=? WHERE id=?""",
-                (utc_now(), workspace["id"]),
-            )
+            try:
+                with self.db.transaction():
+                    self.db.execute(
+                        """UPDATE sandbox_instances SET external_id=?, provider_metadata_json=?, status='ACTIVE',
+                           updated_at=? WHERE id=?""",
+                        (result.external_id, self.db.encode(result.metadata), utc_now(), instance_id),
+                    )
+                    self.db.execute(
+                        """UPDATE coding_workspaces SET status='READY', updated_at=? WHERE id=?""",
+                        (utc_now(), workspace["id"]),
+                    )
+            except BaseException:
+                discard = getattr(provider, 'discard_unpublished', None)
+                if discard:
+                    await asyncio.shield(discard(result.external_id, instance_id))
+                else:
+                    await asyncio.shield(provider.destroy(result.external_id))
+                raise
             instance = self.db.fetch_one(
                 "SELECT * FROM sandbox_instances WHERE id=?", (instance_id,)
             )
             workspace = self.db.fetch_one(
                 "SELECT * FROM coding_workspaces WHERE id=?", (workspace["id"],)
             )
-            await self._restore_latest_patch(run, plan, workspace, result.backend)
+            if recovery is not None:
+                record = recovery["snapshot"]
+                content = recovery["content"]
+                try:
+                    await provider.restore(result.external_id, SandboxSnapshot(
+                        content, record["archive_sha256"], record["size_bytes"],
+                    ))
+                    self.db.execute(
+                        """UPDATE coding_workspaces SET workspace_generation=
+                           CASE WHEN workspace_generation>? THEN workspace_generation+1 ELSE ?+1 END,
+                           status='READY',
+                           updated_at=? WHERE id=?""",
+                        (record["workspace_generation"], record["workspace_generation"], utc_now(), workspace["id"]),
+                    )
+                    workspace = self.db.fetch_one("SELECT * FROM coding_workspaces WHERE id=?", (workspace["id"],))
+                    self.db.execute("UPDATE runs SET workspace_generation=?, updated_at=? WHERE id=?", (
+                        workspace["workspace_generation"], utc_now(), run["id"],
+                    ))
+                    self.events.append(run["id"], "workspace.recovered", {
+                        "workspace_id": workspace["id"], "recovery_point_id": recovery["point"]["id"],
+                        "workspace_snapshot_id": record["id"], "workspace_generation": workspace["workspace_generation"],
+                        "source_workspace_generation": record["workspace_generation"],
+                        "content_hash": record["archive_sha256"],
+                    })
+                except Exception:
+                    self.db.execute("UPDATE sandbox_instances SET status='FAILED', updated_at=? WHERE id=?", (utc_now(), instance_id))
+                    self.db.execute("UPDATE coding_workspaces SET status='FAILED', updated_at=? WHERE id=?", (utc_now(), workspace["id"]))
+                    await provider.destroy(result.external_id)
+                    raise
+            else:
+                await asyncio.to_thread(self._restore_latest_patch, run, plan, workspace, result.backend)
             self.events.append(
                 run["id"],
                 "workspace.ready",
@@ -207,7 +260,9 @@ class SandboxManager:
                 (workspace["sandbox_instance_id"],),
             )
         raw_backend = result.backend
-        skill_paths = self._materialize_skills(raw_backend, plan.get("skill_versions", []))
+        skill_paths = await asyncio.to_thread(
+            self._materialize_skills, raw_backend, plan.get("skill_versions", [])
+        )
         governed = GovernedSandboxBackend(
             raw_backend,
             policy=SandboxPolicy.from_plan(
@@ -243,6 +298,7 @@ class SandboxManager:
         run: Dict[str, Any],
         plan: Dict[str, Any],
         reason: str,
+        recovery: bool = False,
     ) -> Dict[str, Any]:
         instance = self.db.fetch_one(
             "SELECT * FROM sandbox_instances WHERE id=?",
@@ -251,68 +307,94 @@ class SandboxManager:
         if not instance or not instance.get("external_id"):
             raise SandboxUnavailableError("Workspace sandbox is not active")
         provider = self.providers[instance["provider"]]
-        snapshot = await provider.snapshot(instance["external_id"])
+        snapshot = await (provider.recovery_snapshot(instance["external_id"]) if recovery
+                          else provider.snapshot(instance["external_id"]))
+        prepared = await self.prepare_snapshot(workspace, run=run, plan=plan,
+            snapshot=snapshot, reason=reason, recovery=recovery)
+        with self.db.transaction():
+            return self.record_snapshot(prepared)
+
+    async def prepare_snapshot(self, workspace, *, run, plan, snapshot, reason, recovery=False):
+        """Store validated bytes before opening a short metadata transaction."""
+        instance = self.db.fetch_one('SELECT * FROM sandbox_instances WHERE id=?',
+            (workspace.get('sandbox_instance_id'),))
+        if not instance:
+            raise SandboxUnavailableError('Workspace sandbox metadata is missing')
+        if snapshot.size_bytes != len(snapshot.content) or hashlib.sha256(snapshot.content).hexdigest() != snapshot.sha256:
+            raise CodingConflictError("Workspace snapshot digest or size mismatch")
+        if recovery:
+            await asyncio.to_thread(normalize_recovery_archive, snapshot.content)
         if snapshot.size_bytes > int(instance["profile"].get("disk_mb", 10240)) * 1024 * 1024:
             raise CodingConflictError("Workspace snapshot exceeds the configured disk budget")
+        try:
+            await asyncio.to_thread(
+                self.content_scanner.scan,
+                snapshot.content,
+                object_name=f"workspace/{workspace['id']}",
+            )
+        except ContentRejectedError as exc:
+            raise CodingConflictError(str(exc)) from exc
         snapshot_id = new_id("wsnap")
-        directory = self.snapshot_root / snapshot.sha256[:2]
-        directory.mkdir(parents=True, exist_ok=True)
-        path = directory / f"{snapshot.sha256}.tar"
-        if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != snapshot.sha256:
-            temporary = path.with_suffix(".tmp")
-            temporary.write_bytes(snapshot.content)
-            temporary.replace(path)
+        if self.archive_store:
+            path = await asyncio.to_thread(
+                self.archive_store.put, snapshot.content,
+                tenant_id=run["tenant_id"], project_id=run["project_id"], kind="workspace",
+            )
+        else:
+            directory = self.snapshot_root / snapshot.sha256[:2]
+            directory.mkdir(parents=True, exist_ok=True)
+            path = directory / f"{snapshot.sha256}.tar"
+            if not path.exists() or hashlib.sha256(path.read_bytes()).hexdigest() != snapshot.sha256:
+                temporary = directory / (new_id('snapshot') + '.tmp')
+                try:
+                    temporary.write_bytes(snapshot.content)
+                    temporary.replace(path)
+                finally:
+                    temporary.unlink(missing_ok=True)
         repository_snapshot = self.db.fetch_one(
             "SELECT resolved_commit_sha FROM repository_snapshots WHERE id=?",
             (workspace["repository_snapshot_id"],),
         )
         if not repository_snapshot:
             raise CodingConflictError("Repository snapshot is missing")
-        self.db.execute(
-            """INSERT INTO workspace_snapshots
-               (id, tenant_id, project_id, run_id, workspace_id, base_commit_sha,
-                workspace_generation, plan_hash, reason, archive_path, archive_sha256,
-                size_bytes, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                snapshot_id,
-                run["tenant_id"],
-                run["project_id"],
-                run["id"],
-                workspace["id"],
-                repository_snapshot["resolved_commit_sha"],
-                workspace["workspace_generation"],
-                plan["plan_hash"],
-                reason,
-                str(path),
-                snapshot.sha256,
-                snapshot.size_bytes,
-                utc_now(),
-            ),
-        )
-        result = self.db.fetch_one(
-            "SELECT * FROM workspace_snapshots WHERE id=?", (snapshot_id,)
-        )
+        return {'id': snapshot_id, 'tenant_id': run['tenant_id'], 'project_id': run['project_id'],
+                'run_id': run['id'], 'workspace_id': workspace['id'],
+                'base_commit_sha': repository_snapshot['resolved_commit_sha'],
+                'workspace_generation': workspace['workspace_generation'], 'plan_hash': plan['plan_hash'],
+                'reason': reason, 'archive_path': str(path), 'archive_sha256': snapshot.sha256,
+                'size_bytes': snapshot.size_bytes, 'created_at': utc_now()}
+
+    def record_snapshot(self, result):
+        columns = list(result)
+        self.db.execute(f"INSERT INTO workspace_snapshots ({','.join(columns)}) VALUES ({','.join('?' for _ in columns)})",
+            tuple(result[column] for column in columns))
         self.events.append(
-            run["id"],
+            result["run_id"],
             "workspace.snapshot.created",
             {
-                "workspace_snapshot_id": snapshot_id,
-                "workspace_id": workspace["id"],
-                "workspace_generation": workspace["workspace_generation"],
-                "content_hash": snapshot.sha256,
-                "size_bytes": snapshot.size_bytes,
-                "reason": reason,
+                "workspace_snapshot_id": result['id'],
+                "workspace_id": result['workspace_id'],
+                "workspace_generation": result['workspace_generation'],
+                "content_hash": result['archive_sha256'],
+                "size_bytes": result['size_bytes'],
+                "reason": result['reason'],
             },
         )
         return result
 
     async def destroy_expired(self) -> int:
+        removed = 0
         rows = self.db.fetch_all(
             """SELECT * FROM sandbox_instances WHERE status='ACTIVE' AND expires_at < ?""",
             (utc_now(),),
         )
         for instance in rows:
+            if self.db.fetch_one("""SELECT id FROM runs WHERE coding_workspace_id IN
+                (SELECT id FROM coding_workspaces WHERE sandbox_instance_id=?) AND status='CANCELLING' LIMIT 1""",
+                (instance['id'],)):
+                # Preserve the only uncommitted cancellation evidence. A later
+                # tick may collect it after finalization completes.
+                continue
             workspace = self.db.fetch_one(
                 "SELECT * FROM coding_workspaces WHERE sandbox_instance_id=?",
                 (instance["id"],),
@@ -354,11 +436,12 @@ class SandboxManager:
                    WHERE sandbox_instance_id=?""",
                 (utc_now(), instance["id"]),
             )
-        return len(rows)
+            removed += 1
+        return removed
 
     async def interrupt_run(self, run_id: str) -> None:
         row = self.db.fetch_one(
-            """SELECT s.* FROM runs r
+            """SELECT s.*, r.current_attempt_id FROM runs r
                JOIN coding_workspaces w ON w.id=r.coding_workspace_id
                JOIN sandbox_instances s ON s.id=w.sandbox_instance_id
                WHERE r.id=? AND s.status='ACTIVE'""",
@@ -367,6 +450,10 @@ class SandboxManager:
         if not row or not row.get("external_id"):
             return
         provider = self.providers.get(row["provider"])
+        scoped_interrupt = getattr(provider, "interrupt_attempt", None)
+        if scoped_interrupt is not None:
+            await scoped_interrupt(row["external_id"], row["current_attempt_id"])
+            return
         interrupt = getattr(provider, "interrupt", None) if provider else None
         if interrupt is not None:
             await interrupt(row["external_id"])
@@ -399,7 +486,7 @@ class SandboxManager:
                 raise SandboxUnavailableError(f"Unable to materialize skills: {errors[0]}")
         return paths
 
-    async def _restore_latest_patch(
+    def _restore_latest_patch(
         self,
         run: Dict[str, Any],
         plan: Dict[str, Any],

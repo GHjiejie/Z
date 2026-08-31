@@ -2,19 +2,18 @@ from __future__ import annotations
 
 import gzip
 import hashlib
-import ipaddress
 import io
 import json
 import os
 import subprocess
-import socket
 import tarfile
 import tempfile
 from pathlib import Path, PurePosixPath
 from typing import Any, Dict, Iterable, List, Optional
-from urllib.parse import urlparse
+from contextlib import nullcontext
 
 from packages.application.services import new_id
+from packages.content_security import ContentRejectedError, ContentScanner, NoopContentScanner
 from packages.coding.errors import (
     CodingConflictError,
     CodingNotFoundError,
@@ -23,6 +22,12 @@ from packages.coding.errors import (
 from packages.coding.models import RepositoryCreate, RepositorySnapshotCreate
 from packages.domain.models import TenantContext, utc_now
 from packages.persistence import Database
+from packages.persistence.archive_store import SharedArchiveStore
+from packages.repositories.network import RepositoryNetworkPolicy, git_command, git_environment, run_clone
+from packages.repositories.tunnel import RepositoryTunnel
+from packages.repositories.materialization import SnapshotObjects, require_external_io
+from packages.auth.permissions import Permission
+from packages.auth.transactions import authorized_write, current_authority
 
 
 _EXCLUDED_NAMES = {
@@ -64,11 +69,17 @@ class RepositoryService:
         db: Database,
         storage_root: Path,
         allowed_local_roots: Iterable[Path],
+        content_scanner: ContentScanner | None = None,
+        archive_store: SharedArchiveStore | None = None,
+        network_policy: RepositoryNetworkPolicy | None = None,
     ):
         self.db = db
+        self.archive_store = archive_store
         self.storage_root = storage_root.resolve()
         self.storage_root.mkdir(parents=True, exist_ok=True)
         self.allowed_local_roots = [root.resolve() for root in allowed_local_roots]
+        self.content_scanner = content_scanner or NoopContentScanner()
+        self.network_policy = network_policy or RepositoryNetworkPolicy.from_environment()
 
     def list_repositories(self, context: TenantContext) -> List[Dict[str, Any]]:
         items = self.db.fetch_all(
@@ -137,6 +148,8 @@ class RepositoryService:
     def create_repository(
         self, payload: RepositoryCreate, context: TenantContext
     ) -> Dict[str, Any]:
+        require_external_io(self.db)
+        context = current_authority(self.db, context, Permission.REPOSITORY_MANAGE)
         if payload.credential_ref:
             raise RepositoryAccessError(
                 "Repository credentials are not available in patch_only MVP; register a local or public read-only repository"
@@ -146,19 +159,14 @@ class RepositoryService:
             canonical_uri = str(self._resolve_local_path(canonical_uri))
         else:
             self._validate_remote_uri(canonical_uri)
-        existing = self.db.fetch_one(
-            """SELECT id FROM repositories WHERE tenant_id=? AND project_id=? AND name=?""",
-            (context.tenant_id, context.project_id, payload.name),
-        )
-        if existing:
-            raise CodingConflictError(f"Repository name already exists: {payload.name}")
         repository_id = new_id("repo")
         now = utc_now()
-        self.db.execute(
+        with authorized_write(self.db, context, Permission.REPOSITORY_MANAGE) as context:
+            changed = self.db.execute_count(
             """INSERT INTO repositories
                (id, tenant_id, project_id, name, provider, canonical_uri, default_branch,
                 credential_ref, access_policy_revision_id, status, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?)""",
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 'ACTIVE', ?, ?) ON CONFLICT DO NOTHING""",
             (
                 repository_id,
                 context.tenant_id,
@@ -172,10 +180,14 @@ class RepositoryService:
                 now,
                 now,
             ),
-        )
-        return self.get_repository(repository_id, context)
+            )
+            if not changed:
+                raise CodingConflictError(f"Repository name already exists: {payload.name}")
+            self._audit(context, 'repository.created', repository_id, {})
+            return self.get_repository(repository_id, context)
 
     def get_repository(self, repository_id: str, context: TenantContext) -> Dict[str, Any]:
+        context = current_authority(self.db, context, Permission.REPOSITORY_READ)
         repository = self.db.fetch_one(
             """SELECT * FROM repositories WHERE id=? AND tenant_id=? AND project_id=?""",
             (repository_id, context.tenant_id, context.project_id),
@@ -185,9 +197,20 @@ class RepositoryService:
         return repository
 
     def probe(self, repository_id: str, context: TenantContext) -> Dict[str, Any]:
+        require_external_io(self.db)
+        context = current_authority(self.db, context, Permission.REPOSITORY_MANAGE)
+        repository = self.get_repository(repository_id, context)
+        self._validate_repository(repository, context)
+        result = self._probe(repository_id, context)
+        current_authority(self.db, context, Permission.REPOSITORY_MANAGE)
+        self._validate_repository(repository, context)
+        return result
+
+    def _probe(self, repository_id: str, context: TenantContext) -> Dict[str, Any]:
         repository = self.get_repository(repository_id, context)
         with self._repository_checkout(repository) as checkout:
-            is_git_repository, _ = self._git_metadata(checkout)
+            boundary = checkout if repository["provider"] != "local_snapshot" else None
+            is_git_repository, _ = self._git_metadata(checkout, checkout_root=boundary)
             if not is_git_repository:
                 return {
                     "repository_id": repository_id,
@@ -200,7 +223,7 @@ class RepositoryService:
                 }
             commit = self._git(checkout, "rev-parse", "--verify", "HEAD^{commit}").strip()
             branch = self._git(checkout, "branch", "--show-current").strip() or None
-            dirty = bool(self._git(checkout, "status", "--porcelain").strip())
+            dirty = bool(self._git(checkout, "status", "--porcelain").strip()) if boundary is None else False
         return {
             "repository_id": repository_id,
             "status": "healthy",
@@ -217,15 +240,27 @@ class RepositoryService:
         payload: RepositorySnapshotCreate,
         context: TenantContext,
     ) -> Dict[str, Any]:
+        return self._create_snapshot(repository_id, payload, context, Permission.REPOSITORY_MANAGE)
+
+    def create_runtime_snapshot(self, repository_id, payload, context):
+        # Runtime members may bind a registered repository; that does not grant
+        # repository registration or the public management snapshot endpoint.
+        return self._create_snapshot(repository_id, payload, context, Permission.RUNTIME_USE)
+
+    def _create_snapshot(self, repository_id, payload, context, permission):
+        require_external_io(self.db)
+        context = current_authority(self.db, context, permission)
         repository = self.get_repository(repository_id, context)
+        self._validate_repository(repository, context)
         requested_ref = payload.requested_ref or repository["default_branch"]
         source_mode = payload.source_mode
         with self._repository_checkout(repository) as checkout:
+            boundary = checkout if repository["provider"] != "local_snapshot" else None
             if source_mode == "working_tree_snapshot" and repository["provider"] != "local_snapshot":
                 raise CodingConflictError(
                     "working_tree_snapshot is available only for local repositories"
                 )
-            is_git_repository, _ = self._git_metadata(checkout)
+            is_git_repository, _ = self._git_metadata(checkout, checkout_root=boundary)
             if not is_git_repository:
                 if repository["provider"] != "local_snapshot":
                     raise CodingConflictError("Remote repository is not a Git repository")
@@ -235,32 +270,48 @@ class RepositoryService:
                 source_mode = "working_tree_snapshot"
             else:
                 resolved_commit = self._git(
-                    checkout, "rev-parse", "--verify", f"{requested_ref}^{{commit}}"
+                    checkout, "rev-parse", "--verify", "--end-of-options", f"{requested_ref}^{{commit}}"
                 ).strip()
                 if source_mode == "committed_ref":
-                    archive, manifest = self._archive_committed(checkout, resolved_commit)
+                    archive, manifest = self._archive_committed(checkout, resolved_commit, checkout_root=boundary)
                 else:
                     archive, manifest = self._archive_working_tree(checkout)
 
+        try:
+            self.content_scanner.scan(
+                archive, object_name=f"repository/{repository_id}/{requested_ref}"
+            )
+        except ContentRejectedError as exc:
+            raise RepositoryAccessError(str(exc)) from exc
         content_hash = hashlib.sha256(archive).hexdigest()
-        manifest_json = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        manifest_json = json.dumps({'files': manifest, 'archive_sha256': content_hash}, sort_keys=True, separators=(",", ":"))
         manifest_hash = hashlib.sha256(manifest_json.encode()).hexdigest()
-        archive_path = self.storage_root / content_hash[:2] / f"{content_hash}.tar.gz"
-        archive_path.parent.mkdir(parents=True, exist_ok=True)
-        if not archive_path.exists():
-            archive_path.write_bytes(archive)
-
+        current_authority(self.db, context, permission)
         existing = self.db.fetch_one(
             """SELECT * FROM repository_snapshots
                WHERE repository_id=? AND resolved_commit_sha=? AND source_mode=?
-                 AND manifest_hash=?""",
-            (repository_id, resolved_commit, source_mode, manifest_hash),
+                 AND archive_sha256=?""",
+            (repository_id, resolved_commit, source_mode, content_hash),
         )
         if existing:
-            return self.get_snapshot(existing["id"], context)
+            self.read_archive(existing)
+            with authorized_write(self.db, context, permission) as context:
+                self._validate_repository(repository, context, lock=True)
+                return self._public_snapshot(existing)
+        materialized = SnapshotObjects(self).materialize(archive, context, permission,
+            validate=lambda current: self._validate_repository(repository, current))
         snapshot_id = new_id("snap")
         now = utc_now()
-        self.db.execute(
+        with authorized_write(self.db, context, permission) as context:
+            self._validate_repository(repository, context, lock=True)
+            # One repository row serializes concurrent publication; storage I/O
+            # and fixed-version verification were completed before taking it.
+            existing = self.db.fetch_one("""SELECT * FROM repository_snapshots
+                WHERE repository_id=? AND resolved_commit_sha=? AND source_mode=? AND archive_sha256=?""",
+                (repository_id, resolved_commit, source_mode, content_hash))
+            if existing:
+                return self._public_snapshot(existing)
+            self.db.execute(
             """INSERT INTO repository_snapshots
                (id, repository_id, tenant_id, project_id, requested_ref,
                 resolved_commit_sha, source_mode, manifest_hash, archive_path,
@@ -275,16 +326,48 @@ class RepositoryService:
                 resolved_commit,
                 source_mode,
                 manifest_hash,
-                str(archive_path),
+                materialized['archive_path'],
                 content_hash,
                 len(archive),
                 len(manifest),
                 now,
             ),
-        )
-        return self.get_snapshot(snapshot_id, context)
+            )
+            self._audit(context, 'repository.snapshot.created', snapshot_id,
+                        {'repository_id': repository_id, 'archive_sha256': content_hash})
+            return self.snapshot_metadata(snapshot_id, context)
+
+    def _validate_repository(self, original, context, *, lock=False):
+        if lock and self.db.dialect == 'postgresql':
+            self.db.fetch_one('SELECT id FROM repositories WHERE id=? FOR UPDATE', (original['id'],))
+        current = self.get_repository(original['id'], context)
+        fields = ('provider', 'canonical_uri', 'default_branch', 'credential_ref', 'access_policy_revision_id')
+        if current['status'] != 'ACTIVE' or any(current[key] != original[key] for key in fields):
+            raise CodingConflictError('Repository is disabled or changed during preparation')
+
+    def _audit(self, context, action, resource_id, details):
+        self.db.execute("""INSERT INTO governance_audit_events
+            (id,tenant_id,project_id,actor_user_id,action,resource_id,details_json,created_at)
+            VALUES (?,?,?,?,?,?,?,?)""", (new_id('audit'), context.tenant_id, context.project_id,
+            context.user_id, action, resource_id, self.db.encode(details), utc_now()))
+
+    @staticmethod
+    def _public_snapshot(snapshot):
+        public_snapshot = dict(snapshot)
+        public_snapshot.pop('archive_path', None)
+        public_snapshot['archive_uri'] = f"repository-snapshot://{snapshot['id']}"
+        return public_snapshot
+
+    def snapshot_metadata(self, snapshot_id, context):
+        context = current_authority(self.db, context, Permission.REPOSITORY_READ)
+        snapshot = self.db.fetch_one('SELECT * FROM repository_snapshots WHERE id=? AND tenant_id=? AND project_id=?',
+                                    (snapshot_id, context.tenant_id, context.project_id))
+        if not snapshot:
+            raise CodingNotFoundError('Repository snapshot not found')
+        return self._public_snapshot(snapshot)
 
     def get_snapshot(self, snapshot_id: str, context: TenantContext) -> Dict[str, Any]:
+        current_authority(self.db, context, Permission.REPOSITORY_READ)
         snapshot = self.db.fetch_one(
             """SELECT * FROM repository_snapshots
                WHERE id=? AND tenant_id=? AND project_id=?""",
@@ -292,17 +375,20 @@ class RepositoryService:
         )
         if not snapshot:
             raise CodingNotFoundError("Repository snapshot not found")
-        path = Path(snapshot["archive_path"])
-        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != snapshot["archive_sha256"]:
-            raise CodingConflictError("Repository snapshot archive is missing or corrupted")
-        public_snapshot = dict(snapshot)
-        public_snapshot.pop("archive_path", None)
-        public_snapshot["archive_uri"] = f"repository-snapshot://{snapshot['id']}"
-        return public_snapshot
+        self.read_archive(snapshot)
+        current_authority(self.db, context, Permission.REPOSITORY_READ)
+        return self._public_snapshot(snapshot)
 
     def read_archive(self, snapshot: Dict[str, Any]) -> bytes:
-        path = Path(snapshot["archive_path"])
-        data = path.read_bytes()
+        if self.archive_store:
+            return self.archive_store.read(snapshot, kind="repository")
+        path = Path(snapshot["archive_path"]).resolve()
+        if self.storage_root not in path.parents or not path.is_file():
+            raise CodingConflictError("Repository snapshot archive is missing or outside storage")
+        with path.open("rb") as source:
+            data = source.read(_MAX_SNAPSHOT_BYTES + 1)
+        if len(data) > _MAX_SNAPSHOT_BYTES:
+            raise CodingConflictError("Repository snapshot archive exceeds the size limit")
         if hashlib.sha256(data).hexdigest() != snapshot["archive_sha256"]:
             raise CodingConflictError("Repository snapshot archive hash mismatch")
         return data
@@ -315,16 +401,11 @@ class RepositoryService:
             raise RepositoryAccessError("Local repository path is outside configured roots")
         return path
 
-    def _git_metadata(self, path: Path) -> tuple[bool, Optional[str]]:
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "GIT_TERMINAL_PROMPT": "0",
-            "HOME": tempfile.gettempdir(),
-            "LANG": "C.UTF-8",
-        }
+    def _git_metadata(self, path: Path, *, checkout_root: Path | None = None) -> tuple[bool, Optional[str]]:
+        env = git_environment(Path(tempfile.gettempdir()))
         try:
             root = subprocess.run(
-                ["git", "-C", str(path), "rev-parse", "--show-toplevel"],
+                git_command("-C", str(path), "rev-parse", "--show-toplevel"),
                 capture_output=True,
                 text=True,
                 timeout=3,
@@ -336,14 +417,16 @@ class RepositoryService:
         if root.returncode:
             return False, None
         git_root = Path(root.stdout.strip()).resolve()
-        if not any(
+        if not (checkout_root is not None and git_root == checkout_root) and not any(
             git_root == allowed or allowed in git_root.parents
             for allowed in self.allowed_local_roots
         ):
             return False, None
+        if not self._git_storage_allowed(path, checkout_root=checkout_root):
+            raise RepositoryAccessError("Git metadata or shared object directory is outside configured roots")
         try:
             branch = subprocess.run(
-                ["git", "-C", str(path), "branch", "--show-current"],
+                git_command("-C", str(path), "branch", "--show-current"),
                 capture_output=True,
                 text=True,
                 timeout=3,
@@ -365,45 +448,45 @@ class RepositoryService:
             candidate = candidate.parent
         return False
 
-    def _git_context(self, path: Path) -> tuple[Path, Optional[PurePosixPath]]:
+    def _git_context(self, path: Path, *, checkout_root: Path | None = None) -> tuple[Path, Optional[PurePosixPath]]:
         git_root = Path(self._git(path, "rev-parse", "--show-toplevel").strip()).resolve()
-        if not any(
+        if not (checkout_root is not None and git_root == checkout_root) and not any(
             git_root == allowed or allowed in git_root.parents
             for allowed in self.allowed_local_roots
         ):
             raise RepositoryAccessError("Git repository root is outside configured roots")
+        if not self._git_storage_allowed(path, checkout_root=checkout_root):
+            raise RepositoryAccessError("Git metadata or shared object directory is outside configured roots")
         prefix = None
         if path != git_root:
             prefix = PurePosixPath(path.relative_to(git_root).as_posix())
         return git_root, prefix
 
-    @staticmethod
-    def _validate_remote_uri(value: str) -> None:
-        parsed = urlparse(value)
-        if parsed.scheme not in {"https", "ssh"}:
-            raise RepositoryAccessError("Remote repository URI must use HTTPS or SSH")
-        if parsed.username or parsed.password:
-            raise RepositoryAccessError("Credentials must not be embedded in repository URI")
-        hostname = (parsed.hostname or "").rstrip(".").lower()
-        if not hostname or hostname == "localhost" or hostname.endswith(".local"):
-            raise RepositoryAccessError("Remote repository host is not allowed")
-        try:
-            addresses = {
-                item[4][0]
-                for item in socket.getaddrinfo(
-                    hostname,
-                    parsed.port or (443 if parsed.scheme == "https" else 22),
-                    type=socket.SOCK_STREAM,
-                )
-            }
-        except OSError as exc:
-            raise RepositoryAccessError("Remote repository host cannot be resolved") from exc
-        if not addresses or any(
-            not ipaddress.ip_address(address).is_global for address in addresses
-        ):
-            raise RepositoryAccessError(
-                "Remote repository host resolves to a non-public network"
-            )
+    def _git_storage_allowed(self, path: Path, *, checkout_root: Path | None = None) -> bool:
+        result = subprocess.run(git_command("-C", str(path), "rev-parse", "--path-format=absolute",
+                                           "--git-dir", "--git-common-dir"),
+                                capture_output=True, text=True, timeout=3, check=False,
+                                env=git_environment(Path(tempfile.gettempdir())))
+        directories = result.stdout.splitlines()
+        roots = [checkout_root] if checkout_root is not None else self.allowed_local_roots
+        if result.returncode or len(directories) != 2:
+            return False
+        for value in directories:
+            directory = Path(value).resolve()
+            if not any(directory == root or root in directory.parents for root in roots):
+                return False
+            objects = (directory / "objects").resolve()
+            if not any(objects == root or root in objects.parents for root in roots):
+                return False
+            # Alternates can point Git outside its metadata directory, including
+            # otherwise private repositories. No implicit shared-object trust.
+            alternates = directory / "objects" / "info" / "alternates"
+            if alternates.exists() and alternates.stat().st_size:
+                return False
+        return True
+
+    def _validate_remote_uri(self, value: str) -> None:
+        self.network_policy.target(value)
 
     class _Checkout:
         def __init__(self, service: "RepositoryService", repository: Dict[str, Any]):
@@ -417,32 +500,18 @@ class RepositoryService:
                 self.path = self.service._resolve_local_path(self.repository["canonical_uri"])
                 return self.path
             self.temporary = tempfile.TemporaryDirectory(prefix="deepagent-repo-")
-            self.path = Path(self.temporary.name) / "repo"
-            env = {
-                "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-                "GIT_TERMINAL_PROMPT": "0",
-                "HOME": self.temporary.name,
-            }
-            result = subprocess.run(
-                [
-                    "git",
-                    "clone",
-                    "--filter=blob:none",
-                    "--no-tags",
-                    "--",
-                    self.repository["canonical_uri"],
-                    str(self.path),
-                ],
-                capture_output=True,
-                text=True,
-                timeout=180,
-                env=env,
-                check=False,
-            )
-            if result.returncode:
-                raise RepositoryAccessError(
-                    f"Unable to clone repository: {result.stderr.strip()[:500]}"
-                )
+            self.path = (Path(self.temporary.name) / "repo").resolve()
+            try:
+                target = self.service.network_policy.target(self.repository["canonical_uri"])
+                transport = RepositoryTunnel(target) if target.scheme == "https" else nullcontext()
+                with transport as tunnel:
+                    command, env = self.service.network_policy.clone_command(target, self.path,
+                        Path(self.temporary.name), tunnel=tunnel)
+                    run_clone(command, env)
+            except BaseException:
+                # __exit__ is not called when __enter__ fails.
+                self.temporary.cleanup()
+                raise
             return self.path
 
         def __exit__(self, *_: object) -> None:
@@ -454,14 +523,9 @@ class RepositoryService:
 
     @staticmethod
     def _git(path: Path, *arguments: str) -> str:
-        env = {
-            "PATH": os.environ.get("PATH", "/usr/bin:/bin"),
-            "GIT_TERMINAL_PROMPT": "0",
-            "HOME": tempfile.gettempdir(),
-            "LANG": "C.UTF-8",
-        }
+        env = git_environment(Path(tempfile.gettempdir()))
         result = subprocess.run(
-            ["git", "-C", str(path), *arguments],
+            git_command("-C", str(path), *arguments),
             capture_output=True,
             text=True,
             timeout=120,
@@ -474,9 +538,9 @@ class RepositoryService:
             )
         return result.stdout
 
-    def _archive_committed(self, path: Path, commit: str) -> tuple[bytes, List[Dict[str, Any]]]:
-        git_root, prefix = self._git_context(path)
-        command = ["git", "-C", str(git_root), "archive", "--format=tar", commit]
+    def _archive_committed(self, path: Path, commit: str, *, checkout_root: Path | None = None) -> tuple[bytes, List[Dict[str, Any]]]:
+        git_root, prefix = self._git_context(path, checkout_root=checkout_root)
+        command = git_command("-C", str(git_root), "archive", "--format=tar", commit)
         if prefix is not None:
             command.extend(["--", str(prefix)])
         result = subprocess.run(
@@ -484,6 +548,7 @@ class RepositoryService:
             capture_output=True,
             timeout=180,
             check=False,
+            env=git_environment(Path(tempfile.gettempdir())),
         )
         if result.returncode:
             raise CodingConflictError(
@@ -498,8 +563,7 @@ class RepositoryService:
         git_root, prefix = self._git_context(path)
         pathspec = str(prefix) if prefix is not None else "."
         result = subprocess.run(
-            [
-                "git",
+            git_command(
                 "-C",
                 str(git_root),
                 "ls-files",
@@ -509,10 +573,11 @@ class RepositoryService:
                 "--exclude-standard",
                 "--",
                 pathspec,
-            ],
+            ),
             capture_output=True,
             timeout=120,
             check=False,
+            env=git_environment(Path(tempfile.gettempdir())),
         )
         if result.returncode:
             raise CodingConflictError("Unable to enumerate working tree")

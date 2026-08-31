@@ -9,6 +9,9 @@ from urllib.parse import urlparse
 
 import httpx
 
+from packages.secrets import SecretConfigurationError, read_secret
+from packages.http_security import EndpointSecurityError, async_provider_client, validate_provider_url
+
 
 ApiStyle = Literal["chat_completions", "responses", "anthropic_messages"]
 ReasoningKind = Literal["reasoning", "summary", "thinking"]
@@ -36,6 +39,7 @@ class ModelUsage:
     input_tokens: int
     output_tokens: int
     reasoning_tokens: int = 0
+    estimated: bool = False
 
 
 @dataclass(frozen=True)
@@ -74,10 +78,22 @@ class OpenAICompatibleConfig:
     anthropic_thinking_budget_tokens: int = 2048
     anthropic_thinking_display: Optional[str] = None
 
+    def __post_init__(self) -> None:
+        try:
+            validated = validate_provider_url(
+                self.base_url, allowlist_variable="DEEPAGENT_MODEL_ALLOWED_ORIGINS"
+            )
+        except EndpointSecurityError as exc:
+            raise ModelGatewayError(str(exc)) from exc
+        object.__setattr__(self, "base_url", validated)
+
     @classmethod
     def from_environment(cls) -> "OpenAICompatibleConfig":
         base_url = os.getenv("OPENAI_BASE_URL", "").strip().rstrip("/")
-        api_key = os.getenv("OPENAI_API_KEY", "").strip()
+        try:
+            api_key = read_secret("OPENAI_API_KEY")
+        except SecretConfigurationError as exc:
+            raise ModelGatewayError(str(exc)) from exc
         model = os.getenv("MODEL", "").strip()
         missing = [
             name for name, value in (
@@ -167,7 +183,7 @@ class OpenAICompatibleModelGateway:
         return {
             "provider": self.config.api_style,
             "model": self.config.model,
-            "route": urlparse(self.config.base_url).netloc,
+            "route": self.config.base_url,
             "streaming": True,
             "api_style": self.config.api_style,
             "reasoning_stream": True,
@@ -176,6 +192,11 @@ class OpenAICompatibleModelGateway:
     async def complete(
         self, messages: List[Dict[str, str]], on_event: Optional[StreamHandler] = None
     ) -> ModelResponse:
+        from packages.operations.telemetry import operation
+        with operation('model.call'):
+            return await self._complete_traced(messages, on_event)
+
+    async def _complete_traced(self, messages, on_event):
         if self.config.api_style == "responses":
             return await self._complete_responses(messages, on_event)
         if self.config.api_style == "anthropic_messages":
@@ -421,8 +442,8 @@ class OpenAICompatibleModelGateway:
             connect=min(20.0, self.config.timeout_seconds),
         )
         try:
-            async with httpx.AsyncClient(
-                timeout=timeout, follow_redirects=True, transport=self.transport
+            async with async_provider_client(
+                self.config.base_url, timeout=timeout, transport=self.transport
             ) as client:
                 async with client.stream(
                     "POST", endpoint, headers=headers, json=payload
@@ -591,6 +612,7 @@ class OpenAICompatibleModelGateway:
             usage = ModelUsage(
                 max(1, sum(len(item.get("content", "")) for item in messages) // 3),
                 max(1, (len(output) + len(reasoning)) // 3),
+                estimated=True,
             )
         return ModelResponse(
             output, finish_reason, model, usage, reasoning, reasoning_kind

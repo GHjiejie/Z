@@ -21,7 +21,8 @@ import {
 import { useEffect, useMemo, useRef, useState } from 'react'
 import { Link } from 'react-router-dom'
 import { ErrorBanner, StatusPill, shortId } from '../components/UI'
-import { api, streamUrl } from '../lib/api'
+import { CancellationNotice } from '../components/CancellationNotice'
+import { api, ApiError, streamUrl } from '../lib/api'
 import type {
   ChangeSet,
   CodingWorkspace,
@@ -134,7 +135,13 @@ export function CodingWorkbenchPage() {
     } catch (nextError) { setFolderError((nextError as Error).message) } finally { setFolderBusy(false) }
   }
 
+  const clearRestrictedView = () => {
+    streamRef.current?.close(); setRun(null); setWorkspace(null); setTree([]); setSelectedPath(''); setFileContent('')
+    setDiff(null); setVerification(null); setArtifacts([]); setEvents([]); setInterrupt(null); setBusy(false)
+  }
+
   const refreshRun = async (runId: string) => {
+    try {
     const detail = await api.run(runId)
     setRun(detail)
     const nextWorkspace = await api.threadWorkspace(detail.thread_id)
@@ -158,6 +165,11 @@ export function CodingWorkbenchPage() {
     setInterrupt(interrupts.items.find((item) => item.run_id === runId) ?? null)
     if (!ACTIVE.includes(detail.status)) setBusy(false)
     return detail
+    } catch (nextError) {
+      if (nextError instanceof ApiError && [401, 403, 404].includes(nextError.status)) clearRestrictedView()
+      setError((nextError as Error).message)
+      throw nextError
+    }
   }
 
   const openStream = (runId: string, after = 0) => {
@@ -168,11 +180,12 @@ export function CodingWorkbenchPage() {
       const event = JSON.parse((message as MessageEvent).data) as RuntimeEvent
       setEvents((previous) => previous.some((item) => item.event_id === event.event_id) ? previous : [...previous, event])
       if (['file.changed', 'verification.completed', 'changeset.created', 'tool.approval_required', 'run.completed', 'run.failed'].includes(event.type)) {
-        void refreshRun(runId)
+        void refreshRun(runId).catch(() => {})
       }
     })
-    source.addEventListener('stream.idle', () => { source.close(); void refreshRun(runId) })
-    source.onerror = () => { source.close(); void refreshRun(runId) }
+    source.addEventListener('stream.access_revoked', () => { clearRestrictedView(); setError('Conversation access was revoked.') })
+    source.addEventListener('stream.idle', () => { source.close(); void refreshRun(runId).catch(() => {}) })
+    source.onerror = () => { source.close(); void refreshRun(runId).catch(() => {}) }
   }
 
   const start = async () => {
@@ -223,7 +236,7 @@ export function CodingWorkbenchPage() {
   const decideChangeSet = async (approve: boolean) => {
     if (!run || !diff) return
     try {
-      setDiff(await api.decideChangeSet(run.id, diff.id, approve))
+      setDiff(await api.decideChangeSet(run.id, diff.id, approve, diff.version))
       await refreshRun(run.id)
     } catch (nextError) { setError((nextError as Error).message) }
   }
@@ -248,7 +261,7 @@ export function CodingWorkbenchPage() {
 
     <div className="coding-workbench">
       <aside className="coding-explorer panel">
-        <div className="coding-pane-head"><div><Files size={15} /><strong>Working directory</strong></div><button className="icon-button" aria-label="Refresh workspace" disabled={!run} onClick={() => run && void refreshRun(run.id)}><RefreshCw size={14} /></button></div>
+        <div className="coding-pane-head"><div><Files size={15} /><strong>Working directory</strong></div><button className="icon-button" aria-label="Refresh workspace" disabled={!run} onClick={() => run && void refreshRun(run.id).catch(() => {})}><RefreshCw size={14} /></button></div>
         <div className="workspace-facts"><span>{workspace?.repository_name ?? repositories.find((item) => item.id === repositoryId)?.name ?? 'No workspace'}</span><code>{workspace?.resolved_commit_sha?.slice(0, 12) ?? baseRef}</code><StatusPill status={workspace?.status ?? 'UNPROVISIONED'} /></div>
         <div className="file-tree">{tree.map((item) => <button key={item.path} className={selectedPath === item.path ? 'selected' : ''} onClick={() => void openFile(item.path)}><FileCode2 size={13} /><span>{item.path.replace('/workspace/repo/', '')}</span>{changedPaths.has(item.path) && <i />}</button>)}{!tree.length && <div className="tree-empty">Files appear after the sandbox is ready.</div>}</div>
         <div className="recent-coding"><strong>Recent coding tasks</strong>{threads.slice(0, 7).map((thread) => <button key={thread.id} onClick={() => void openThread(thread)}><span>{thread.title}</span><ChevronRight size={13} /></button>)}</div>
@@ -265,7 +278,7 @@ export function CodingWorkbenchPage() {
       <aside className="coding-agent-pane panel">
         <div className="coding-pane-head"><div><Code2 size={15} /><strong>Agent</strong></div>{run && <StatusPill status={run.status} />}</div>
         <div className="agent-run-facts"><span>Run <code>{run ? shortId(run.id) : '—'}</code></span><span>Generation <strong>{workspace?.workspace_generation ?? 0}</strong></span><span>Plan <code>{diff?.plan_hash?.slice(0, 12) ?? '—'}</code></span></div>
-        <div className="agent-conversation"><div className="user-task"><strong>Task</strong><p>{run?.input ?? 'Start a coding task to begin.'}</p></div>{run?.output && <div className="agent-result"><strong>Agent report</strong><p>{run.output}</p></div>}<div className="live-agent-events">{events.slice(-18).map((event) => <div key={event.event_id}><i /><span>{event.type.replaceAll('.', ' ')}</span><small>#{event.sequence}</small></div>)}</div></div>
+        <div className="agent-conversation"><CancellationNotice run={run} /><div className="user-task"><strong>Task</strong><p>{run?.input ?? 'Start a coding task to begin.'}</p></div>{run?.output && <div className="agent-result"><strong>Agent report</strong><p>{run.output}</p></div>}<div className="live-agent-events">{events.slice(-18).map((event) => <div key={event.event_id}><i /><span>{event.type.replaceAll('.', ' ')}</span><small>#{event.sequence}</small></div>)}</div></div>
         {interrupt && <div className="approval-card"><ShieldAlert size={18} /><div><strong>Approval required</strong><p>{interrupt.policy_reason}</p><code>{interrupt.actions[0]?.tool_name}</code></div><div><button className="button danger" onClick={() => void decideApproval('reject')}>Reject</button><button className="button approve" onClick={() => void decideApproval('approve')}>Approve</button></div></div>}
         {diff && <div className="changeset-card"><div><FileDiff size={16} /><strong>ChangeSet</strong><StatusPill status={diff.status} /></div><span>{diff.diff_stat.files} files · <b>+{diff.diff_stat.added}</b> · <em>-{diff.diff_stat.deleted}</em></span><code>{diff.content_hash.slice(0, 16)}</code>{!['DELIVERED', 'REJECTED'].includes(diff.status) && <div className="changeset-actions"><button className="button danger" onClick={() => void decideChangeSet(false)}>Reject patch</button><button className="button approve" onClick={() => void decideChangeSet(true)}>Approve patch</button></div>}</div>}
       </aside>

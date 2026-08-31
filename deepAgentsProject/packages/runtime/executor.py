@@ -16,7 +16,9 @@ from packages.knowledge.agent import BuiltinRAGAgent, RAGAgentResult
 from packages.knowledge.service import KnowledgeService
 from packages.knowledge.tool import KnowledgeSearchTool
 from packages.persistence import Database
+from packages.persistence.fencing import current_write_fence
 from packages.runtime.binder import RuntimeBinder
+from packages.runtime.budget import RunBudget, input_token_reservation
 from packages.runtime.event_emitter import EventEmitter
 from packages.runtime.model_gateway import ModelGateway, ModelStreamEvent
 
@@ -58,7 +60,7 @@ class ReferenceRuntimeExecutor:
         self.db = db
         self.events = events
         self.worker_id = worker_id
-        self.binder = RuntimeBinder()
+        self.binder = RuntimeBinder(db)
         self.harness = DeepAgentsHarnessAdapter()
         self.knowledge_tool = KnowledgeSearchTool(knowledge) if knowledge else None
         self.rag_agent = BuiltinRAGAgent(self.knowledge_tool) if self.knowledge_tool else None
@@ -77,6 +79,10 @@ class ReferenceRuntimeExecutor:
         self._acquire_lease(run)
         run = self.db.fetch_one("SELECT * FROM runs WHERE id=?", (run_id,))
         runtime_context = self.binder.bind(run, plan)
+        self.events.append(run_id, "runtime.execution.bound", {
+            "executor": "reference", "evidence_version": 2,
+            "source": "test" if self.model_gateway.identity().get("provider") == "test_double" else "live",
+        })
         factory = await self.harness.build_factory(plan)
         executable = await factory(runtime_context)
 
@@ -110,7 +116,6 @@ class ReferenceRuntimeExecutor:
                 },
                 span_id="span_main",
             )
-        await asyncio.sleep(0.08)
         if self._is_cancelled(run_id):
             return
 
@@ -142,22 +147,10 @@ class ReferenceRuntimeExecutor:
         self.events.append(
             run_id,
             "graph.node.started",
-            {"graph_id": run["current_attempt_id"], "node_id": "plan", "node_name": "Plan execution"},
+            {"graph_id": run["current_attempt_id"], "node_id": "plan", "node_name": "Bind execution plan"},
             span_id="span_plan",
             parent_span_id="span_main",
             execution_path=["main", "plan"],
-        )
-        self.events.append(
-            run_id,
-            "todo.updated",
-            {
-                "items": [
-                    {"id": "todo_1", "title": "Understand request and constraints", "status": "completed"},
-                    {"id": "todo_2", "title": "Inspect relevant project context", "status": "in_progress"},
-                    {"id": "todo_3", "title": "Prepare an auditable recommendation", "status": "pending"},
-                ]
-            },
-            span_id="span_main",
         )
         self.events.append(
             run_id,
@@ -168,58 +161,10 @@ class ReferenceRuntimeExecutor:
             execution_path=["main", "plan"],
         )
         if plan.get("subagent_bindings"):
-            subagent = plan["subagent_bindings"][0]
-            subagent_path = ["main", subagent["name"]]
             self.events.append(
-                run_id,
-                "graph.subgraph.started",
-                {
-                    "graph_id": f"{run['current_attempt_id']}:{subagent['name']}",
-                    "graph_name": subagent["name"],
-                    "parent_graph_id": run["current_attempt_id"],
-                    "node_id": "research_context",
-                },
-                span_id="span_subagent_1",
-                parent_span_id="span_main",
-                execution_path=subagent_path,
-            )
-            self.events.append(
-                run_id,
-                "subagent.started",
-                {"agent_name": subagent["name"], "task": "Gather release and risk context"},
-                span_id="span_subagent_1",
-                parent_span_id="span_main",
-                execution_path=subagent_path,
-            )
-            await asyncio.sleep(0.06)
-            self.events.append(
-                run_id,
-                "subagent.progress",
-                {"progress": 65, "summary": "Found three relevant constraints"},
-                span_id="span_subagent_1",
-                parent_span_id="span_main",
-                execution_path=subagent_path,
-            )
-            self.events.append(
-                run_id,
-                "subagent.completed",
-                {"result": "Risk context and dependency notes are ready"},
-                span_id="span_subagent_1",
-                parent_span_id="span_main",
-                execution_path=subagent_path,
-            )
-            self.events.append(
-                run_id,
-                "graph.subgraph.completed",
-                {
-                    "graph_id": f"{run['current_attempt_id']}:{subagent['name']}",
-                    "graph_name": subagent["name"],
-                    "parent_graph_id": run["current_attempt_id"],
-                    "status": "completed",
-                },
-                span_id="span_subagent_1",
-                parent_span_id="span_main",
-                execution_path=subagent_path,
+                run_id, "runtime.capability.unavailable",
+                {"capability": "subagents", "reason": "The reference executor does not invoke subagents",
+                 "bindings": [item["name"] for item in plan["subagent_bindings"]]},
             )
 
         effective_input = (run.get("metadata") or {}).get("resume_input") or run["input"]
@@ -407,21 +352,10 @@ class ReferenceRuntimeExecutor:
         )
 
     def _acquire_lease(self, run: Dict[str, Any]) -> None:
-        now = datetime.now(timezone.utc)
-        lease_token = f"lease_{secrets.token_hex(8)}"
-        self.db.execute(
-            """UPDATE run_attempts SET status='RUNNING', worker_id=?, lease_token=?,
-               acquired_at=?, heartbeat_at=?, expires_at=?, updated_at=? WHERE id=?""",
-            (
-                self.worker_id,
-                lease_token,
-                now.isoformat(),
-                now.isoformat(),
-                (now + timedelta(seconds=30)).isoformat(),
-                now.isoformat(),
-                run["current_attempt_id"],
-            ),
-        )
+        fence = current_write_fence()
+        if fence is None or fence.run_id != run["id"] or fence.attempt_id != run["current_attempt_id"]:
+            raise RuntimeError("Execution requires an orchestrator-owned Run lease")
+        self.db.assert_execution_fence()
 
     def _needs_approval(
         self, text: str, plan: Dict[str, Any], rag_result: RAGAgentResult
@@ -448,105 +382,106 @@ class ReferenceRuntimeExecutor:
     async def _pause_for_approval(
         self, run: Dict[str, Any], plan: Dict[str, Any], rag_result: RAGAgentResult
     ) -> None:
-        action_id = new_id("act")
-        interrupt_id = new_id("int")
-        checkpoint_id = new_id("ckpt")
-        arguments = {"path": "/artifacts/release-plan.md", "mode": "write", "environment": "production"}
-        actions = [
-            {
-                "action_id": action_id,
-                "tool_name": "artifact_write",
-                "arguments": arguments,
-                "risk_level": "high",
-                "allowed_decisions": ["approve", "edit", "reject", "respond"],
-            }
-        ]
-        now = utc_now()
-        self.events.append(
-            run["id"],
-            "graph.node.started",
-            {
-                "graph_id": run["current_attempt_id"],
-                "node_id": "write_artifact",
-                "node_name": "Write governed artifact",
-            },
-            span_id="span_tool_write",
-            parent_span_id="span_main",
-            execution_path=["main", "write_artifact"],
-        )
-        self.events.append(
-            run["id"],
-            "tool.requested",
-            {"tool_name": "artifact_write", "arguments": arguments, "risk_level": "high"},
-            span_id="span_tool_write",
-            parent_span_id="span_main",
-        )
-        self.db.execute(
-            """INSERT INTO interrupts
-               (id, tenant_id, project_id, run_id, checkpoint_id, version, policy_reason,
-                status, actions_json, expires_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 1, ?, 'PENDING', ?, ?, ?, ?)""",
-            (
-                interrupt_id,
-                run["tenant_id"],
-                run["project_id"],
+        with self.db.transaction():
+            action_id = new_id("act")
+            interrupt_id = new_id("int")
+            checkpoint_id = new_id("ckpt")
+            arguments = {"path": "/artifacts/release-plan.md", "mode": "write", "environment": "production"}
+            actions = [
+                {
+                    "action_id": action_id,
+                    "tool_name": "artifact_write",
+                    "arguments": arguments,
+                    "risk_level": "high",
+                    "allowed_decisions": ["approve", "edit", "reject", "respond"],
+                }
+            ]
+            now = utc_now()
+            self.events.append(
                 run["id"],
-                checkpoint_id,
-                "Production write requires explicit human approval",
-                self.db.encode(actions),
-                (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
-                now,
-                now,
-            ),
-        )
-        checkpoint = {
-            "checkpoint_id": checkpoint_id,
-            "stage": "awaiting_approval",
-            "interrupt_id": interrupt_id,
-            "action_id": action_id,
-            "arguments": arguments,
-            "plan_hash": plan["plan_hash"],
-            "rag": {
-                "route": rag_result.route,
-                "query": rag_result.query,
-                "audit_id": rag_result.retrieval.get("audit_id"),
-                "tool_calls": rag_result.tool_calls,
-            },
-        }
-        self.db.execute(
-            """UPDATE runs SET status='WAITING_FOR_APPROVAL', checkpoint_json=?,
-               version=version+1, updated_at=? WHERE id=?""",
-            (self.db.encode(checkpoint), now, run["id"]),
-        )
-        self.db.execute(
-            "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
-            (now, run["current_attempt_id"]),
-        )
-        self.events.append(
-            run["id"],
-            "tool.approval_required",
-            {"interrupt_id": interrupt_id, "policy_reason": "Production write requires explicit human approval", "actions": actions},
-            span_id="span_tool_write",
-            parent_span_id="span_main",
-        )
-        self.events.append(
-            run["id"],
-            "interrupt.created",
-            {"interrupt_id": interrupt_id, "checkpoint_id": checkpoint_id, "version": 1},
-        )
-        self.events.append(
-            run["id"],
-            "graph.paused",
-            {
-                "graph_id": run["current_attempt_id"],
+                "graph.node.started",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "node_id": "write_artifact",
+                    "node_name": "Write governed artifact",
+                },
+                span_id="span_tool_write",
+                parent_span_id="span_main",
+                execution_path=["main", "write_artifact"],
+            )
+            self.events.append(
+                run["id"],
+                "tool.requested",
+                {"tool_name": "artifact_write", "arguments": arguments, "risk_level": "high"},
+                span_id="span_tool_write",
+                parent_span_id="span_main",
+            )
+            self.db.execute(
+                """INSERT INTO interrupts
+                   (id, tenant_id, project_id, run_id, checkpoint_id, version, policy_reason,
+                    status, actions_json, expires_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, 'PENDING', ?, ?, ?, ?)""",
+                (
+                    interrupt_id,
+                    run["tenant_id"],
+                    run["project_id"],
+                    run["id"],
+                    checkpoint_id,
+                    "Production write requires explicit human approval",
+                    self.db.encode(actions),
+                    (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+                    now,
+                    now,
+                ),
+            )
+            checkpoint = {
                 "checkpoint_id": checkpoint_id,
+                "stage": "awaiting_approval",
                 "interrupt_id": interrupt_id,
-                "node_id": "write_artifact",
-                "reason": "human_approval_required",
-            },
-            span_id="span_main",
-            execution_path=["main", "write_artifact"],
-        )
+                "action_id": action_id,
+                "arguments": arguments,
+                "plan_hash": plan["plan_hash"],
+                "rag": {
+                    "route": rag_result.route,
+                    "query": rag_result.query,
+                    "audit_id": rag_result.retrieval.get("audit_id"),
+                    "tool_calls": rag_result.tool_calls,
+                },
+            }
+            self.db.execute(
+                """UPDATE runs SET status='WAITING_FOR_APPROVAL', checkpoint_json=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (self.db.encode(checkpoint), now, run["id"]),
+            )
+            self.db.execute(
+                "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
+                (now, run["current_attempt_id"]),
+            )
+            self.events.append(
+                run["id"],
+                "tool.approval_required",
+                {"interrupt_id": interrupt_id, "policy_reason": "Production write requires explicit human approval", "actions": actions},
+                span_id="span_tool_write",
+                parent_span_id="span_main",
+            )
+            self.events.append(
+                run["id"],
+                "interrupt.created",
+                {"interrupt_id": interrupt_id, "checkpoint_id": checkpoint_id, "version": 1},
+            )
+            self.events.append(
+                run["id"],
+                "graph.paused",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "checkpoint_id": checkpoint_id,
+                    "interrupt_id": interrupt_id,
+                    "node_id": "write_artifact",
+                    "reason": "human_approval_required",
+                },
+                span_id="span_main",
+                execution_path=["main", "write_artifact"],
+            )
 
     async def _resume_after_approval(
         self,
@@ -577,7 +512,6 @@ class ReferenceRuntimeExecutor:
             span_id="span_main",
             execution_path=["main", "write_artifact"],
         )
-        await asyncio.sleep(0.08)
         self._set_status(run["id"], RunStatus.RUNNING.value)
         decision = checkpoint.get("decision", {})
         decision_type = decision.get("type", "approve")
@@ -613,33 +547,6 @@ class ReferenceRuntimeExecutor:
         if used_tool_calls >= max_tool_calls:
             raise RuntimeError("Tool budget exhausted before approved artifact write")
         arguments = decision.get("edited_arguments") or checkpoint.get("arguments", {})
-        self.events.append(
-            run["id"],
-            "tool.started",
-            {"tool_name": "artifact_write", "arguments": arguments, "idempotency_key": checkpoint["checkpoint_id"]},
-            span_id="span_tool_write",
-            parent_span_id="span_main",
-        )
-        await asyncio.sleep(0.08)
-        self.events.append(
-            run["id"],
-            "tool.completed",
-            {"tool_name": "artifact_write", "path": arguments.get("path", "/artifacts/release-plan.md")},
-            span_id="span_tool_write",
-            parent_span_id="span_main",
-        )
-        self.events.append(
-            run["id"],
-            "graph.node.completed",
-            {
-                "graph_id": run["current_attempt_id"],
-                "node_id": "write_artifact",
-                "status": "completed",
-            },
-            span_id="span_tool_write",
-            parent_span_id="span_main",
-            execution_path=["main", "write_artifact"],
-        )
         await self._complete(
             run,
             plan,
@@ -647,6 +554,7 @@ class ReferenceRuntimeExecutor:
             approved=True,
             retrieval=rag_result.retrieval,
             tool_calls=used_tool_calls + 1,
+            artifact_arguments=arguments,
         )
 
     async def _complete(
@@ -659,9 +567,20 @@ class ReferenceRuntimeExecutor:
         rejected: bool = False,
         retrieval: Optional[Dict[str, Any]] = None,
         tool_calls: int = 0,
+        artifact_arguments: Optional[Dict[str, Any]] = None,
     ) -> None:
         if self._is_cancelled(run["id"]):
             return
+        artifact_name = "agent-response.md"
+        if artifact_arguments is not None:
+            if set(artifact_arguments) - {"path", "mode", "environment"}:
+                raise RuntimeError("Approved artifact arguments contain unsupported fields")
+            path = str(artifact_arguments.get("path", ""))
+            if not re.fullmatch(r"/artifacts/[A-Za-z0-9][A-Za-z0-9_.-]{0,99}\.md", path):
+                raise RuntimeError("Approved artifact path must be a Markdown name under /artifacts/")
+            if artifact_arguments.get("mode", "write") != "write":
+                raise RuntimeError("Only the approved artifact write operation is supported")
+            artifact_name = path.rsplit("/", 1)[-1]
         messages = self._build_messages(
             run,
             plan,
@@ -671,6 +590,11 @@ class ReferenceRuntimeExecutor:
             rejected=rejected,
         )
         model_identity = self.model_gateway.identity()
+        budget = RunBudget(self.db, run["id"], plan, model_identity)
+        reservation = budget.reserve(
+            input_tokens=input_token_reservation(messages),
+            output_tokens=int(getattr(getattr(self.model_gateway, "config", None), "max_completion_tokens", 4096)),
+        )
         self.events.append(
             run["id"],
             "graph.node.started",
@@ -736,7 +660,15 @@ class ReferenceRuntimeExecutor:
         try:
             model_response = await self.model_gateway.complete(messages, emit_model_event)
         except _RunCancelled:
+            budget.uncertain(reservation)
             return
+        except BaseException:
+            budget.uncertain(reservation)
+            raise
+        budget.settle(reservation,
+            input_tokens=model_response.usage.input_tokens,
+            output_tokens=model_response.usage.output_tokens,
+            estimated=model_response.usage.estimated)
         if self._is_cancelled(run["id"]):
             return
         output = self._clean_output(model_response.output)
@@ -767,134 +699,141 @@ class ReferenceRuntimeExecutor:
             f"- Human approval: {'granted' if approved else ('rejected' if rejected else 'not required')}\n"
             f"- Knowledge citations: {len((retrieval or {}).get('hits', []))}\n"
         )
-        artifact_id = new_id("art")
-        content_hash = hashlib.sha256(content.encode()).hexdigest()
-        now = utc_now()
-        self.db.execute(
-            """INSERT INTO artifacts
-               (id, tenant_id, project_id, run_id, name, media_type, size_bytes,
-                content_hash, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
-            (
-                artifact_id,
-                run["tenant_id"],
-                run["project_id"],
+        with self.db.transaction():
+            artifact_id = new_id("art")
+            content_hash = hashlib.sha256(content.encode()).hexdigest()
+            now = utc_now()
+            if artifact_arguments is not None:
+                self.events.append(
+                    run["id"], "graph.node.started",
+                    {"graph_id": run["current_attempt_id"], "node_id": "write_artifact", "node_name": "Persist approved artifact"},
+                    span_id="span_tool_write", parent_span_id="span_main",
+                    execution_path=["main", "write_artifact"],
+                )
+                self.events.append(
+                    run["id"], "tool.started",
+                    {"tool_name": "artifact_write", "arguments": artifact_arguments,
+                     "idempotency_key": (run.get("checkpoint") or {}).get("checkpoint_id")},
+                    span_id="span_tool_write", parent_span_id="span_main",
+                )
+            self.db.execute(
+                """INSERT INTO artifacts
+                   (id, tenant_id, project_id, run_id, name, media_type, size_bytes,
+                    content_hash, content, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                (
+                    artifact_id,
+                    run["tenant_id"],
+                    run["project_id"],
+                    run["id"],
+                    artifact_name,
+                    "text/markdown",
+                    len(content.encode()),
+                    content_hash,
+                    content,
+                    now,
+                ),
+            )
+            self.events.append(
                 run["id"],
-                "agent-response.md",
-                "text/markdown",
-                len(content.encode()),
-                content_hash,
-                content,
-                now,
-            ),
-        )
-        self.events.append(
-            run["id"],
-            "artifact.created",
-            {
-                "artifact_id": artifact_id,
-                "name": "agent-response.md",
-                "media_type": "text/markdown",
-                "content_hash": content_hash,
-            },
-        )
-        self.events.append(
-            run["id"],
-            "todo.updated",
-            {
-                "items": [
-                    {"id": "todo_1", "title": "Understand request and constraints", "status": "completed"},
-                    {"id": "todo_2", "title": "Inspect relevant project context", "status": "completed"},
-                    {"id": "todo_3", "title": "Prepare an auditable recommendation", "status": "completed"},
-                ]
-            },
-            span_id="span_main",
-        )
-        self.events.append(
-            run["id"],
-            "model.completed",
-            {
-                "output": output,
-                "finish_reason": model_response.finish_reason,
-                "model": model_response.model,
-                "provider": model_identity["provider"],
-                "api_style": model_identity.get("api_style"),
-                "has_reasoning": bool(model_response.reasoning),
-                "reasoning_kind": model_response.reasoning_kind,
-                "reasoning_tokens": model_response.usage.reasoning_tokens,
-            },
-            span_id="span_model_1",
-            parent_span_id="span_main",
-        )
-        self.events.append(
-            run["id"],
-            "graph.node.completed",
-            {
-                "graph_id": run["current_attempt_id"],
-                "node_id": "generate_response",
-                "status": "completed",
-                "finish_reason": model_response.finish_reason,
-            },
-            span_id="span_model_1",
-            parent_span_id="span_main",
-            execution_path=["main", "generate_response"],
-        )
-        input_tokens = model_response.usage.input_tokens
-        output_tokens = model_response.usage.output_tokens
-        subagent_calls = 1 if plan.get("subagent_bindings") else 0
-        input_rate = float(os.getenv("MODEL_INPUT_PRICE_PER_MILLION", "0"))
-        output_rate = float(os.getenv("MODEL_OUTPUT_PRICE_PER_MILLION", "0"))
-        cost = round(
-            input_tokens * input_rate / 1_000_000
-            + output_tokens * output_rate / 1_000_000,
-            6,
-        )
-        self.db.execute(
-            """INSERT INTO usage_ledger
-               (id, tenant_id, project_id, run_id, input_tokens, output_tokens,
-                model_calls, tool_calls, subagent_calls, cost, created_at)
-               VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?)""",
-            (
-                new_id("usage"),
-                run["tenant_id"],
-                run["project_id"],
+                "artifact.created",
+                {
+                    "artifact_id": artifact_id,
+                    "name": artifact_name,
+                    "media_type": "text/markdown",
+                    "content_hash": content_hash,
+                },
+            )
+            if artifact_arguments is not None:
+                self.events.append(
+                    run["id"], "tool.completed",
+                    {"tool_name": "artifact_write", "artifact_id": artifact_id,
+                     "path": artifact_arguments["path"], "content_hash": content_hash,
+                     "storage": "platform_artifact"},
+                    span_id="span_tool_write", parent_span_id="span_main",
+                )
+                self.events.append(
+                    run["id"], "graph.node.completed",
+                    {"graph_id": run["current_attempt_id"], "node_id": "write_artifact", "status": "completed"},
+                    span_id="span_tool_write", parent_span_id="span_main",
+                    execution_path=["main", "write_artifact"],
+                )
+            self.events.append(
                 run["id"],
-                input_tokens,
-                output_tokens,
-                tool_calls,
-                subagent_calls,
-                cost,
-                now,
-            ),
-        )
-        self.events.append(
-            run["id"],
-            "usage.updated",
-            {
-                "input_tokens": input_tokens,
-                "output_tokens": output_tokens,
-                "model_calls": 1,
-                "tool_calls": tool_calls,
-                "subagent_calls": subagent_calls,
-                "cost": cost,
-            },
-        )
-        self._set_status(run["id"], RunStatus.SUCCEEDED.value, output)
-        self.db.execute(
-            "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
-            (utc_now(), run["current_attempt_id"]),
-        )
-        self.events.append(
-            run["id"],
-            "graph.completed",
-            {
-                "graph_id": run["current_attempt_id"],
-                "graph_name": "agent_execution",
-                "status": "succeeded",
-            },
-            span_id="span_main",
-            execution_path=["main"],
-        )
-        self.events.append(run["id"], "run.completed", {"status": "SUCCEEDED", "output": output})
+                "model.completed",
+                {
+                    "output": output,
+                    "finish_reason": model_response.finish_reason,
+                    "model": model_response.model,
+                    "provider": model_identity["provider"],
+                    "api_style": model_identity.get("api_style"),
+                    "has_reasoning": bool(model_response.reasoning),
+                    "reasoning_kind": model_response.reasoning_kind,
+                    "reasoning_tokens": model_response.usage.reasoning_tokens,
+                },
+                span_id="span_model_1",
+                parent_span_id="span_main",
+            )
+            self.events.append(
+                run["id"],
+                "graph.node.completed",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "node_id": "generate_response",
+                    "status": "completed",
+                    "finish_reason": model_response.finish_reason,
+                },
+                span_id="span_model_1",
+                parent_span_id="span_main",
+                execution_path=["main", "generate_response"],
+            )
+            input_tokens = model_response.usage.input_tokens
+            output_tokens = model_response.usage.output_tokens
+            subagent_calls = 0
+            cost = self.db.fetch_one("SELECT cost FROM usage_ledger WHERE id=?", (reservation,))["cost"]
+            self.db.execute(
+                """INSERT INTO usage_ledger
+                   (id, tenant_id, project_id, run_id, input_tokens, output_tokens,
+                    model_calls, tool_calls, subagent_calls, cost, created_at)
+                   VALUES (?, ?, ?, ?, 0, 0, 0, ?, ?, 0, ?)""",
+                (
+                    new_id("usage"),
+                    run["tenant_id"],
+                    run["project_id"],
+                    run["id"],
+                    tool_calls,
+                    subagent_calls,
+                    now,
+                ),
+            )
+            self.events.append(
+                run["id"],
+                "usage.updated",
+                {
+                    "input_tokens": input_tokens,
+                    "output_tokens": output_tokens,
+                    "model_calls": 1,
+                    "tool_calls": tool_calls,
+                    "subagent_calls": subagent_calls,
+                    "cost": cost,
+                },
+            )
+            self._set_status(run["id"], RunStatus.SUCCEEDED.value, output)
+            self.db.execute(
+                "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
+                (utc_now(), run["current_attempt_id"]),
+            )
+            self.events.append(
+                run["id"],
+                "graph.completed",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "graph_name": "agent_execution",
+                    "status": "succeeded",
+                },
+                span_id="span_main",
+                execution_path=["main"],
+            )
+            self.events.append(run["id"], "run.completed", {"status": "SUCCEEDED", "output": output})
 
     def _build_messages(
         self,
@@ -918,7 +857,10 @@ class ReferenceRuntimeExecutor:
         if skill_context:
             system_parts.append(skill_context)
         if approved:
-            system_parts.append("A human reviewer approved the gated action for this run.")
+            system_parts.append(
+                "A human reviewer approved creating a platform artifact for this run. "
+                "This is not permission or evidence of an external deployment; no external deployment has occurred."
+            )
         elif rejected:
             system_parts.append(
                 "A human reviewer rejected the gated action. Explain the safe outcome without "

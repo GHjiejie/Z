@@ -29,8 +29,8 @@ class UploadPrepare(BaseModel):
 
 
 class UploadComplete(BaseModel):
-    etag: Optional[str] = None
-    object_version_id: Optional[str] = None
+    etag: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    object_version_id: Optional[str] = Field(default=None, min_length=1, max_length=1024)
 
 
 class KnowledgeSearchFilters(BaseModel):
