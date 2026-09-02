@@ -41,7 +41,7 @@ class AuditState(AgentState):
     audit_events: Annotated[list[str], operator.add]
 
 
-class AuditMiddleware(AgentMiddleware):
+class AuditMiddleware(AgentMiddleware[AuditState, None, Any]):
     """可复用的生命周期审计 middleware。
 
     不在 ``self`` 上累加运行时数据：所有状态保存在 LangGraph state 中，因此并发
@@ -95,6 +95,8 @@ class AuditMiddleware(AgentMiddleware):
         ``SystemMessage.content_blocks`` 的复制确保已有 system prompt 不会被覆盖。
         这里也可以扩展为模型路由、重试、缓存或降级。
         """
+
+        print(f"ModelRequest: {request}")
         dynamic_context = (
             f"Audit run={request.state.get('run_id', 'unknown')}; "
             f"model-call={request.state.get('model_calls', 0)}."
@@ -171,7 +173,7 @@ def build_agent():
 
     return create_agent(
         model=chat_model,
-        tools=[multiply],
+        tools=[],
         system_prompt="You are a concise arithmetic assistant. Use multiply for multiplication.",
         middleware=[AuditMiddleware()],
     )
