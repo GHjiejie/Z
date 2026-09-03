@@ -134,6 +134,7 @@ class AuditMiddleware(AgentMiddleware[AuditState, None, Any]):
         handler: Callable[[ToolCallRequest], ToolMessage | Command],
     ) -> ToolMessage | Command:
         """包裹每个工具调用；将异常变成 agent 可处理的 tool error。"""
+
         name = request.tool_call["name"]
         self._record(
             "wrap_tool_call", f"calling {name} with {request.tool_call['args']}"
