@@ -39,6 +39,7 @@ result = agent.invoke(
     }
 )
 
+print(result)
 contact = result["structured_response"]
 print(contact)
 print(type(contact))

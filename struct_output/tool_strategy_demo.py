@@ -38,6 +38,7 @@ result = agent.invoke(
     }
 )
 
+print(result)
 review = result["structured_response"]
 print(review)
 print(type(review))
