@@ -28,8 +28,6 @@ chat_model = ChatOpenAI(
     base_url=api_base_url,
 )
 
-print("chat_model:", chat_model)
-
 
 # def get_current_model_profile() -> dict[str, Any]:
 #     """Return the configured model name and its LangChain capability profile."""
