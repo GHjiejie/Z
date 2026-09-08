@@ -5,10 +5,15 @@ import json
 import math
 import os
 import re
-import urllib.request
 from typing import List
+from time import monotonic
+
+import httpx
 
 from packages.knowledge.errors import KnowledgeStorageError
+from packages.secrets import read_secret
+from packages.http_security import provider_client, validate_provider_url
+from packages.knowledge.ports import EmbeddingResult
 
 
 def lexical_tokens(text: str) -> List[str]:
@@ -24,6 +29,17 @@ class HashEmbeddingProvider:
 
     model_revision = "deepagent-hash-embedding-1.0"
     dimensions = 256
+
+    def identity(self):
+        return {"provider": "test_double", "route": "local-hash", "model": self.model_revision}
+
+    def embed_with_usage(self, texts: List[str]) -> EmbeddingResult:
+        from packages.operations.telemetry import operation
+        with operation('knowledge.embed'):
+            return self._embed_with_usage(texts)
+
+    def _embed_with_usage(self, texts: List[str]) -> EmbeddingResult:
+        return EmbeddingResult(self.embed_documents(texts), sum(len(lexical_tokens(text)) for text in texts))
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
         return [self._embed(text) for text in texts]
@@ -43,32 +59,68 @@ class HashEmbeddingProvider:
 
 
 class OpenAICompatibleEmbeddingProvider:
-    def __init__(self, base_url: str, api_key: str, model: str, dimensions: int):
-        self.base_url = base_url.rstrip("/")
+    def __init__(self, base_url: str, api_key: str, model: str, dimensions: int, *, transport=None):
+        self.base_url = validate_provider_url(
+            base_url, allowlist_variable="KNOWLEDGE_EMBEDDING_ALLOWED_ORIGINS"
+        )
         self.api_key = api_key
         self.model_revision = model
         self.dimensions = dimensions
+        self.transport = transport
+
+    def identity(self):
+        return {"provider": "embeddings", "route": self.base_url, "model": self.model_revision}
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]:
-        request = urllib.request.Request(
-            f"{self.base_url}/embeddings",
-            data=json.dumps({"model": self.model_revision, "input": texts}).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
+        return self.embed_with_usage(texts).vectors
+
+    def embed_with_usage(self, texts: List[str]) -> EmbeddingResult:
+        from packages.operations.telemetry import operation
+        with operation('knowledge.embed'):
+            return self._embed_with_usage(texts)
+
+    def _embed_with_usage(self, texts: List[str]) -> EmbeddingResult:
+        deadline = monotonic() + 60
         try:
-            with urllib.request.urlopen(request, timeout=60) as response:  # nosec: configured endpoint
-                body = json.loads(response.read().decode("utf-8"))
-        except Exception as exc:
-            raise KnowledgeStorageError(f"Embedding provider request failed: {exc}") from exc
-        ordered = sorted(body.get("data", []), key=lambda item: item.get("index", 0))
-        vectors = [item["embedding"] for item in ordered]
-        if len(vectors) != len(texts) or any(len(vector) != self.dimensions for vector in vectors):
+            with provider_client(self.base_url, transport=self.transport, timeout=httpx.Timeout(15,connect=10)) as client:
+                with client.stream(
+                    "POST", f"{self.base_url}/embeddings",
+                    json={"model": self.model_revision, "input": texts, "encoding_format": "float"},
+                    headers={"Authorization": f"Bearer {self.api_key}"},
+                ) as response:
+                    response.raise_for_status()
+                    content = bytearray()
+                    for chunk in response.iter_bytes():
+                        if monotonic() > deadline:
+                            raise KnowledgeStorageError("Embedding response exceeded its wall-clock deadline")
+                        content.extend(chunk)
+                        if len(content) > 16 * 1024 * 1024:
+                            raise KnowledgeStorageError("Embedding response exceeds the size limit")
+                    body = json.loads(content)
+                    receipt = response.headers.get("x-request-id", "")[:512] or None
+        except (httpx.HTTPError, OSError, ValueError) as exc:
+            raise KnowledgeStorageError(
+                f"Embedding provider request failed ({exc.__class__.__name__})"
+            ) from exc
+        if not isinstance(body, dict) or not isinstance(body.get("data"), list):
+            raise KnowledgeStorageError("Embedding provider returned an invalid response")
+        if body.get("model") != self.model_revision:
+            raise KnowledgeStorageError("Embedding provider returned a different model than the pinned revision")
+        data = body["data"]
+        if (any(not isinstance(item, dict) or type(item.get("index")) is not int for item in data)
+                or sorted(item["index"] for item in data) != list(range(len(texts)))):
+            raise KnowledgeStorageError("Embedding provider returned invalid vector indices")
+        vectors = [item.get("embedding") for item in sorted(data, key=lambda item: item["index"])]
+        if any(not isinstance(vector, list) or len(vector) != self.dimensions
+               or any(type(value) not in {int, float} or not math.isfinite(value) for value in vector)
+               for vector in vectors):
             raise KnowledgeStorageError("Embedding provider returned an invalid vector shape")
-        return vectors
+        usage = body.get("usage") or {}
+        tokens = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        total = usage.get("total_tokens") if isinstance(usage, dict) else None
+        if type(tokens) is not int or not 0 <= tokens <= 10**9 or type(total) is not int or total != tokens:
+            tokens = None
+        return EmbeddingResult(vectors, tokens, receipt)
 
     def embed_query(self, text: str) -> List[float]:
         return self.embed_documents([text])[0]
@@ -79,7 +131,7 @@ def create_embedding_provider():
     if provider == "hash":
         return HashEmbeddingProvider()
     if provider == "openai_compatible":
-        api_key = os.getenv("KNOWLEDGE_EMBEDDING_API_KEY", "")
+        api_key = read_secret("KNOWLEDGE_EMBEDDING_API_KEY")
         base_url = os.getenv("KNOWLEDGE_EMBEDDING_BASE_URL", "")
         model = os.getenv("KNOWLEDGE_EMBEDDING_MODEL", "")
         dimensions = int(os.getenv("KNOWLEDGE_EMBEDDING_DIMENSIONS", "0"))

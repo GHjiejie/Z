@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import tempfile
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Optional
@@ -25,7 +27,7 @@ class LocalObjectStorage:
         return f"local://{self.bucket}/{object_key}"
 
     def create_upload_authorization(
-        self, object_key: str, content_type: str, expires_seconds: int = 900
+        self, object_key: str, content_type: str, expires_seconds: int = 900, *, size_bytes: int
     ) -> UploadAuthorization:
         expires_at = datetime.now(timezone.utc) + timedelta(seconds=expires_seconds)
         return UploadAuthorization(
@@ -38,9 +40,27 @@ class LocalObjectStorage:
     def put_content(self, object_key: str, content: bytes, content_type: str) -> ObjectMetadata:
         path = self._path(object_key)
         path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = path.with_name(f".{path.name}.uploading")
-        temporary.write_bytes(content)
-        temporary.replace(path)
+        if path.exists():
+            existing = self.get_content(object_key)
+            if hashlib.sha256(existing).digest() != hashlib.sha256(content).digest():
+                raise KnowledgeStorageError("Stored document objects are immutable")
+            return self.head_object(object_key)
+        with tempfile.NamedTemporaryFile(
+            mode="wb", dir=path.parent, prefix=f".{path.name}.", suffix=".uploading", delete=False
+        ) as staging:
+            temporary = Path(staging.name)
+            try:
+                staging.write(content)
+                staging.flush()
+                os.fsync(staging.fileno())
+                try:
+                    os.link(temporary, path)
+                except FileExistsError:
+                    existing = self.get_content(object_key)
+                    if hashlib.sha256(existing).digest() != hashlib.sha256(content).digest():
+                        raise KnowledgeStorageError("Stored document objects are immutable")
+            finally:
+                temporary.unlink(missing_ok=True)
         etag = hashlib.md5(content, usedforsecurity=False).hexdigest()  # nosec: OSS-compatible ETag only
         self._metadata_path(path).write_text(
             json.dumps({"content_type": content_type, "etag": etag}, ensure_ascii=False),
@@ -80,7 +100,11 @@ class LocalObjectStorage:
         path = self._path(object_key)
         if not path.is_file():
             raise KnowledgeStorageError(f"Object does not exist: {object_key}")
-        return path.read_bytes()
+        with path.open("rb") as stream:
+            content = stream.read(100 * 1024 * 1024 + 1)
+        if len(content) > 100 * 1024 * 1024:
+            raise KnowledgeStorageError("Local object exceeds the 100 MiB content limit")
+        return content
 
     def create_download_url(
         self, object_key: str, version_id: Optional[str] = None, expires_seconds: int = 300

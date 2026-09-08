@@ -4,20 +4,36 @@ import csv
 import io
 import json
 import re
+import zipfile
 from html.parser import HTMLParser
 from pathlib import PurePosixPath
 from typing import List
 
-from packages.knowledge.errors import KnowledgeValidationError
+from packages.knowledge.errors import KnowledgeValidationError, ParseLimitExceeded
 from packages.knowledge.models import ParsedBlock
+from .limits import ParseLimits
+
+
+class _Blocks(list):
+    def __init__(self, limits):
+        super().__init__()
+        self.limits, self.characters = limits, 0
+
+    def append(self, block):
+        self.characters += len(block.text)
+        if len(self) >= self.limits.max_blocks or self.characters > self.limits.max_text_characters:
+            raise ParseLimitExceeded("Document exceeds extracted text or block limits")
+        if any(isinstance(value, str) and len(value) > 512 for value in block.locator.values()):
+            raise ParseLimitExceeded("Document location metadata exceeds the limit")
+        super().append(block)
 
 
 class _TextHTMLParser(HTMLParser):
-    def __init__(self):
+    def __init__(self, limits):
         super().__init__()
         self.parts: List[str] = []
         self.section: str | None = None
-        self.blocks: List[ParsedBlock] = []
+        self.blocks = _Blocks(limits)
 
     def handle_starttag(self, tag, attrs):
         if tag in {"h1", "h2", "h3", "h4", "h5", "h6", "p", "li", "tr", "br"}:
@@ -49,9 +65,14 @@ class _TextHTMLParser(HTMLParser):
 
 
 class DocumentParser:
-    version = "structure-parser-1.0"
+    version = "structure-parser-2.0"
+
+    def __init__(self, limits: ParseLimits | None = None):
+        self.limits = limits or ParseLimits()
 
     def parse(self, content: bytes, content_type: str, filename: str) -> List[ParsedBlock]:
+        if len(content) > self.limits.max_input_bytes:
+            raise ParseLimitExceeded("Document exceeds input size limit")
         suffix = PurePosixPath(filename).suffix.lower()
         normalized_type = content_type.split(";", 1)[0].strip().lower()
         if suffix == ".pdf" or normalized_type == "application/pdf":
@@ -59,17 +80,19 @@ class DocumentParser:
         if suffix == ".docx" or normalized_type.endswith("wordprocessingml.document"):
             return self._parse_docx(content)
         if suffix in {".html", ".htm"} or normalized_type == "text/html":
-            parser = _TextHTMLParser()
+            parser = _TextHTMLParser(self.limits)
             parser.feed(self._decode(content))
             parser.close()
-            return parser.blocks
+            return self._require_content(parser.blocks)
         if suffix == ".json" or normalized_type == "application/json":
             try:
                 value = json.loads(self._decode(content))
                 text = json.dumps(value, ensure_ascii=False, indent=2)
             except json.JSONDecodeError as exc:
                 raise KnowledgeValidationError(f"Invalid JSON document: {exc}") from exc
-            return [ParsedBlock(text=text, locator={"section": "root"})]
+            blocks = _Blocks(self.limits)
+            blocks.append(ParsedBlock(text=text, locator={"section": "root"}))
+            return blocks
         if suffix == ".csv" or normalized_type == "text/csv":
             return self._parse_csv(content)
         if suffix in {".md", ".markdown"} or normalized_type in {
@@ -90,14 +113,24 @@ class DocumentParser:
             raise KnowledgeValidationError("PDF parsing requires the pypdf dependency") from exc
         try:
             reader = PdfReader(io.BytesIO(content))
-            blocks = []
+            if len(reader.pages) > self.limits.max_pages:
+                raise ParseLimitExceeded("PDF exceeds page count limit")
+            blocks = _Blocks(self.limits)
+            expanded = 0
             for index, page in enumerate(reader.pages, start=1):
+                stream = page.get_contents()
+                if stream is not None:
+                    expanded += len(stream.get_data())
+                if expanded > self.limits.max_expanded_bytes:
+                    raise ParseLimitExceeded("PDF exceeds expanded content limit")
                 text = (page.extract_text() or "").strip()
                 if text:
                     blocks.append(ParsedBlock(text=text, locator={"page": index}))
             return self._require_content(blocks)
+        except (ParseLimitExceeded, MemoryError):
+            raise
         except Exception as exc:
-            raise KnowledgeValidationError(f"Unable to parse PDF: {exc}") from exc
+            raise KnowledgeValidationError("Unable to parse PDF document") from exc
 
     def _parse_docx(self, content: bytes) -> List[ParsedBlock]:
         try:
@@ -105,8 +138,9 @@ class DocumentParser:
         except ImportError as exc:
             raise KnowledgeValidationError("DOCX parsing requires the python-docx dependency") from exc
         try:
+            self._validate_docx_archive(content)
             document = Document(io.BytesIO(content))
-            blocks: List[ParsedBlock] = []
+            blocks = _Blocks(self.limits)
             section: str | None = None
             for paragraph in document.paragraphs:
                 text = paragraph.text.strip()
@@ -125,11 +159,39 @@ class DocumentParser:
                         ParsedBlock(text=text, locator={"table": table_index, "section": section})
                     )
             return self._require_content(blocks)
+        except (ParseLimitExceeded, MemoryError):
+            raise
         except Exception as exc:
-            raise KnowledgeValidationError(f"Unable to parse DOCX: {exc}") from exc
+            raise KnowledgeValidationError("Unable to parse DOCX document") from exc
+
+    def _validate_docx_archive(self, content):
+        with zipfile.ZipFile(io.BytesIO(content)) as archive:
+            entries = archive.infolist()
+            if len(entries) > self.limits.max_archive_entries:
+                raise ParseLimitExceeded("DOCX exceeds archive entry limit")
+            expanded = 0
+            seen = set()
+            for entry in entries:
+                path = PurePosixPath(entry.filename)
+                if (entry.filename in seen or path.is_absolute() or '..' in path.parts or '\\' in entry.filename
+                        or entry.flag_bits & 1 or entry.compress_type not in (zipfile.ZIP_STORED, zipfile.ZIP_DEFLATED)):
+                    raise KnowledgeValidationError("Unsupported or ambiguous DOCX archive")
+                seen.add(entry.filename)
+                expanded += entry.file_size
+                if expanded > self.limits.max_expanded_bytes:
+                    raise ParseLimitExceeded("DOCX exceeds expanded size limit")
+                if entry.file_size > max(1, entry.compress_size) * self.limits.max_compression_ratio:
+                    raise ParseLimitExceeded("DOCX exceeds compression ratio limit")
+            actual = 0
+            for entry in entries:
+                with archive.open(entry) as stream:
+                    while data := stream.read(min(65536, self.limits.max_expanded_bytes - actual + 1)):
+                        actual += len(data)
+                        if actual > self.limits.max_expanded_bytes:
+                            raise ParseLimitExceeded("DOCX exceeds expanded size limit")
 
     def _parse_markdown(self, text: str) -> List[ParsedBlock]:
-        blocks: List[ParsedBlock] = []
+        blocks = _Blocks(self.limits)
         section: str | None = None
         buffer: List[str] = []
 
@@ -156,27 +218,29 @@ class DocumentParser:
         return self._require_content(blocks)
 
     def _parse_plain_text(self, text: str) -> List[ParsedBlock]:
-        blocks = [
-            ParsedBlock(text=part.strip(), locator={"paragraph": index})
-            for index, part in enumerate(re.split(r"\n\s*\n", text), start=1)
-            if part.strip()
-        ]
+        blocks = _Blocks(self.limits)
+        for index, part in enumerate(re.split(r"\n\s*\n", text), start=1):
+            if part.strip():
+                blocks.append(ParsedBlock(text=part.strip(), locator={"paragraph": index}))
         return self._require_content(blocks)
 
     def _parse_csv(self, content: bytes) -> List[ParsedBlock]:
+        csv.field_size_limit(self.limits.max_text_characters)
         reader = csv.reader(io.StringIO(self._decode(content)))
-        blocks = []
+        blocks = _Blocks(self.limits)
         for index, row in enumerate(reader, start=1):
             text = " | ".join(cell.strip() for cell in row)
             if text.strip(" |"):
                 blocks.append(ParsedBlock(text=text, locator={"row": index}))
         return self._require_content(blocks)
 
-    @staticmethod
-    def _decode(content: bytes) -> str:
+    def _decode(self, content: bytes) -> str:
         for encoding in ("utf-8-sig", "utf-8", "gb18030"):
             try:
-                return content.decode(encoding)
+                text = content.decode(encoding)
+                if len(text) > self.limits.max_text_characters:
+                    raise ParseLimitExceeded("Document exceeds text character limit")
+                return text
             except UnicodeDecodeError:
                 continue
         raise KnowledgeValidationError("Document text encoding is not supported")

@@ -6,6 +6,7 @@ from fastapi.testclient import TestClient
 
 from apps.platform_api.main import create_app
 from packages.runtime.model_gateway import DeterministicModelGateway
+from packages.sandbox.fake_provider import FakeSandboxProvider
 
 
 def _client(tmp_path):
@@ -15,6 +16,7 @@ def _client(tmp_path):
             seed=True,
             model_gateway=DeterministicModelGateway(),
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     )
 
@@ -74,6 +76,13 @@ def test_release_intent_creates_sticky_routed_thread_and_audit_events(tmp_path):
 
         # A later turn stays on the thread's pinned deployment and does not create
         # a second routing decision.
+        follow_up = client.post(
+            f"/api/v1/threads/{body['thread']['id']}/runs",
+            json={"input": "现在解释一下相关代码，不要切换 Agent。"},
+        )
+        assert follow_up.status_code == 409
+        cancelled = client.post(f"/api/v1/runs/{body['run']['id']}:cancel")
+        assert cancelled.status_code == 200
         follow_up = client.post(
             f"/api/v1/threads/{body['thread']['id']}/runs",
             json={"input": "现在解释一下相关代码，不要切换 Agent。"},

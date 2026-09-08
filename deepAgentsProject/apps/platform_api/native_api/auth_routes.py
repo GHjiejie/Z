@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import secrets
 from typing import Literal, Optional
 
 from fastapi import APIRouter, Depends, Query, Request, Response
@@ -42,7 +43,14 @@ def _clear_session_cookie(response: Response, auth) -> None:
         key=auth.cookie_name,
         httponly=True,
         secure=auth.cookie_secure,
-        samesite="lax",
+        samesite=auth.cookie_samesite,
+        path="/",
+    )
+    response.delete_cookie(
+        key=auth.csrf_cookie_name,
+        httponly=False,
+        secure=auth.cookie_secure,
+        samesite=auth.cookie_samesite,
         path="/",
     )
 
@@ -65,7 +73,16 @@ def login(
         max_age=session["expires_in"],
         httponly=True,
         secure=container.auth.cookie_secure,
-        samesite="lax",
+        samesite=container.auth.cookie_samesite,
+        path="/",
+    )
+    response.set_cookie(
+        key=container.auth.csrf_cookie_name,
+        value=secrets.token_urlsafe(32),
+        max_age=session["expires_in"],
+        httponly=False,
+        secure=container.auth.cookie_secure,
+        samesite=container.auth.cookie_samesite,
         path="/",
     )
     return session

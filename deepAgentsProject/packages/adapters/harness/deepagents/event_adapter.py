@@ -186,6 +186,21 @@ class DeepAgentsEventAdapter:
     def output(self) -> str:
         return "".join(self.output_parts).strip()
 
+    def restore_output(self, messages: list[Any], checkpoint_id: str) -> None:
+        """Recover a completed answer without inventing another model call."""
+        if self.output_parts:
+            return
+        for message in reversed(messages):
+            if isinstance(message, AIMessage):
+                if message.tool_calls:
+                    return
+                text = redact_text(_message_text(message.content))
+                if text:
+                    self.output_parts.append(text)
+                    self._emit("model.output.restored", {"checkpoint_id": checkpoint_id,
+                                                         "message_id": message.id})
+                return
+
     def _emit(
         self,
         event_type: str,

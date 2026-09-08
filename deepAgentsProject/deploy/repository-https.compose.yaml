@@ -1,0 +1,13 @@
+# Optional overlay for an operator-approved repository CA. Public system CAs
+# need no overlay. This is public trust material, never a credential/private key.
+services:
+  api:
+    environment:
+      DEEPAGENT_REPOSITORY_CA_FILE: /run/repository-trust/ca.pem
+    configs:
+      - source: repository-ca
+        target: /run/repository-trust/ca.pem
+        mode: 0444
+configs:
+  repository-ca:
+    file: "${REPOSITORY_CA_SOURCE_FILE:?Provide an approved public CA certificate file}"

@@ -1,0 +1,12 @@
+# Optional public SSH host keys. Does not provide user keys or SSH-agent access.
+services:
+  api:
+    environment:
+      DEEPAGENT_REPOSITORY_SSH_KNOWN_HOSTS_FILE: /run/repository-trust/known_hosts
+    configs:
+      - source: repository-known-hosts
+        target: /run/repository-trust/known_hosts
+        mode: 0444
+configs:
+  repository-known-hosts:
+    file: "${REPOSITORY_KNOWN_HOSTS_SOURCE_FILE:?Provide independently verified public repository host keys}"

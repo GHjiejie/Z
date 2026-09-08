@@ -2,7 +2,8 @@ from __future__ import annotations
 
 from typing import Dict, List, Literal, Optional
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from packages.releases.models import ReleaseModel
 
 from packages.coding.models import WorkspaceBinding
 
@@ -67,6 +68,7 @@ class RoutedRunCreate(BaseModel):
 
 
 class RoutingProfileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", allow_inf_nan=False)
     mode: RoutingMode = "active"
     auto_route_threshold: float = Field(default=0.80, ge=0, le=1)
     confirmation_threshold: float = Field(default=0.55, ge=0, le=1)
@@ -89,4 +91,21 @@ class RoutingProfileUpdate(BaseModel):
             raise ValueError(
                 "Unknown routing targets: " + ", ".join(sorted(unknown))
             )
+        return self
+
+
+class RoutingChangeCreate(ReleaseModel):
+    expected_router_revision_id: str = Field(min_length=1, max_length=100)
+    action: Literal["update", "rollback"] = "update"
+    profile: RoutingProfileUpdate | None = None
+    rollback_revision_id: str | None = Field(default=None, min_length=1, max_length=100)
+    reason: str = Field(min_length=5, max_length=1000)
+    expires_in_seconds: int = Field(default=3600, ge=60, le=86400)
+
+    @model_validator(mode="after")
+    def exact_candidate(self):
+        if self.action == "update" and (self.profile is None or self.rollback_revision_id is not None):
+            raise ValueError("Update requires a profile and no rollback revision")
+        if self.action == "rollback" and (self.rollback_revision_id is None or self.profile is not None):
+            raise ValueError("Rollback requires a revision and no replacement profile")
         return self

@@ -30,6 +30,9 @@ Run targeted checks while working. The platform will independently compute the
 final diff and verification report, so never claim that a command passed unless
 its real tool result says so. Do not commit, push, create a pull request, deploy,
 install dependencies, access the network, or look for platform credentials.
+Do not leave background processes running: every command must terminate before
+the platform can publish a recoverable checkpoint. Files, not process memory,
+are restored after a worker failure.
 Finish with a concise account of changes, checks, failures, and remaining risks.
 """.strip()
 

@@ -12,6 +12,7 @@ import { KnowledgePage } from './pages/KnowledgePage'
 import { LoginPage } from './pages/LoginPage'
 import { PlaygroundPage } from './pages/PlaygroundPage'
 import { ResourcesPage } from './pages/ResourcesPage'
+import { ReleasesPage } from './pages/ReleasesPage'
 import { RunsPage } from './pages/RunsPage'
 import { SettingsPage } from './pages/SettingsPage'
 import { UsersPage } from './pages/UsersPage'
@@ -52,6 +53,7 @@ function ApplicationRoutes() {
         <Route path="advanced" element={<AdvancedPage />} />
         <Route path="advanced/overview" element={<DashboardPage />} />
         <Route path="advanced/agents" element={<AgentsPage />} />
+        <Route path="advanced/releases" element={<ReleasesPage />} />
         <Route path="advanced/coding" element={<CodingWorkbenchPage />} />
         <Route path="advanced/runs" element={<RunsPage />} />
         <Route path="advanced/runs/:runId" element={<RunsPage />} />

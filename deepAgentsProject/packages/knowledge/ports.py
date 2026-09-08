@@ -36,6 +36,7 @@ class ObjectStorage(Protocol):
         object_key: str,
         content_type: str,
         expires_seconds: int = 900,
+        *, size_bytes: int,
     ) -> UploadAuthorization: ...
 
     def put_content(self, object_key: str, content: bytes, content_type: str) -> ObjectMetadata: ...
@@ -49,9 +50,20 @@ class ObjectStorage(Protocol):
     ) -> Optional[str]: ...
 
 
+@dataclass(frozen=True)
+class EmbeddingResult:
+    vectors: List[List[float]]
+    input_tokens: int | None
+    provider_receipt: str | None = None
+
+
 class EmbeddingProvider(Protocol):
     model_revision: str
     dimensions: int
+
+    def identity(self) -> Dict[str, str]: ...
+
+    def embed_with_usage(self, texts: List[str]) -> EmbeddingResult: ...
 
     def embed_documents(self, texts: List[str]) -> List[List[float]]: ...
 

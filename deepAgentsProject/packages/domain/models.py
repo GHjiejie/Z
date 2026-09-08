@@ -48,7 +48,7 @@ class RunLimits(BaseModel):
     max_subagent_concurrency: int = Field(default=4, ge=0, le=50)
     max_sandbox_cpu_seconds: int = Field(default=120, ge=0, le=86400)
     max_output_bytes: int = Field(default=1_000_000, ge=1024)
-    max_cost: Optional[float] = Field(default=5.0, ge=0)
+    max_cost: Optional[float] = Field(default=5.0, ge=0, le=1_000_000_000, allow_inf_nan=False)
 
 
 class CapabilityBindings(BaseModel):
@@ -96,7 +96,7 @@ class AgentDraftUpdate(BaseModel):
     name: Optional[str] = Field(default=None, min_length=2, max_length=80)
     description: Optional[str] = Field(default=None, max_length=500)
     draft: AgentDraftSpec
-    version: Optional[int] = None
+    version: int = Field(ge=1)
 
 
 class DeploymentCreate(BaseModel):
@@ -109,6 +109,28 @@ class ThreadCreate(BaseModel):
     agent_deployment_id: str
     title: str = Field(default="New agent task", min_length=1, max_length=160)
     workspace: Optional[WorkspaceBinding] = None
+
+
+class ThreadMember(BaseModel):
+    model_config = {"extra": "forbid"}
+    user_id: str = Field(min_length=1, max_length=100)
+    access: Literal["read", "write"] = "read"
+
+
+class ThreadAccessUpdate(BaseModel):
+    model_config = {"extra": "forbid"}
+    version: int = Field(ge=1)
+    visibility: Literal["private", "members", "project"]
+    members: List[ThreadMember] = Field(default_factory=list, max_length=100)
+    reason: str = Field(min_length=5, max_length=500)
+
+    @field_validator("reason")
+    @classmethod
+    def meaningful_reason(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) < 5:
+            raise ValueError("Sharing changes require a meaningful reason of at least 5 characters")
+        return value
 
 
 class RunCreate(BaseModel):
@@ -152,3 +174,4 @@ class TenantContext(BaseModel):
     user_id: str = "user_demo"
     roles: List[str] = Field(default_factory=lambda: ["owner"])
     is_super_admin: bool = False
+    session_id: Optional[str] = None

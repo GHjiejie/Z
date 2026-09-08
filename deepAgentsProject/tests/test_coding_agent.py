@@ -4,6 +4,7 @@ import asyncio
 import subprocess
 import tarfile
 import time
+import pytest
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,57 @@ from packages.sandbox.fake_provider import FakeSandboxProvider
 class ToolCallingFakeModel(FakeMessagesListChatModel):
     def bind_tools(self, *args, **kwargs):
         return self
+
+
+class CountingCodingModel(ToolCallingFakeModel):
+    calls: int = 0
+
+    def _generate(self, *args, **kwargs):
+        self.calls += 1
+        return super()._generate(*args, **kwargs)
+
+
+@pytest.fixture
+def real_docker_provider():
+    class OwnedTestProvider(DockerSandboxProvider):
+        async def provision(self, request):
+            result = await super().provision(request)
+            owned.append(result.external_id)
+            return result
+
+    owned = []
+    provider = OwnedTestProvider(image="deepagent/coding-runtime:0.1.0",
+        dockerfile_root="docker/coding-runtime", auto_build=True)
+    try:
+        yield provider
+    finally:
+        # Record at provisioning time, not after final assertions. A failing
+        # acceptance must not leave its container/volumes on the shared daemon.
+        for external_id in reversed(owned):
+            asyncio.run(provider.destroy(external_id))
+
+
+@pytest.mark.parametrize("max_cost, expected_calls", [(0, 0), (5, 1)])
+def test_coding_model_budget_is_enforced_before_provider_invocation(tmp_path, max_cost, expected_calls):
+    model = CountingCodingModel(responses=[
+        AIMessage(content="Inspect first", tool_calls=[{
+            "name": "ls", "args": {"path": "/workspace/repo"}, "id": "budget-ls", "type": "tool_call",
+        }], usage_metadata={"input_tokens": 10, "output_tokens": 10, "total_tokens": 20}),
+        AIMessage(content="This second call must not be allowed."),
+    ])
+    app = create_app(str(tmp_path / "coding-budget.db"), seed=True, load_env=False,
+        model_gateway=DeterministicModelGateway(), coding_model=model,
+        sandbox_providers=[FakeSandboxProvider(_command_result)])
+    with TestClient(app) as client:
+        draft = _coding_draft()
+        draft["limits"].update(max_cost=max_cost, max_model_calls=1)
+        thread = _create_coding_thread(client, draft)
+        response = client.post(f"/api/v1/threads/{thread['id']}/runs", json={"input": "Inspect the repository."})
+        assert response.status_code == 202
+        run = _wait(client, response.json()["id"], {"FAILED_BUDGET", "FAILED", "SUCCEEDED"})
+        assert run["status"] == "FAILED_BUDGET", run.get("output")
+        assert model.calls == expected_calls
+        assert run["usage"]["model_calls"] == expected_calls
 
 
 def _command_result(command: str) -> ExecuteResponse:
@@ -418,7 +470,7 @@ def test_real_deepagents_loop_builds_audited_changeset(tmp_path):
         ).json()["items"][0]
         approved = client.post(
             f"/api/v1/runs/{run['id']}/changesets/{change_set['id']}:approve",
-            json={"message": "Reviewed"},
+            json={"message": "Reviewed", "version": change_set["version"]},
         )
         assert approved.status_code == 200, approved.text
         assert approved.json()["status"] == "DELIVERED"
@@ -464,6 +516,7 @@ def test_repository_registration_rejects_paths_outside_allowed_roots(tmp_path):
             seed=True,
             model_gateway=DeterministicModelGateway(),
             load_env=False,
+            sandbox_providers=[FakeSandboxProvider()],
         )
     ) as client:
         response = client.post(
@@ -916,7 +969,7 @@ def test_coding_reviewer_response_resumes_pending_graph_without_running_tool(
         assert missing.status_code == 404
 
 
-def test_lost_sandbox_restores_validated_changeset_and_rejects_tampering(tmp_path):
+def test_lost_sandbox_restores_paired_files_and_rejects_tampering(tmp_path):
     model = ToolCallingFakeModel(
         responses=[
             AIMessage(
@@ -973,7 +1026,7 @@ def test_lost_sandbox_restores_validated_changeset_and_rejects_tampering(tmp_pat
         second_events = client.get(
             f"/api/v1/runs/{second['id']}/events"
         ).json()["items"]
-        assert "workspace.recovering" in {item["type"] for item in second_events}
+        assert "workspace.recovered" in {item["type"] for item in second_events}
         recovered_workspace = services.db.fetch_one(
             "SELECT * FROM coding_workspaces WHERE thread_id=?", (thread["id"],)
         )
@@ -983,6 +1036,8 @@ def test_lost_sandbox_restores_validated_changeset_and_rejects_tampering(tmp_pat
             "SELECT * FROM sandbox_instances WHERE id=?",
             (recovered_workspace["sandbox_instance_id"],),
         )
+        restored = asyncio.run(provider.resume(recovered_instance["external_id"], recovered_instance["profile"]))
+        assert restored.backend.download_files(["/workspace/repo/recover-me.txt"])[0].content == b"durable\n"
         asyncio.run(provider.destroy(recovered_instance["external_id"]))
         latest_change_set = services.db.fetch_one(
             """SELECT * FROM change_sets WHERE workspace_id=?
@@ -995,26 +1050,29 @@ def test_lost_sandbox_restores_validated_changeset_and_rejects_tampering(tmp_pat
         )
         refused_delivery = client.post(
             f"/api/v1/runs/{second['id']}/changesets/{latest_change_set['id']}:approve",
-            json={"message": "must fail integrity validation"},
+            json={"message": "must fail integrity validation", "version": latest_change_set["version"]},
         )
         assert refused_delivery.status_code == 409
+        # ChangeSet delivery integrity remains enforced independently. Recovery
+        # now uses its own sealed pair, not the mutable latest patch artifact.
+        point = services.db.fetch_one(
+            "SELECT * FROM coding_recovery_points WHERE workspace_id=? ORDER BY sequence DESC LIMIT 1",
+            (recovered_workspace["id"],),
+        )
+        services.db.execute("UPDATE coding_recovery_points SET graph_sha256=? WHERE id=?", ("0" * 64, point["id"]))
         third = client.post(
             f"/api/v1/threads/{thread['id']}/runs",
             json={"input": "This recovery must fail closed."},
         ).json()
         third_finished = _wait(client, third["id"], {"SUCCEEDED", "FAILED"})
         assert third_finished["status"] == "FAILED"
-        assert "patch hash is invalid" in third_finished["output"].lower()
+        assert "recovery point integrity" in third_finished["output"].lower()
 
 
 def test_cancelling_run_terminates_real_docker_command_and_preserves_partial_state(
-    tmp_path,
+    tmp_path, real_docker_provider,
 ):
-    provider = DockerSandboxProvider(
-        image="deepagent/coding-runtime:0.1.0",
-        dockerfile_root="docker/coding-runtime",
-        auto_build=True,
-    )
+    provider = real_docker_provider
     if not asyncio.run(provider.available()):
         import pytest
 
@@ -1076,6 +1134,19 @@ def test_cancelling_run_terminates_real_docker_command_and_preserves_partial_sta
             "sandbox.command.started",
             predicate=lambda item: item["payload"].get("command_id") is not None,
         )
+        workspace = client.app.state.services.db.fetch_one(
+            'SELECT * FROM coding_workspaces WHERE thread_id=?', (thread['id'],))
+        instance = client.app.state.services.db.fetch_one(
+            'SELECT * FROM sandbox_instances WHERE id=?', (workspace['sandbox_instance_id'],))
+        raw = provider._backend(instance['external_id'], draft['coding']['sandbox'])
+        binary = b'\0\xffcancelled-binary-state\n'
+        uploaded = raw.upload_files([
+            ('/workspace/repo/cancelled-work.txt', b'preserved work\n'),
+            ('/workspace/repo/cancelled-binary.dat', binary),
+            ('/artifacts/cancel-proof.bin', binary), ('/tmp/cancel-scratch', b'scratch'),
+            ('/tmp/home/.gitconfig', b'[core]\n fsmonitor = sh -c "touch /workspace/repo/unsafe-capture"\n'),
+        ])
+        assert not any(item.error for item in uploaded)
         started = time.monotonic()
         cancelled = client.post(f"/api/v1/runs/{created['id']}:cancel")
         elapsed = time.monotonic() - started
@@ -1108,18 +1179,28 @@ def test_cancelling_run_terminates_real_docker_command_and_preserves_partial_sta
         assert {"changes.patch", "diff.json", "verification-report.json"}.issubset(
             artifact_names
         )
+        diff = client.get(f"/api/v1/runs/{created['id']}/diff").json()
+        assert '+preserved work' in diff['patch'] and 'GIT binary patch' in diff['patch']
+        assert raw.download_files(['/workspace/repo/unsafe-capture'])[0].error
+        before = client.get(f"/api/v1/runs/{created['id']}/artifacts").json()
+        assert client.post(f"/api/v1/runs/{created['id']}:cancel").json()['status'] == 'CANCELLED'
+        assert client.get(f"/api/v1/runs/{created['id']}/artifacts").json() == before
+        import subprocess
+        restored = tmp_path / 'apply-cancelled-patch'
+        restored.mkdir()
+        applied = subprocess.run(['git', 'apply', '-'], input=diff['patch'].encode(),
+            cwd=restored, capture_output=True, timeout=10)
+        assert applied.returncode == 0, applied.stderr.decode()
+        assert (restored / 'cancelled-work.txt').read_bytes() == b'preserved work\n'
+        assert (restored / 'cancelled-binary.dat').read_bytes() == binary
     if external_id:
         asyncio.run(provider.destroy(external_id))
 
 
 def test_real_docker_agent_change_is_verified_and_does_not_touch_host_checkout(
-    tmp_path,
+    tmp_path, real_docker_provider,
 ):
-    provider = DockerSandboxProvider(
-        image="deepagent/coding-runtime:0.1.0",
-        dockerfile_root="docker/coding-runtime",
-        auto_build=True,
-    )
+    provider = real_docker_provider
     if not asyncio.run(provider.available()):
         import pytest
 

@@ -8,22 +8,41 @@ from typing import Literal, Optional
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import Response, StreamingResponse
 
-from apps.platform_api.dependencies import services, tenant_context
+from apps.platform_api.dependencies import require_permission, services
 from packages.application.services import NotFoundError
+from packages.auth import Permission, permissions_for_context
 from packages.domain.models import (
     AgentCreate,
     AgentDraftUpdate,
     DecisionCreate,
     DeploymentCreate,
     RunCreate,
+    RunStatus,
     TenantContext,
     ThreadCreate,
+    ThreadAccessUpdate,
     TERMINAL_RUN_STATUSES,
     utc_now,
 )
+from packages.runtime.worker_lease import worker_summary
+from packages.evaluations.models import EvaluationRequest
 
 
 router = APIRouter(prefix="/api/v1")
+
+platform_read = require_permission(Permission.PLATFORM_READ)
+agent_read = require_permission(Permission.AGENT_READ)
+agent_author = require_permission(Permission.AGENT_AUTHOR)
+agent_publish = require_permission(Permission.AGENT_PUBLISH)
+deployment_read = require_permission(Permission.DEPLOYMENT_READ)
+deployment_manage = require_permission(Permission.DEPLOYMENT_MANAGE)
+model_read = require_permission(Permission.MODEL_READ)
+plugin_read = require_permission(Permission.PLUGIN_READ)
+runtime_read = require_permission(Permission.RUNTIME_READ)
+runtime_use = require_permission(Permission.RUNTIME_USE)
+runtime_control = require_permission(Permission.RUNTIME_CONTROL)
+approval_read = require_permission(Permission.APPROVAL_READ)
+approval_decide = require_permission(Permission.APPROVAL_DECIDE)
 
 
 def _display_name(value: str) -> str:
@@ -32,16 +51,16 @@ def _display_name(value: str) -> str:
 
 @router.get("/context")
 def platform_context(
-    context: TenantContext = Depends(tenant_context), container=Depends(services)
+    context: TenantContext = Depends(platform_read), container=Depends(services)
 ):
     """Return the authoritative request scope and capabilities of this deployment.
 
     The reference platform deliberately reports unavailable product features as
     unavailable instead of rendering controls that cannot complete an action.
     """
-    worker_online = bool(
-        container.orchestrator.task and not container.orchestrator.task.done()
-    )
+    workers = worker_summary(container.db)
+    readiness = container.health.snapshot()
+    worker_online = workers["by_type"].get("runtime", 0) > 0
     authenticated_user = container.auth.find_user(context.user_id)
     return {
         "user": {
@@ -53,6 +72,9 @@ def platform_context(
             if context.is_super_admin
             else (context.roles[0] if context.roles else "member"),
             "is_super_admin": context.is_super_admin,
+            "permissions": sorted(
+                permission.value for permission in permissions_for_context(context)
+            ),
         },
         "tenant": {"id": context.tenant_id, "name": _display_name(context.tenant_id)},
         "project": {"id": context.project_id, "name": _display_name(context.project_id)},
@@ -61,9 +83,10 @@ def platform_context(
             "name": _display_name(context.environment_id.removeprefix("env_")),
         },
         "runtime": {
-            "status": "healthy" if worker_online else "unavailable",
-            "workers_online": 1 if worker_online else 0,
-            "workers_total": 1,
+            "status": readiness["status"] if worker_online else "unavailable",
+            "workers_online": workers["online"],
+            "workers_total": workers["online"],
+            "workers_by_type": workers["by_type"],
             "queue_depth": container.orchestrator.queue.qsize(),
             "event_lag_ms": None,
             "updated_at": utc_now(),
@@ -82,8 +105,10 @@ def platform_context(
 
 
 @router.get("/overview")
-def overview(context: TenantContext = Depends(tenant_context), container=Depends(services)):
+def overview(context: TenantContext = Depends(platform_read), container=Depends(services)):
     db = container.db
+    workers = worker_summary(db)
+    readiness = container.health.snapshot()
     scope = (context.tenant_id, context.project_id)
     status_rows = db.fetch_all(
         """SELECT status, COUNT(*) AS count FROM runs WHERE tenant_id=? AND project_id=?
@@ -94,6 +119,7 @@ def overview(context: TenantContext = Depends(tenant_context), container=Depends
     usage = db.fetch_one(
         """SELECT COALESCE(SUM(input_tokens + output_tokens),0) AS tokens,
                   COALESCE(SUM(cost),0) AS cost,
+                  COALESCE(SUM(CASE WHEN billing_status!='ACTUAL' THEN model_calls ELSE 0 END),0) AS unsettled_model_calls,
                   COALESCE(SUM(model_calls),0) AS model_calls,
                   COALESCE(SUM(tool_calls),0) AS tool_calls
            FROM usage_ledger WHERE tenant_id=? AND project_id=?""",
@@ -119,13 +145,12 @@ def overview(context: TenantContext = Depends(tenant_context), container=Depends
         "usage": usage,
         "recent_runs": recent_runs,
         "runtime": {
-            "workers": 1
-            if container.orchestrator.task and not container.orchestrator.task.done()
-            else 0,
+            "workers": workers["online"],
+            "workers_by_type": workers["by_type"],
             "queue_depth": container.orchestrator.queue.qsize(),
             "event_lag_ms": None,
-            "status": "healthy"
-            if container.orchestrator.task and not container.orchestrator.task.done()
+            "status": readiness["status"]
+            if workers["by_type"].get("runtime", 0)
             else "unavailable",
             "updated_at": utc_now(),
         },
@@ -138,14 +163,14 @@ def _success_rate(statuses):
 
 
 @router.get("/agents")
-def list_agents(context: TenantContext = Depends(tenant_context), container=Depends(services)):
+def list_agents(context: TenantContext = Depends(agent_read), container=Depends(services)):
     return {"items": container.agents.list_agents(context)}
 
 
 @router.post("/agents", status_code=201)
 def create_agent(
     payload: AgentCreate,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_author),
     container=Depends(services),
 ):
     return container.agents.create_agent(payload, context)
@@ -154,7 +179,7 @@ def create_agent(
 @router.get("/agents/{agent_id}")
 def get_agent(
     agent_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_read),
     container=Depends(services),
 ):
     return container.agents.get_agent(agent_id, context)
@@ -164,7 +189,7 @@ def get_agent(
 def update_agent_draft(
     agent_id: str,
     payload: AgentDraftUpdate,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_author),
     container=Depends(services),
 ):
     return container.agents.update_draft(agent_id, payload, context)
@@ -173,7 +198,7 @@ def update_agent_draft(
 @router.post("/agents/{agent_id}/revisions:validate")
 def validate_agent(
     agent_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_author),
     container=Depends(services),
 ):
     return container.agents.validate_agent(agent_id, context)
@@ -182,7 +207,7 @@ def validate_agent(
 @router.post("/agents/{agent_id}/revisions:publish", status_code=201)
 def publish_agent(
     agent_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_publish),
     container=Depends(services),
 ):
     return container.agents.publish(agent_id, context)
@@ -191,7 +216,7 @@ def publish_agent(
 @router.get("/agents/{agent_id}/revisions")
 def list_revisions(
     agent_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_read),
     container=Depends(services),
 ):
     return {"items": container.agents.list_revisions(agent_id, context)}
@@ -200,7 +225,7 @@ def list_revisions(
 @router.get("/agent-revisions/{revision_id}")
 def get_revision(
     revision_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_read),
     container=Depends(services),
 ):
     return container.agents.get_revision(revision_id, context)
@@ -209,7 +234,7 @@ def get_revision(
 @router.post("/agent-revisions/{revision_id}:validate")
 def validate_revision(
     revision_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(agent_author),
     container=Depends(services),
 ):
     revision = container.agents.get_revision(revision_id, context)
@@ -217,30 +242,20 @@ def validate_revision(
     return {"valid": not any(item.level == "error" for item in issues), "issues": [item.as_dict() for item in issues]}
 
 
-@router.post("/agent-revisions/{revision_id}:evaluate")
+@router.post("/agent-revisions/{revision_id}:evaluate", status_code=201)
 def evaluate_revision(
     revision_id: str,
-    context: TenantContext = Depends(tenant_context),
+    payload: EvaluationRequest,
+    context: TenantContext = Depends(agent_publish),
     container=Depends(services),
+    idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key", max_length=128),
 ):
-    revision = container.agents.get_revision(revision_id, context)
-    return {
-        "revision_id": revision_id,
-        "status": "PASSED",
-        "score": 0.94,
-        "checks": [
-            {"name": "tool_contract", "status": "passed", "score": 1.0},
-            {"name": "checkpoint_resume", "status": "passed", "score": 0.95},
-            {"name": "safety_policy", "status": "passed", "score": 0.9},
-            {"name": "cost_budget", "status": "passed", "score": 0.92},
-        ],
-        "plan_hash": revision["resolved_plan"]["plan_hash"] if revision.get("resolved_plan") else None,
-    }
+    return container.evaluations.evaluate(revision_id, payload, context, idempotency_key)
 
 
 @router.get("/agent-deployments")
 def list_deployments(
-    context: TenantContext = Depends(tenant_context), container=Depends(services)
+    context: TenantContext = Depends(deployment_read), container=Depends(services)
 ):
     return {"items": container.agents.list_deployments(context)}
 
@@ -248,31 +263,31 @@ def list_deployments(
 @router.post("/agent-deployments", status_code=201)
 def create_deployment(
     payload: DeploymentCreate,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(deployment_manage),
     container=Depends(services),
 ):
     return container.agents.deploy(payload, context)
 
 
 @router.get("/models")
-def list_models(context: TenantContext = Depends(tenant_context), container=Depends(services)):
+def list_models(context: TenantContext = Depends(model_read), container=Depends(services)):
     return {"items": container.agents.list_models(context)}
 
 
 @router.get("/plugins")
-def list_plugins(_: TenantContext = Depends(tenant_context), container=Depends(services)):
+def list_plugins(_: TenantContext = Depends(plugin_read), container=Depends(services)):
     return {"items": container.plugins.list_plugins()}
 
 
 @router.get("/skills")
-def list_skills(_: TenantContext = Depends(tenant_context), container=Depends(services)):
+def list_skills(_: TenantContext = Depends(plugin_read), container=Depends(services)):
     return {"items": container.skills.list_skills()}
 
 
 @router.get("/skills/{skill_reference}")
 def get_skill(
     skill_reference: str,
-    _: TenantContext = Depends(tenant_context),
+    _: TenantContext = Depends(plugin_read),
     container=Depends(services),
 ):
     skill = container.skills.get_skill(skill_reference)
@@ -282,14 +297,33 @@ def get_skill(
 
 
 @router.get("/threads")
-def list_threads(context: TenantContext = Depends(tenant_context), container=Depends(services)):
-    return {"items": container.runs.list_threads(context)}
+def list_threads(limit: int = Query(default=100, ge=1, le=500), cursor: Optional[str] = Query(default=None, max_length=1024),
+                 q: str = Query(default="", max_length=1000),
+                 context: TenantContext = Depends(runtime_read), container=Depends(services)):
+    return container.runs.thread_page(context, limit=limit, cursor=cursor, query=q)
+
+
+@router.get("/threads/{thread_id}/access")
+def get_thread_access(thread_id: str, context: TenantContext = Depends(runtime_read), container=Depends(services)):
+    return container.runs.thread_access(thread_id, context)
+
+
+@router.put("/threads/{thread_id}/access")
+def update_thread_access(thread_id: str, payload: ThreadAccessUpdate,
+                         context: TenantContext = Depends(runtime_use), container=Depends(services)):
+    return container.runs.update_thread_access(thread_id, payload, context)
+
+
+@router.get("/threads/{thread_id}/sharing-candidates")
+def sharing_candidates(thread_id: str, q: str = Query(default="", max_length=100),
+                       context: TenantContext = Depends(runtime_read), container=Depends(services)):
+    return {"items": container.runs.sharing_candidates(thread_id, q, context)}
 
 
 @router.post("/threads", status_code=201)
 def create_thread(
     payload: ThreadCreate,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_use),
     container=Depends(services),
 ):
     return container.runs.create_thread(payload, context)
@@ -298,7 +332,7 @@ def create_thread(
 @router.get("/threads/{thread_id}")
 def get_thread(
     thread_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     return container.runs.get_thread(thread_id, context)
@@ -309,7 +343,7 @@ async def create_run(
     thread_id: str,
     payload: RunCreate,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_use),
     container=Depends(services),
 ):
     return await container.runs.create_run(thread_id, payload, context, idempotency_key)
@@ -318,16 +352,20 @@ async def create_run(
 @router.get("/runs")
 def list_runs(
     limit: int = Query(default=100, ge=1, le=500),
-    context: TenantContext = Depends(tenant_context),
+    cursor: Optional[str] = Query(default=None, max_length=1024),
+    q: str = Query(default="", max_length=1000),
+    status: Optional[RunStatus] = None,
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
-    return {"items": container.runs.list_runs(context, limit)}
+    return container.runs.run_page(context, limit=limit, cursor=cursor, query=q,
+                                   status=status.value if status else None)
 
 
 @router.get("/runs/{run_id}")
 def get_run(
     run_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     return container.runs.get_run(run_id, context)
@@ -336,7 +374,7 @@ def get_run(
 @router.post("/runs/{run_id}:cancel")
 async def cancel_run(
     run_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_control),
     container=Depends(services),
 ):
     return await container.runs.cancel(run_id, context)
@@ -345,7 +383,7 @@ async def cancel_run(
 @router.post("/runs/{run_id}:retry")
 async def retry_run(
     run_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_control),
     container=Depends(services),
 ):
     return await container.runs.retry(run_id, context)
@@ -355,7 +393,7 @@ async def retry_run(
 async def provide_run_input(
     run_id: str,
     payload: RunCreate,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_use),
     container=Depends(services),
 ):
     return await container.runs.provide_input(run_id, payload, context)
@@ -365,11 +403,10 @@ async def provide_run_input(
 def list_run_events(
     run_id: str,
     after_sequence: int = Query(default=0, ge=0),
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
-    container.runs.get_run(run_id, context)
-    return {"items": container.events.list(run_id, after_sequence), "after_sequence": after_sequence}
+    return {**container.runs.event_page(run_id, context, after_sequence), "after_sequence": after_sequence}
 
 
 @router.get("/runs/{run_id}/stream")
@@ -379,7 +416,7 @@ async def stream_run_events(
     after_sequence: int = Query(default=0, ge=0),
     channel: Literal["typed", "all"] = Query(default="typed"),
     last_event_id: Optional[str] = Header(default=None, alias="Last-Event-ID"),
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     container.runs.get_run(run_id, context)
@@ -389,14 +426,29 @@ async def stream_run_events(
         nonlocal cursor
         idle_ticks = 0
         while not await request.is_disconnected():
-            events = container.events.list(run_id, cursor)
+            from packages.auth.service import AuthenticationError, AuthAuthorizationError
+            try:
+                page = container.runs.event_page(run_id, context, cursor)
+                events = page["items"]
+            except (NotFoundError, AuthenticationError, AuthAuthorizationError):
+                yield 'event: stream.access_revoked\ndata: {}\n\n'
+                break
             if events:
                 idle_ticks = 0
                 for event in events:
+                    try:
+                        container.runs.access.require_run(run_id, context)
+                    except (NotFoundError, AuthenticationError, AuthAuthorizationError):
+                        yield 'event: stream.access_revoked\ndata: {}\n\n'
+                        return
                     cursor = event["sequence"]
                     payload = json.dumps(event, ensure_ascii=False, separators=(",", ":"))
                     event_name = "runtime.event" if channel == "all" else event["type"]
                     yield f"id: {cursor}\nevent: {event_name}\ndata: {payload}\n\n"
+                cursor = page["next_sequence"]
+            elif page["next_sequence"] > cursor:
+                cursor = page["next_sequence"]
+                continue
             else:
                 idle_ticks += 1
                 run = container.db.fetch_one("SELECT status FROM runs WHERE id=?", (run_id,))
@@ -420,7 +472,7 @@ async def stream_run_events(
 @router.get("/runs/{run_id}/artifacts")
 def list_artifacts(
     run_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     items = container.runs.artifacts(run_id, context)
@@ -439,7 +491,7 @@ def list_artifacts(
 def get_artifact(
     run_id: str,
     artifact_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     container.runs.get_run(run_id, context)
@@ -449,6 +501,7 @@ def get_artifact(
     )
     if not artifact:
         raise NotFoundError("Artifact not found")
+    container.runs.access.require_run(run_id, context)
     filename = artifact["name"].replace('"', "").replace("\n", "")
     return Response(
         content=artifact["content"],
@@ -460,7 +513,7 @@ def get_artifact(
 @router.get("/runs/{run_id}/spans")
 def list_spans(
     run_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     return {"items": container.runs.spans(run_id, context)}
@@ -469,7 +522,7 @@ def list_spans(
 @router.get("/runs/{run_id}/children")
 def list_children(
     run_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(runtime_read),
     container=Depends(services),
 ):
     container.runs.get_run(run_id, context)
@@ -479,7 +532,7 @@ def list_children(
 @router.get("/interrupts")
 def list_interrupts(
     status: Optional[str] = None,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(approval_read),
     container=Depends(services),
 ):
     return {"items": container.approvals.list_interrupts(context, status)}
@@ -488,7 +541,7 @@ def list_interrupts(
 @router.get("/interrupts/{interrupt_id}")
 def get_interrupt(
     interrupt_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(approval_read),
     container=Depends(services),
 ):
     return container.approvals.get_interrupt(interrupt_id, context)
@@ -500,7 +553,7 @@ async def decide_interrupt(
     payload: DecisionCreate,
     idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
     if_match: Optional[str] = Header(default=None, alias="If-Match"),
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(approval_decide),
     container=Depends(services),
 ):
     expected_version = int(if_match.strip('"')) if if_match else None

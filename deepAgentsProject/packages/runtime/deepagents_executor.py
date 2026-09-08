@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+from packages.auth.resource_access import ResourceAccess
+
 import asyncio
 import hashlib
 import json
 import secrets
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from typing import Any
 
@@ -19,7 +22,10 @@ from packages.domain.models import RunStatus, utc_now
 from packages.knowledge.service import KnowledgeService
 from packages.knowledge.tool import KnowledgeSearchTool
 from packages.persistence import Database
+from packages.persistence.fencing import current_write_fence, LeaseLostError
 from packages.runtime.event_emitter import EventEmitter
+from packages.runtime.budget import RunBudget, RunBudgetCallback, RunBudgetExceeded
+from packages.runtime.coding_recovery import CodingRecovery
 from packages.sandbox.manager import BoundCodingWorkspace, SandboxManager
 
 
@@ -27,7 +33,7 @@ class CodingRunCancelled(RuntimeError):
     pass
 
 
-class CodingBudgetExceeded(RuntimeError):
+class CodingBudgetExceeded(RunBudgetExceeded):
     pass
 
 
@@ -76,7 +82,10 @@ class DeepAgentsRuntimeExecutor:
         )
         resume_orphaned = run["status"] == RunStatus.ORPHANED.value
         self._acquire_lease(run)
-        heartbeat = asyncio.create_task(self._heartbeat(run["current_attempt_id"]))
+        self.events.append(run_id, "runtime.execution.bound", {
+            "executor": "coding", "evidence_version": 2,
+            "source": "test" if self.model_identity.get("provider") == "test_double" else "live",
+        })
         bound: BoundCodingWorkspace | None = None
         try:
             async with asyncio.timeout(timeout_seconds):
@@ -111,7 +120,7 @@ class DeepAgentsRuntimeExecutor:
                 "CODING_RUN_TIMEOUT",
                 f"Coding run exceeded {timeout_seconds} seconds",
             )
-        except CodingBudgetExceeded as exc:
+        except RunBudgetExceeded as exc:
             if bound:
                 await self._preserve_partial(run, plan, bound, "budget_exceeded")
             self._finish_failed(
@@ -129,35 +138,10 @@ class DeepAgentsRuntimeExecutor:
                 except Exception:
                     pass
             raise
-        finally:
-            heartbeat.cancel()
-            try:
-                await heartbeat
-            except asyncio.CancelledError:
-                pass
 
     async def cancel(self, run_id: str) -> None:
-        await self.sandbox_manager.interrupt_run(run_id)
-        run = self.db.fetch_one("SELECT * FROM runs WHERE id=?", (run_id,))
-        if not run or not run.get("coding_workspace_id"):
-            return
-        plan_row = self.db.fetch_one(
-            "SELECT * FROM resolved_execution_plans WHERE id=?",
-            (run["resolved_plan_id"],),
-        )
-        if not plan_row:
-            return
-        try:
-            bound = await self.sandbox_manager.bind(run, plan_row["plan"])
-            await self._preserve_partial(
-                run, plan_row["plan"], bound, "run_cancelled"
-            )
-        except Exception as exc:
-            self.events.append(
-                run_id,
-                "workspace.snapshot.failed",
-                {"reason": "run_cancelled", "message": str(exc)[:500]},
-            )
+        from packages.runtime.cancellation import CancellationFinalizer
+        await CancellationFinalizer(self).run(run_id)
 
     async def _prepare(
         self, run: dict[str, Any], plan: dict[str, Any]
@@ -173,7 +157,11 @@ class DeepAgentsRuntimeExecutor:
                 "executor": "deepagents-coding",
             },
         )
-        bound = await self.sandbox_manager.bind(run, plan)
+        recovery = CodingRecovery(self.db, self.events, self.sandbox_manager, self.checkpointer, run, plan)
+        source = await asyncio.to_thread(recovery.load)
+        bound = await self.sandbox_manager.bind(run, plan, recovery=source)
+        recovery.saver = await asyncio.to_thread(recovery.begin)
+        bound = replace(bound, recovery=recovery)
         source = self.db.fetch_one(
             """SELECT s.*, r.id AS repository_id, r.name AS repository_name
                FROM repository_snapshots s
@@ -244,7 +232,7 @@ class DeepAgentsRuntimeExecutor:
             backend=bound.backend,
             plan=plan,
             skill_paths=bound.skill_paths,
-            checkpointer=self.checkpointer,
+            checkpointer=bound.recovery.saver,
             db=self.db,
             run_id=run["id"],
             knowledge_tool=self.knowledge_tool,
@@ -254,12 +242,17 @@ class DeepAgentsRuntimeExecutor:
                 "environment_id": run.get("principal_environment_id")
                 or "env_development",
                 "user_id": run["principal_user_id"],
-                "roles": run.get("principal_roles") or [],
+                "roles": ResourceAccess(self.db).require_execution(run["id"]).roles,
                 "run_id": run["id"],
             },
         )
         config = {
-            "configurable": {"thread_id": self._graph_thread_id(run)},
+            "configurable": {"thread_id": bound.recovery.session["graph_thread_id"]},
+            "callbacks": [RunBudgetCallback(
+                RunBudget(self.db, run["id"], plan, self.model_identity),
+                int(getattr(self.model, "max_tokens", None)
+                    or getattr(self.model, "max_completion_tokens", None) or 4096),
+            )],
             "recursion_limit": max(
                 50, int(plan.get("limits", {}).get("max_tool_calls", 30)) * 4 + 20
             ),
@@ -267,12 +260,14 @@ class DeepAgentsRuntimeExecutor:
         adapter = DeepAgentsEventAdapter(
             self.events, run, self.model_identity
         )
-        self._validate_resume_checkpoint(run, plan, bound.workspace["id"])
-        graph_input = self._graph_input(run)
-        if resume_orphaned:
-            checkpoint_tuple = await self.checkpointer.aget_tuple(config)
+        source_point = bound.recovery.source["point"] if bound.recovery.source else None
+        resuming_same_run = bool(source_point and source_point["run_id"] == run["id"])
+        if source_point and (run.get("checkpoint") or {}).get("recovery_point_id") == source_point["id"]:
+            self._validate_resume_checkpoint(run, plan, bound.workspace["id"], source_point)
+        graph_input = self._recovery_input(run, bound.recovery.source)
+        if resume_orphaned or resuming_same_run:
+            checkpoint_tuple = await bound.recovery.saver.aget_tuple(config)
             if checkpoint_tuple is not None:
-                graph_input = None
                 self.events.append(
                     run["id"],
                     "graph.resumed",
@@ -280,7 +275,7 @@ class DeepAgentsRuntimeExecutor:
                         "checkpoint_id": checkpoint_tuple.config.get(
                             "configurable", {}
                         ).get("checkpoint_id"),
-                        "reason": "worker_lease_recovery",
+                        "reason": "worker_lease_recovery" if resume_orphaned else "run_continuation",
                     },
                     span_id="span_main",
                     execution_path=["main"],
@@ -289,6 +284,12 @@ class DeepAgentsRuntimeExecutor:
         if adapter.interrupt:
             await self._pause_for_interrupt(run, plan, bound, graph, config, adapter)
             return
+
+        if resuming_same_run and not adapter.output:
+            state = await graph.aget_state(config)
+            adapter.restore_output((state.values or {}).get("messages", []),
+                                   state.config["configurable"]["checkpoint_id"])
+            self._assert_budgets(adapter, plan)
 
         verification_policy = (plan.get("coding_profile") or {}).get(
             "verification_policy", {}
@@ -302,8 +303,8 @@ class DeepAgentsRuntimeExecutor:
                 "UPDATE coding_workspaces SET status='VERIFYING', updated_at=? WHERE id=?",
                 (utc_now(), workspace["id"]),
             )
-            report = self.verification.run(
-                run, workspace, bound.backend, verification_policy
+            report = await asyncio.to_thread(
+                self.verification.run, run, workspace, bound.backend, verification_policy
             )
             self._assert_budgets(adapter, plan)
             if report["status"] != "FAILED" or attempt == attempts:
@@ -350,7 +351,8 @@ class DeepAgentsRuntimeExecutor:
         )
         if not snapshot:
             raise RuntimeError("Repository snapshot is missing")
-        change_set = self.changesets.build(
+        change_set = await asyncio.to_thread(
+            self.changesets.build,
             run,
             workspace,
             snapshot,
@@ -362,63 +364,66 @@ class DeepAgentsRuntimeExecutor:
         await self.sandbox_manager.snapshot_workspace(
             workspace, run=run, plan=plan, reason="run_completed"
         )
-        self._create_standard_artifacts(run, plan, adapter.output, report, change_set)
-        self._record_usage(run, adapter)
-        require_success = bool(verification_policy.get("require_success", True))
-        if report and report["status"] == "FAILED" and require_success:
-            self.db.execute(
-                "UPDATE change_sets SET status='PARTIAL_FAILED' WHERE id=?",
-                (change_set["id"],),
-            )
-            self._finish_failed(
-                run,
-                RunStatus.FAILED.value,
-                "VERIFICATION_FAILED",
-                "Platform verification failed; a partial ChangeSet was preserved",
-            )
-            return
+        recovery_point = await bound.recovery.capture("COMPLETE")
+        with self.db.transaction():
+            self._create_standard_artifacts(run, plan, adapter.output, report, change_set)
+            self._record_usage(run, adapter)
+            require_success = bool(verification_policy.get("require_success", True))
+            if report and report["status"] == "FAILED" and require_success:
+                self.db.execute(
+                    "UPDATE change_sets SET status='PARTIAL_FAILED' WHERE id=?",
+                    (change_set["id"],),
+                )
+                self._finish_failed(
+                    run,
+                    RunStatus.FAILED.value,
+                    "VERIFICATION_FAILED",
+                    "Platform verification failed; a partial ChangeSet was preserved",
+                )
+                return
 
-        output = adapter.output or "Coding task completed; review the generated ChangeSet."
-        now = utc_now()
-        self.db.execute(
-            """UPDATE runs SET status='SUCCEEDED', output=?, checkpoint_json=?,
-               version=version+1, updated_at=? WHERE id=?""",
-            (
-                output,
-                self.db.encode(
-                    {
-                        "stage": "completed",
-                        "plan_hash": plan["plan_hash"],
-                        "workspace_generation": workspace["workspace_generation"],
-                    }
+            output = adapter.output or "Coding task completed; review the generated ChangeSet."
+            now = utc_now()
+            self.db.execute(
+                """UPDATE runs SET status='SUCCEEDED', output=?, checkpoint_json=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (
+                    output,
+                    self.db.encode(
+                        {
+                            "stage": "completed",
+                            "plan_hash": plan["plan_hash"],
+                            "workspace_generation": workspace["workspace_generation"],
+                            "recovery_point_id": recovery_point["id"],
+                        }
+                    ),
+                    now,
+                    run["id"],
                 ),
-                now,
+            )
+            self.db.execute(
+                "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
+                (now, run["current_attempt_id"]),
+            )
+            self.db.execute(
+                "UPDATE coding_workspaces SET status='REVIEW_READY', updated_at=? WHERE id=?",
+                (now, workspace["id"]),
+            )
+            self.events.append(
                 run["id"],
-            ),
-        )
-        self.db.execute(
-            "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
-            (now, run["current_attempt_id"]),
-        )
-        self.db.execute(
-            "UPDATE coding_workspaces SET status='REVIEW_READY', updated_at=? WHERE id=?",
-            (now, workspace["id"]),
-        )
-        self.events.append(
-            run["id"],
-            "graph.completed",
-            {"graph_id": run["current_attempt_id"], "status": "completed"},
-            span_id="span_main",
-            execution_path=["main"],
-        )
-        self.events.append(
-            run["id"],
-            "run.completed",
-            {
-                "changeset_id": change_set["id"],
-                "verification_status": report["status"] if report else "NOT_CONFIGURED",
-            },
-        )
+                "graph.completed",
+                {"graph_id": run["current_attempt_id"], "status": "completed"},
+                span_id="span_main",
+                execution_path=["main"],
+            )
+            self.events.append(
+                run["id"],
+                "run.completed",
+                {
+                    "changeset_id": change_set["id"],
+                    "verification_status": report["status"] if report else "NOT_CONFIGURED",
+                },
+            )
 
     async def _stream_graph(
         self,
@@ -428,18 +433,24 @@ class DeepAgentsRuntimeExecutor:
         adapter: DeepAgentsEventAdapter,
         plan: dict[str, Any],
     ) -> None:
-        async for part in graph.astream(
-            graph_input,
-            config=config,
-            stream_mode=["messages", "updates"],
-            subgraphs=True,
-            version="v2",
-        ):
-            self._assert_active(adapter.run["id"])
-            adapter.consume(part)
-            self._assert_budgets(adapter, plan)
-            if adapter.interrupt:
-                break
+        from packages.operations.model_tracing import ModelTraceCallback
+        tracing = ModelTraceCallback()
+        traced_config = {**config, 'callbacks': [*(config.get('callbacks') or []), tracing]}
+        try:
+            async for part in graph.astream(
+                graph_input,
+                config=traced_config,
+                stream_mode=["messages", "updates"],
+                subgraphs=True,
+                version="v2",
+                durability="sync",
+            ):
+                self._assert_active(adapter.run["id"])
+                adapter.consume(part)
+                self._assert_budgets(adapter, plan)
+                # Drain graph finalizers before sealing an interrupt boundary.
+        finally:
+            tracing.close()
 
     async def _pause_for_interrupt(
         self,
@@ -471,24 +482,6 @@ class DeepAgentsRuntimeExecutor:
         interrupt_id = new_id("int")
         checkpoint_id = graph_checkpoint_id or new_id("ckpt")
         now = utc_now()
-        self.db.execute(
-            """INSERT INTO interrupts
-               (id, tenant_id, project_id, run_id, checkpoint_id, version,
-                policy_reason, status, actions_json, expires_at, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, 1, ?, 'PENDING', ?, ?, ?, ?)""",
-            (
-                interrupt_id,
-                run["tenant_id"],
-                run["project_id"],
-                run["id"],
-                checkpoint_id,
-                "Coding action requires explicit approval",
-                self.db.encode(actions),
-                (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
-                now,
-                now,
-            ),
-        )
         workspace = self._workspace(bound.workspace["id"])
         source_snapshot = self.db.fetch_one(
             "SELECT * FROM repository_snapshots WHERE id=?",
@@ -496,7 +489,8 @@ class DeepAgentsRuntimeExecutor:
         )
         if not source_snapshot:
             raise RuntimeError("Repository snapshot is missing at interrupt boundary")
-        change_set = self.changesets.build(
+        change_set = await asyncio.to_thread(
+            self.changesets.build,
             run,
             workspace,
             source_snapshot,
@@ -508,60 +502,82 @@ class DeepAgentsRuntimeExecutor:
         await self.sandbox_manager.snapshot_workspace(
             workspace, run=run, plan=plan, reason="human_interrupt"
         )
-        self._create_standard_artifacts(
-            run,
-            plan,
-            adapter.output or "Execution paused for an approved protected-path action.",
-            {"status": "PARTIAL", "reason": "human_interrupt"},
-            change_set,
-        )
-        checkpoint = {
-            "stage": "awaiting_approval",
-            "checkpoint_id": checkpoint_id,
-            "interrupt_id": interrupt_id,
-            "langgraph_interrupt_id": interrupt.get("langgraph_interrupt_id"),
-            "langgraph_thread_id": self._graph_thread_id(run),
-            "action_requests": action_requests,
-            "plan_hash": plan["plan_hash"],
-            "base_commit_sha": self._base_commit(workspace),
-            "workspace_generation": workspace["workspace_generation"],
-        }
-        self.db.execute(
-            """UPDATE runs SET status='WAITING_FOR_APPROVAL', checkpoint_json=?,
-               version=version+1, updated_at=? WHERE id=?""",
-            (self.db.encode(checkpoint), now, run["id"]),
-        )
-        self.db.execute(
-            "UPDATE coding_workspaces SET last_checkpoint_id=?, updated_at=? WHERE id=?",
-            (checkpoint_id, now, workspace["id"]),
-        )
-        self.db.execute(
-            "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
-            (now, run["current_attempt_id"]),
-        )
-        self._record_usage(run, adapter)
-        self.events.append(
-            run["id"],
-            "tool.approval_required",
-            {"interrupt_id": interrupt_id, "actions": actions},
-        )
-        self.events.append(
-            run["id"],
-            "interrupt.created",
-            {"interrupt_id": interrupt_id, "checkpoint_id": checkpoint_id, "version": 1},
-        )
-        self.events.append(
-            run["id"],
-            "graph.paused",
-            {
-                "graph_id": run["current_attempt_id"],
+        recovery_point = await bound.recovery.capture("INTERRUPT", graph_checkpoint_id)
+        workspace = self._workspace(bound.workspace["id"])
+        with self.db.transaction():
+            self.db.execute(
+                """INSERT INTO interrupts
+                   (id, tenant_id, project_id, run_id, checkpoint_id, version,
+                    policy_reason, status, actions_json, expires_at, created_at, updated_at)
+                   VALUES (?, ?, ?, ?, ?, 1, ?, 'PENDING', ?, ?, ?, ?)""",
+                (
+                    interrupt_id,
+                    run["tenant_id"],
+                    run["project_id"],
+                    run["id"],
+                    checkpoint_id,
+                    "Coding action requires explicit approval",
+                    self.db.encode(actions),
+                    (datetime.now(timezone.utc) + timedelta(days=7)).isoformat(),
+                    now,
+                    now,
+                ),
+            )
+            self._create_standard_artifacts(
+                run,
+                plan,
+                adapter.output or "Execution paused for an approved protected-path action.",
+                {"status": "PARTIAL", "reason": "human_interrupt"},
+                change_set,
+            )
+            checkpoint = {
+                "stage": "awaiting_approval",
                 "checkpoint_id": checkpoint_id,
                 "interrupt_id": interrupt_id,
-                "reason": "human_approval_required",
-            },
-            span_id="span_main",
-            execution_path=["main"],
-        )
+                "langgraph_interrupt_id": interrupt.get("langgraph_interrupt_id"),
+                "langgraph_thread_id": config["configurable"]["thread_id"],
+                "recovery_point_id": recovery_point["id"],
+                "action_requests": action_requests,
+                "plan_hash": plan["plan_hash"],
+                "base_commit_sha": self._base_commit(workspace),
+                "workspace_generation": workspace["workspace_generation"],
+            }
+            self.db.execute(
+                """UPDATE runs SET status='WAITING_FOR_APPROVAL', checkpoint_json=?,
+                   version=version+1, updated_at=? WHERE id=?""",
+                (self.db.encode(checkpoint), now, run["id"]),
+            )
+            self.db.execute(
+                "UPDATE coding_workspaces SET last_checkpoint_id=?, updated_at=? WHERE id=?",
+                (checkpoint_id, now, workspace["id"]),
+            )
+            self.db.execute(
+                "UPDATE run_attempts SET status='SUCCEEDED', updated_at=? WHERE id=?",
+                (now, run["current_attempt_id"]),
+            )
+            self._record_usage(run, adapter)
+            self.events.append(
+                run["id"],
+                "tool.approval_required",
+                {"interrupt_id": interrupt_id, "actions": actions},
+            )
+            self.events.append(
+                run["id"],
+                "interrupt.created",
+                {"interrupt_id": interrupt_id, "checkpoint_id": checkpoint_id, "version": 1},
+            )
+            self.events.append(
+                run["id"],
+                "graph.paused",
+                {
+                    "graph_id": run["current_attempt_id"],
+                    "checkpoint_id": checkpoint_id,
+                    "interrupt_id": interrupt_id,
+                    "reason": "human_approval_required",
+                },
+                span_id="span_main",
+                execution_path=["main"],
+            )
 
     def _graph_input(self, run: dict[str, Any]) -> Any:
         checkpoint = run.get("checkpoint") or {}
@@ -615,8 +631,21 @@ class DeepAgentsRuntimeExecutor:
         text = (run.get("metadata") or {}).get("resume_input") or run["input"]
         return {"messages": [{"role": "user", "content": text}]}
 
+    def _recovery_input(self, run, source):
+        if source is None or source["point"]["run_id"] != run["id"]:
+            # A crash before this Run's first published checkpoint must not
+            # silently complete the previous Run's graph and drop the new input.
+            return self._graph_input(run)
+        point, ticket = source["point"], run.get("checkpoint") or {}
+        if (point["phase"] == "INTERRUPT" and ticket.get("stage") in {"approval_resolved", "input_received"}
+                and ticket.get("recovery_point_id") == point["id"]):
+            # Decisions authorize one exact pause pair, never a later interrupt
+            # captured just before the platform approval transaction committed.
+            return self._graph_input(run)
+        return None
+
     def _validate_resume_checkpoint(
-        self, run: dict[str, Any], plan: dict[str, Any], workspace_id: str
+        self, run: dict[str, Any], plan: dict[str, Any], workspace_id: str, recovery_point: dict[str, Any]
     ) -> None:
         checkpoint = run.get("checkpoint") or {}
         if checkpoint.get("stage") not in {"approval_resolved", "input_received"}:
@@ -626,9 +655,12 @@ class DeepAgentsRuntimeExecutor:
             raise RuntimeError("Checkpoint plan hash does not match the immutable run plan")
         if checkpoint.get("base_commit_sha") != self._base_commit(workspace):
             raise RuntimeError("Checkpoint base commit does not match the coding workspace")
-        if int(checkpoint.get("workspace_generation", -1)) != int(
-            workspace["workspace_generation"]
-        ):
+        # The restored physical files are certified by this exact source pair.
+        # The live workspace generation advances on restore, never rewinds into
+        # an old ChangeSet/approval generation (an ABA version collision).
+        if (checkpoint.get("recovery_point_id") != recovery_point["id"]
+                or recovery_point["workspace_id"] != workspace_id
+                or int(checkpoint.get("workspace_generation", -1)) != int(recovery_point["workspace_generation"])):
             raise RuntimeError("Checkpoint workspace generation does not match restored files")
 
     async def _preserve_partial(
@@ -639,6 +671,7 @@ class DeepAgentsRuntimeExecutor:
         reason: str,
     ) -> None:
         try:
+            self.db.assert_execution_fence()
             workspace = self._workspace(bound.workspace["id"])
             snapshot = self.db.fetch_one(
                 "SELECT * FROM repository_snapshots WHERE id=?",
@@ -677,12 +710,18 @@ class DeepAgentsRuntimeExecutor:
                     report,
                     change_set,
                 )
+        except LeaseLostError:
+            # Cancellation/replacement has revoked this execution. Its owner
+            # must not snapshot or emit even failure events using a stale lease.
+            return
         except Exception as exc:
-            self.events.append(
-                run["id"],
-                "workspace.snapshot.failed",
-                {"reason": reason, "message": str(exc)[:500]},
-            )
+            try:
+                self.events.append(
+                    run["id"], "workspace.snapshot.failed",
+                    {"reason": reason, "message": str(exc)[:500]},
+                )
+            except LeaseLostError:
+                return
 
     def _create_standard_artifacts(
         self,
@@ -762,21 +801,8 @@ class DeepAgentsRuntimeExecutor:
     def _record_usage(
         self, run: dict[str, Any], adapter: DeepAgentsEventAdapter
     ) -> None:
-        if not (adapter.model_calls or adapter.tool_calls):
+        if not (adapter.tool_calls or adapter.subagent_calls):
             return
-        plan_row = self.db.fetch_one(
-            "SELECT plan_json FROM resolved_execution_plans WHERE id=?",
-            (run["resolved_plan_id"],),
-        )
-        pricing = (
-            ((plan_row or {}).get("plan") or {})
-            .get("model_snapshot", {})
-            .get("pricing", {})
-        )
-        cost = (
-            adapter.input_tokens * float(pricing.get("input_per_million") or 0)
-            + adapter.output_tokens * float(pricing.get("output_per_million") or 0)
-        ) / 1_000_000
         self.db.execute(
             """INSERT INTO usage_ledger
                (id, tenant_id, project_id, run_id, input_tokens, output_tokens,
@@ -787,12 +813,12 @@ class DeepAgentsRuntimeExecutor:
                 run["tenant_id"],
                 run["project_id"],
                 run["id"],
-                adapter.input_tokens,
-                adapter.output_tokens,
-                adapter.model_calls,
+                0,
+                0,
+                0,
                 adapter.tool_calls,
                 adapter.subagent_calls,
-                cost,
+                0,
                 utc_now(),
             ),
         )
@@ -801,7 +827,8 @@ class DeepAgentsRuntimeExecutor:
         self, adapter: DeepAgentsEventAdapter, plan: dict[str, Any]
     ) -> None:
         limits = plan.get("limits") or {}
-        if adapter.model_calls > int(limits.get("max_model_calls", 20)):
+        model_calls, charged = RunBudget(self.db, adapter.run["id"], plan, self.model_identity)._totals()
+        if model_calls > int(limits.get("max_model_calls", 20)):
             raise CodingBudgetExceeded("Model call budget exhausted")
         if adapter.tool_calls > int(limits.get("max_tool_calls", 30)):
             raise CodingBudgetExceeded("Tool call budget exhausted")
@@ -820,11 +847,7 @@ class DeepAgentsRuntimeExecutor:
         if cpu_seconds > float(limits.get("max_sandbox_cpu_seconds", 120)):
             raise CodingBudgetExceeded("Sandbox CPU budget exhausted")
         max_cost = limits.get("max_cost")
-        pricing = (plan.get("model_snapshot") or {}).get("pricing") or {}
-        estimated_cost = (
-            adapter.input_tokens * float(pricing.get("input_per_million") or 0)
-            + adapter.output_tokens * float(pricing.get("output_per_million") or 0)
-        ) / 1_000_000
+        estimated_cost = charged / 1_000_000
         if max_cost is not None and estimated_cost > float(max_cost):
             raise CodingBudgetExceeded("Model cost budget exhausted")
 
@@ -837,35 +860,10 @@ class DeepAgentsRuntimeExecutor:
             raise CodingRunCancelled()
 
     def _acquire_lease(self, run: dict[str, Any]) -> None:
-        now = datetime.now(timezone.utc)
-        self.db.execute(
-            """UPDATE run_attempts SET status='RUNNING', worker_id=?, lease_token=?,
-               acquired_at=?, heartbeat_at=?, expires_at=?, updated_at=? WHERE id=?""",
-            (
-                self.worker_id,
-                f"lease_{secrets.token_hex(8)}",
-                now.isoformat(),
-                now.isoformat(),
-                (now + timedelta(seconds=30)).isoformat(),
-                now.isoformat(),
-                run["current_attempt_id"],
-            ),
-        )
-
-    async def _heartbeat(self, attempt_id: str) -> None:
-        while True:
-            await asyncio.sleep(10)
-            now = datetime.now(timezone.utc)
-            self.db.execute(
-                """UPDATE run_attempts SET heartbeat_at=?, expires_at=?, updated_at=?
-                   WHERE id=? AND status='RUNNING'""",
-                (
-                    now.isoformat(),
-                    (now + timedelta(seconds=30)).isoformat(),
-                    now.isoformat(),
-                    attempt_id,
-                ),
-            )
+        fence = current_write_fence()
+        if fence is None or fence.run_id != run["id"] or fence.attempt_id != run["current_attempt_id"]:
+            raise RuntimeError("Execution requires an orchestrator-owned Run lease")
+        self.db.assert_execution_fence()
 
     def _finish_failed(
         self, run: dict[str, Any], status: str, code: str, message: str
@@ -932,7 +930,3 @@ class DeepAgentsRuntimeExecutor:
             (run["coding_workspace_id"],),
         )
         return int(workspace["workspace_generation"]) if workspace else None
-
-    @staticmethod
-    def _graph_thread_id(run: dict[str, Any]) -> str:
-        return f"{run['tenant_id']}:{run['project_id']}:{run['thread_id']}"

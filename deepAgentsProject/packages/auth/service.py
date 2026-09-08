@@ -8,6 +8,7 @@ import math
 import os
 import secrets
 import sqlite3
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Optional
 
@@ -84,14 +85,35 @@ class AuthService:
         self.cookie_name = os.getenv(
             "DEEPAGENT_SESSION_COOKIE_NAME", "deepagent_session"
         )
+        self.csrf_cookie_name = os.getenv(
+            "DEEPAGENT_CSRF_COOKIE_NAME", "deepagent_csrf"
+        )
         self.cookie_secure = os.getenv(
             "DEEPAGENT_SESSION_COOKIE_SECURE", "false"
         ).lower() in {"1", "true", "yes"}
+        self.cookie_samesite = os.getenv(
+            "DEEPAGENT_SESSION_COOKIE_SAMESITE", "lax"
+        ).strip().lower()
+        if self.cookie_samesite not in {"lax", "strict", "none"}:
+            raise AuthValidationError(
+                "DEEPAGENT_SESSION_COOKIE_SAMESITE must be lax, strict, or none"
+            )
+        if self.cookie_samesite == "none" and not self.cookie_secure:
+            raise AuthValidationError(
+                "SameSite=None session cookies must also use Secure"
+            )
         self._dummy_password_hash = self.hash_password(secrets.token_urlsafe(32))
 
     def bootstrap_super_admin(self, password: str) -> Dict[str, Any]:
+        with self.db.transaction():
+            self._lock_key("bootstrap-admin")
+            return self._bootstrap_super_admin(password)
+
+    def _bootstrap_super_admin(self, password: str) -> Dict[str, Any]:
         existing = self._raw_user_by_username("admin")
         if existing:
+            self._lock_users(existing["id"])
+            existing = self._require_raw_user(existing["id"])
             updates: Dict[str, Any] = {}
             if not existing["is_super_admin"]:
                 updates["is_super_admin"] = 1
@@ -123,6 +145,8 @@ class AuthService:
                     f"UPDATE users SET {assignments} WHERE id=?",
                     (*updates.values(), existing["id"]),
                 )
+                self._audit("BOOTSTRAP_ADMIN_REPAIRED", "SUCCEEDED", target=existing,
+                            details={"changed_fields": sorted(updates.keys() - {"updated_at"})})
             return self.get_user(existing["id"])
         payload = UserCreate(
             username="admin",
@@ -140,13 +164,30 @@ class AuthService:
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
         normalized = username.strip().lower()
+        rate_key = self._login_rate_key(normalized, (metadata or {}).get("ip_address"))
+        with self.db.transaction():
+            # A missing account still needs a shared rate-limit lock. No account
+            # mutation acquires this key, so the order is always key -> user.
+            self._lock_key("login:" + rate_key)
+            result = self._login(normalized, password, metadata)
+        # Expected denials commit their counters/audit; storage failures roll
+        # back the whole transaction and never issue an unaudited session.
+        if isinstance(result, (AuthenticationError, AuthRateLimitError)):
+            raise result
+        return result
+
+    def _login(
+        self, normalized: str, password: str,
+        metadata: Optional[Dict[str, Optional[str]]],
+    ) -> Dict[str, Any] | AuthenticationError | AuthRateLimitError:
         meta = metadata or {}
-        now = datetime.now(timezone.utc)
         rate_key = self._login_rate_key(normalized, meta.get("ip_address"))
-        row = self._raw_user_by_username(normalized)
+        suffix = " FOR UPDATE" if self.db.dialect == "postgresql" else ""
+        row = self.db.fetch_one("SELECT * FROM users WHERE username=? COLLATE NOCASE" + suffix, (normalized,))
+        now = self.db.current_time()
         try:
             self._assert_login_allowed(rate_key, now)
-        except AuthRateLimitError:
+        except AuthRateLimitError as error:
             self._audit(
                 "LOGIN_BLOCKED",
                 "DENIED",
@@ -154,11 +195,11 @@ class AuthService:
                 details={"username": normalized, "reason": "rate_limit"},
                 metadata=meta,
             )
-            raise
+            return error
         if row:
             try:
                 self._assert_account_unlocked(row, now)
-            except AuthRateLimitError:
+            except AuthRateLimitError as error:
                 self._audit(
                     "LOGIN_BLOCKED",
                     "DENIED",
@@ -166,7 +207,7 @@ class AuthService:
                     details={"username": normalized, "reason": "account_locked"},
                     metadata=meta,
                 )
-                raise
+                return error
         password_matches = self.verify_password(
             password, row["password_hash"] if row else self._dummy_password_hash
         )
@@ -180,11 +221,11 @@ class AuthService:
                 metadata=meta,
             )
             if blocked_until:
-                raise AuthRateLimitError(
+                return AuthRateLimitError(
                     "Too many failed sign-in attempts; try again later",
                     self._retry_after(blocked_until, now),
                 )
-            raise AuthenticationError("Invalid username or password")
+            return AuthenticationError("Invalid username or password")
 
         self.db.execute("DELETE FROM auth_login_limits WHERE key_hash=?", (rate_key,))
         expires_at = (now + timedelta(hours=self.session_ttl_hours)).isoformat()
@@ -279,22 +320,24 @@ class AuthService:
         principal: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> None:
-        self.revoke_session(principal.session_id)
-        target = self._raw_user(principal.user_id)
-        self._audit(
-            "LOGOUT",
-            "SUCCEEDED",
-            actor=principal,
-            target=target,
-            details={"session_id": principal.session_id},
-            metadata=metadata,
-        )
+        with self._account_transaction(principal, allow_password_change=True) as current:
+            self.revoke_session(current.session_id)
+            self._audit(
+                "LOGOUT", "SUCCEEDED", actor=current,
+                target=self._raw_user(current.user_id),
+                details={"session_id": current.session_id}, metadata=metadata,
+            )
 
     def revoke_session(self, session_id: str) -> int:
-        return self.db.execute_count(
-            "UPDATE auth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
-            (utc_now(), session_id),
-        )
+        with self.db.transaction():
+            session = self.db.fetch_one("SELECT user_id FROM auth_sessions WHERE id=?", (session_id,))
+            if not session:
+                return 0
+            self._lock_users(session["user_id"])
+            return self.db.execute_count(
+                "UPDATE auth_sessions SET revoked_at=? WHERE id=? AND revoked_at IS NULL",
+                (utc_now(), session_id),
+            )
 
     def purge_expired_sessions(self) -> int:
         now = datetime.now(timezone.utc)
@@ -390,6 +433,10 @@ class AuthService:
         actor: Optional[AuthenticatedPrincipal] = None,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor) as current:
+            return self._create_user(payload, current, metadata)
+
+    def _create_user(self, payload, actor, metadata):
         if actor:
             self._assert_can_create(actor, payload)
         now = utc_now()
@@ -420,8 +467,9 @@ class AuthService:
                     now,
                 ),
             )
-        except sqlite3.IntegrityError as error:
-            raise AuthConflictError("Username already exists") from error
+        except Exception as error:
+            self._raise_username_conflict(error)
+            raise
         row = self._require_raw_user(user_id)
         self._audit(
             "USER_CREATED",
@@ -444,6 +492,10 @@ class AuthService:
         actor: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor, user_id) as current:
+            return self._update_user(user_id, payload, current, metadata)
+
+    def _update_user(self, user_id, payload, actor, metadata):
         current = self._require_raw_user(user_id)
         self._assert_can_manage_target(actor, current)
         updates = payload.model_dump(exclude_unset=True)
@@ -475,17 +527,23 @@ class AuthService:
                 f"UPDATE users SET {assignments}, version=version+1 WHERE id=? AND version=?",
                 (*updates.values(), user_id, version),
             )
-        except sqlite3.IntegrityError as error:
-            raise AuthConflictError("Username already exists") from error
+        except Exception as error:
+            self._raise_username_conflict(error)
+            raise
         if not changed:
             raise AuthConflictError("User was changed by another request; reload and retry")
         updated = self._require_raw_user(user_id)
+        # An existing token must not silently acquire a new tenant/project or
+        # elevated role after an administrator edits the account.
+        security_fields = {"username", "tenant_id", "project_id", "environment_id", "roles", "is_super_admin", "status"}
+        security_changed = any(current.get(key) != updated.get(key) for key in security_fields)
+        revoked = self.revoke_user_sessions(user_id) if security_changed else 0
         self._audit(
             "USER_UPDATED" if current["status"] == updated["status"] else "USER_REACTIVATED",
             "SUCCEEDED",
             actor=actor,
             target=updated,
-            details={"changed_fields": sorted(updates.keys() - {"updated_at"})},
+            details={"changed_fields": sorted(updates.keys() - {"updated_at"}), "revoked_sessions": revoked},
             metadata=metadata,
         )
         return self._public_user(updated)
@@ -497,6 +555,10 @@ class AuthService:
         actor: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor, user_id) as current:
+            return self._reset_password(user_id, payload, current, metadata)
+
+    def _reset_password(self, user_id, payload, actor, metadata):
         current = self._require_raw_user(user_id)
         self._assert_can_manage_target(actor, current)
         now = utc_now()
@@ -537,6 +599,13 @@ class AuthService:
         actor: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor, allow_password_change=True) as current:
+            result = self._change_own_password(payload, current, metadata)
+        if isinstance(result, AuthValidationError):
+            raise result
+        return result
+
+    def _change_own_password(self, payload, actor, metadata):
         current = self._require_raw_user(actor.user_id)
         if not self.verify_password(payload.current_password, current["password_hash"]):
             self._audit(
@@ -547,7 +616,7 @@ class AuthService:
                 details={"reason": "current_password_mismatch"},
                 metadata=metadata,
             )
-            raise AuthValidationError("Current password is incorrect")
+            return AuthValidationError("Current password is incorrect")
         now = utc_now()
         changed = self.db.execute_count(
             """UPDATE users
@@ -588,6 +657,10 @@ class AuthService:
         actor: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor, user_id) as current:
+            return self._deactivate_user(user_id, payload, current, metadata)
+
+    def _deactivate_user(self, user_id, payload, actor, metadata):
         current = self._require_raw_user(user_id)
         self._assert_can_manage_target(actor, current)
         if current["status"] == "INACTIVE":
@@ -648,6 +721,10 @@ class AuthService:
         actor: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor, user_id, allow_password_change=user_id == actor.user_id) as current:
+            return self._revoke_managed_session(user_id, session_id, current, metadata)
+
+    def _revoke_managed_session(self, user_id, session_id, actor, metadata):
         target = self._require_raw_user(user_id)
         self._assert_self_or_manager(actor, target)
         session = self.db.fetch_one(
@@ -677,6 +754,10 @@ class AuthService:
         actor: AuthenticatedPrincipal,
         metadata: Optional[Dict[str, Optional[str]]] = None,
     ) -> Dict[str, Any]:
+        with self._account_transaction(actor, user_id, allow_password_change=user_id == actor.user_id) as current:
+            return self._revoke_all_managed_sessions(user_id, current, metadata)
+
+    def _revoke_all_managed_sessions(self, user_id, actor, metadata):
         target = self._require_raw_user(user_id)
         self._assert_self_or_manager(actor, target)
         current_active = self.db.fetch_one(
@@ -702,6 +783,11 @@ class AuthService:
     def revoke_user_sessions(
         self, user_id: str, keep_session_id: Optional[str] = None
     ) -> int:
+        with self.db.transaction():
+            self._lock_users(user_id)
+            return self._revoke_user_sessions(user_id, keep_session_id)
+
+    def _revoke_user_sessions(self, user_id, keep_session_id):
         if keep_session_id:
             return self.db.execute_count(
                 """UPDATE auth_sessions SET revoked_at=?
@@ -766,6 +852,59 @@ class AuthService:
             "total": total,
             "pages": math.ceil(total / page_size) if total else 0,
         }
+
+    def _lock_key(self, value: str) -> None:
+        if self.db.dialect == "postgresql":
+            key = int.from_bytes(hashlib.sha256(("auth:" + value).encode()).digest()[:8], "big", signed=True)
+            self.db.fetch_one("SELECT pg_advisory_xact_lock(?)", (key,))
+
+    def _lock_users(self, *user_ids: str) -> None:
+        if self.db.dialect == "postgresql":
+            # Every account/session writer uses users -> sessions. Sorting all
+            # actor/target IDs prevents reciprocal administrator deadlocks.
+            for user_id in sorted(set(user_ids)):
+                self.db.fetch_one("SELECT id FROM users WHERE id=? FOR UPDATE", (user_id,))
+
+    @contextmanager
+    def _account_transaction(self, actor, user_id=None, *, allow_password_change=False):
+        with self.db.transaction():
+            self._lock_users(*([actor.user_id] if actor else []), *([user_id] if user_id else []))
+            yield self._refresh_principal(actor, allow_password_change=allow_password_change) if actor else None
+
+    def _refresh_principal(self, actor, *, allow_password_change=False):
+        row = self._raw_user(actor.user_id)
+        session = self.db.fetch_one("SELECT * FROM auth_sessions WHERE id=? AND user_id=?",
+                                    (actor.session_id, actor.user_id))
+        now = self.db.current_time()
+        expiry = self._parse_datetime(session.get("expires_at")) if session else None
+        if (not row or row["status"] != "ACTIVE" or not session or session["revoked_at"]
+                or not expiry or expiry <= now):
+            raise AuthenticationError("Authentication session is invalid")
+        if any(row[key] != getattr(actor, key) for key in ("tenant_id", "project_id", "environment_id")):
+            raise AuthenticationError("Account scope changed; sign in again")
+        must_change = bool(row["must_change_password"]) or self._date_expired(row.get("password_expires_at"), now)
+        if must_change and not allow_password_change:
+            raise AuthAuthorizationError("Password change is required before accessing platform administration")
+        return AuthenticatedPrincipal(
+            session_id=session["id"], user_id=row["id"], username=row["username"],
+            display_name=row["display_name"], tenant_id=row["tenant_id"], project_id=row["project_id"],
+            environment_id=row["environment_id"], roles=list(row.get("roles") or []),
+            is_super_admin=bool(row["is_super_admin"]), expires_at=session["expires_at"],
+            must_change_password=must_change, password_expires_at=row.get("password_expires_at"),
+        )
+
+    @staticmethod
+    def _raise_username_conflict(error: Exception) -> None:
+        duplicate = (
+            isinstance(error, sqlite3.IntegrityError)
+            and getattr(error, "sqlite_errorcode", None) == sqlite3.SQLITE_CONSTRAINT_UNIQUE
+            and "users.username" in str(error)
+        ) or (
+            getattr(error, "sqlstate", None) == "23505"
+            and getattr(getattr(error, "diag", None), "constraint_name", None) == "users_username_key"
+        )
+        if duplicate:
+            raise AuthConflictError("Username already exists") from error
 
     def _validate_user_transition(
         self,

@@ -1,0 +1,59 @@
+groups:
+  - name: deepagent-availability
+    rules:
+      - alert: DeepAgentTargetDown
+        expr: up{job=~"deepagent-api|deepagent-worker"} == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: DeepAgent management target cannot be scraped
+          description: Check process, network, TLS expiry and collector credentials. Do not disable certificate verification.
+      - alert: DeepAgentObservationStale
+        expr: deepagent_observation_fresh == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: DeepAgent dependency observations are stale or unavailable
+          description: Check database connectivity and the health refresh task. Missing observations are not empty queues.
+      - alert: DeepAgentWorkersUnavailable
+        expr: max by (cluster, kind) (deepagent_workers_online) == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: No live DeepAgent consumer of this kind
+          description: Check Worker exits, lease heartbeats and database access before adding replicas.
+      - alert: DeepAgentQueueStalled
+        expr: max by (cluster, kind) (deepagent_queue_oldest_seconds{kind="runtime"}) > 300 or max by (cluster, kind) (deepagent_queue_oldest_seconds{kind="knowledge"}) > 900
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: DeepAgent work is waiting beyond its configured service target
+          description: Inspect workers, admission and downstream dependencies; cluster gauges are not summed across scrapers.
+      - alert: DeepAgentCancellationStalled
+        expr: max by (cluster) (deepagent_cancellation_oldest_seconds) > 300
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: Cancellation has not safely finalized
+          description: Inspect cancellation status and safe error codes, sandbox reachability and storage/scanning. Never restore the old execution lease or force CANCELLED.
+      - alert: DeepAgentHttpErrors
+        expr: sum by (cluster) (rate(deepagent_http_requests_total{status=~"5.."}[5m])) / clamp_min(sum by (cluster) (rate(deepagent_http_requests_total[5m])), 0.001) > 0.05 and sum by (cluster) (increase(deepagent_http_requests_total[5m])) >= 20
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: DeepAgent API error ratio is above five percent
+          description: Use request and trace IDs to inspect failures. Probe and metrics traffic is excluded.
+      - alert: DeepAgentTraceExportFailing
+        expr: sum by (cluster, instance) (increase(deepagent_trace_export_batches_total{outcome="error"}[5m])) > 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: Trace batches could not reach the approved collector
+          description: Check collector health, TLS and credentials. Traces are best-effort and cannot replace durable audit records.
+      - alert: DeepAgentTraceQueueDropping
+        expr: sum by (cluster, instance) (increase(deepagent_trace_queue_dropped_total[5m])) > 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: The bounded trace export queue is dropping spans
+          description: Check collector capacity and outage duration; tune sampling within the approved policy. Do not make the queue unbounded.

@@ -50,7 +50,7 @@ class VerificationPolicy(BaseModel):
 
 class SandboxProfileSpec(BaseModel):
     revision_id: str = "sandbox-docker-v1"
-    provider: Literal["docker", "kubernetes", "fake"] = "docker"
+    provider: Literal["docker", "remote", "kubernetes", "fake"] = "docker"
     image: str = "deepagent/coding-runtime:0.1.0"
     image_digest: str = "sha256:unresolved"
     user: str = "10001:10001"
@@ -62,6 +62,7 @@ class SandboxProfileSpec(BaseModel):
     run_timeout_seconds: int = Field(default=1800, ge=10, le=86400)
     max_output_bytes: int = Field(default=200_000, ge=1024, le=10_000_000)
     network_mode: Literal["deny_by_default", "allowlist"] = "deny_by_default"
+    network_allowlist: List[str] = Field(default_factory=list, max_length=100)
     workspace_root: str = "/workspace/repo"
     read_only_rootfs: bool = True
     lifecycle: Literal["run_scoped", "thread_scoped", "agent_scoped"] = "thread_scoped"
@@ -93,4 +94,6 @@ class CodingProfileSpec(BaseModel):
 
 
 class ChangeSetDecision(BaseModel):
+    model_config = {"extra": "forbid"}
+    version: int = Field(ge=1)
     message: Optional[str] = Field(default=None, max_length=2000)

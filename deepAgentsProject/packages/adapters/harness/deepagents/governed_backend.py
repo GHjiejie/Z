@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from packages.auth.resource_access import ResourceAccess
+
 import hashlib
 import time
 from typing import Any, Optional
@@ -131,7 +133,9 @@ class GovernedSandboxBackend(SandboxBackendProtocol):
         return self.raw.download_files(paths)
 
     def _authorize_path(self, path: str, operation: str) -> str:
+        self.db.assert_execution_fence()
         normalized = self.policy.authorize_path(path, operation)
+        ResourceAccess(self.db).require_execution(self.run["id"])
         self._validate_resolved(normalized)
         return normalized
 
@@ -152,10 +156,22 @@ class GovernedSandboxBackend(SandboxBackendProtocol):
             )
 
     def execute(self, command: str, *, timeout: int | None = None):
+        from packages.operations.telemetry import operation
+        with operation('sandbox.command') as span:
+            result = self._execute_governed(command, timeout=timeout)
+            if span is not None and result.exit_code:
+                from opentelemetry.trace import StatusCode
+                span.set_status(StatusCode.ERROR)
+                span.set_attribute('deepagent.command.exit_code', result.exit_code)
+            return result
+
+    def _execute_governed(self, command: str, *, timeout: int | None = None):
+        self.db.assert_execution_fence()
         try:
             self.policy.authorize_command(command)
         except SandboxPolicyError as exc:
             return self._deny_command(command, exc)
+        ResourceAccess(self.db).require_execution(self.run["id"])
         return self._execute_audited(command, timeout=timeout, actor="agent")
 
     def _deny_command(self, command: str, error: SandboxPolicyError) -> ExecuteResponse:
@@ -212,6 +228,7 @@ class GovernedSandboxBackend(SandboxBackendProtocol):
     def _execute_audited(
         self, command: str, *, timeout: int | None, actor: str
     ):
+        ResourceAccess(self.db).require_execution(self.run["id"])
         before_workspace = self._workspace_fingerprint()
         command_id = new_id("cmd")
         command_hash = hashlib.sha256(command.encode()).hexdigest()
@@ -285,7 +302,10 @@ class GovernedSandboxBackend(SandboxBackendProtocol):
                     },
                 )
             artifact_id = self._artifact(
-                f"command-{command_id}.log", "text/plain", output
+                # Git's machine-readable -z output contains NUL separators,
+                # which PostgreSQL TEXT cannot store. Escape only the human
+                # log; the raw tool response must retain its parser semantics.
+                f"command-{command_id}.log", "text/plain", output.replace("\x00", "\\0")
             )
         status = "SUCCEEDED" if result.exit_code == 0 else "FAILED"
         self.db.execute(

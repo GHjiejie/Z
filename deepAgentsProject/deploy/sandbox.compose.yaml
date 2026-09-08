@@ -1,0 +1,32 @@
+# Run on a dedicated execution host, never beside API/Worker/database processes.
+services:
+  sandbox-service:
+    image: "${SANDBOX_SERVICE_IMAGE:?Use an approved image with @sha256 digest}"
+    command: [sandbox-service]
+    user: "10001:10001"
+    group_add: ["${DOCKER_SOCKET_GID:?The dedicated host Docker socket group}"]
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    cpus: 2
+    mem_limit: 2g
+    pids_limit: 256
+    stop_grace_period: 60s
+    env_file: ["${SANDBOX_ENV_FILE:?Provide a non-secret sandbox configuration file}"]
+    environment: {DEEPAGENT_ENVIRONMENT: production, SANDBOX_STATE_PATH: /var/lib/deepagent/sandboxes.db}
+    ports: ["${SANDBOX_BIND_ADDRESS:?Bind only a private interface}:8443:8443"]
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - sandbox-state:/var/lib/deepagent
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700
+    secrets: [sandbox-token, lease-database-url, sandbox-cert, sandbox-key, controller-ca]
+volumes:
+  sandbox-state: {}
+secrets:
+  sandbox-token: {file: "${SANDBOX_TOKEN_SECRET_FILE:?Required}"}
+  lease-database-url: {file: "${LEASE_DATABASE_URL_SECRET_FILE:?Dedicated view-only TLS PostgreSQL account required}"}
+  sandbox-cert: {file: "${SANDBOX_CERT_FILE:?Required}"}
+  sandbox-key: {file: "${SANDBOX_KEY_FILE:?Required}"}
+  controller-ca: {file: "${CONTROLLER_CA_FILE:?Required}"}

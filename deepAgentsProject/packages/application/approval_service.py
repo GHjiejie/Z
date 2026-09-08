@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any, Dict, List, Optional
 
 from packages.application.services import ConflictError, NotFoundError, new_id
 from packages.domain.models import DecisionCreate, TenantContext, utc_now
 from packages.persistence import Database
+from packages.auth.permissions import Permission, authorize
+from packages.auth.resource_access import ResourceAccess, refresh_context
 from packages.runtime.event_emitter import EventEmitter
+from packages.runtime.admission import TaskAdmission
 
 
 class ApprovalService:
@@ -14,10 +18,13 @@ class ApprovalService:
         self.db = db
         self.events = events
         self.orchestrator = orchestrator
+        self.admission = TaskAdmission(db)
 
     def list_interrupts(
         self, context: TenantContext, status: Optional[str] = None
     ) -> List[Dict[str, Any]]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.APPROVAL_READ)
         sql = """SELECT i.*, r.input AS run_input, a.name AS agent_name
                  FROM interrupts i JOIN runs r ON r.id=i.run_id
                  JOIN agent_deployments d ON d.id=r.agent_deployment_id
@@ -28,7 +35,15 @@ class ApprovalService:
             sql += " AND i.status=?"
             params.append(status.upper())
         sql += " ORDER BY i.created_at DESC"
-        return self.db.fetch_all(sql, params)
+        rows = self.db.fetch_all(sql, params)
+        visible = []
+        for row in rows:
+            try:
+                ResourceAccess(self.db).require_run(row["run_id"], context)
+                visible.append(row)
+            except NotFoundError:
+                continue
+        return visible
 
     def get_interrupt(self, interrupt_id: str, context: TenantContext) -> Dict[str, Any]:
         interrupt = self.db.fetch_one(
@@ -37,6 +52,7 @@ class ApprovalService:
         )
         if not interrupt:
             raise NotFoundError("Interrupt not found")
+        ResourceAccess(self.db).require_run(interrupt["run_id"], context)
         return interrupt
 
     async def decide(
@@ -47,6 +63,40 @@ class ApprovalService:
         idempotency_key: Optional[str],
         expected_version: Optional[int],
     ) -> Dict[str, Any]:
+        context = refresh_context(self.db, context)
+        authorize(context, Permission.APPROVAL_DECIDE)
+        with self.db.transaction():
+            interrupt = self.get_interrupt(interrupt_id, context)
+            if any(decision.type in {"approve", "edit"} for decision in payload.decisions):
+                ResourceAccess(self.db).require_execution(interrupt["run_id"])
+            if self.db.dialect == "postgresql":
+                self.db.fetch_one("SELECT id FROM runs WHERE id=? FOR UPDATE", (interrupt["run_id"],))
+                self.db.fetch_one("SELECT id FROM interrupts WHERE id=? FOR UPDATE", (interrupt_id,))
+            result, should_resume, run_id = self._decide(
+                interrupt_id,
+                payload,
+                context,
+                idempotency_key,
+                expected_version,
+            )
+            enqueued = bool(should_resume and self.orchestrator.enqueue_in_transaction(run_id))
+        if should_resume and not enqueued:
+            await self.orchestrator.enqueue(run_id)
+        return result
+
+    def _decide(
+        self,
+        interrupt_id: str,
+        payload: DecisionCreate,
+        context: TenantContext,
+        idempotency_key: Optional[str],
+        expected_version: Optional[int],
+    ) -> tuple[Dict[str, Any], bool, str]:
+        request_hash = hashlib.sha256(json.dumps({
+            "payload": payload.model_dump(mode="json"), "expected_version": expected_version,
+            "user_id": context.user_id, "project_id": context.project_id,
+            "environment_id": context.environment_id,
+        }, sort_keys=True, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
         if idempotency_key:
             previous = self.db.fetch_one(
                 """SELECT response_json FROM idempotency_records
@@ -54,9 +104,16 @@ class ApprovalService:
                 (context.tenant_id, f"interrupt:{interrupt_id}", idempotency_key),
             )
             if previous:
-                return json.loads(previous["response_json"])
+                saved = json.loads(previous["response_json"])
+                if saved.get("request_hash") != request_hash or "response" not in saved:
+                    raise ConflictError("Approval idempotency key is legacy or was used for different content or principal")
+                existing = saved["response"]
+                return existing, False, existing["run_id"]
 
         interrupt = self.get_interrupt(interrupt_id, context)
+        run = self.db.fetch_one("SELECT * FROM runs WHERE id=?", (interrupt["run_id"],))
+        if not run or run["status"] != "WAITING_FOR_APPROVAL":
+            raise ConflictError("Run is no longer waiting for this approval")
         if interrupt["status"] != "PENDING":
             raise ConflictError("Interrupt has already been resolved")
         if expected_version is not None and expected_version != interrupt["version"]:
@@ -123,6 +180,7 @@ class ApprovalService:
 
         should_resume = decision_type in {"approve", "edit"}
         if should_resume:
+            self.admission.run(context, ignore_run_id=run["id"], principal_user_id=run["principal_user_id"])
             attempt_count = self.db.fetch_one(
                 "SELECT COALESCE(MAX(attempt_number), 0) AS value FROM run_attempts WHERE run_id=?",
                 (run["id"],),
@@ -209,10 +267,8 @@ class ApprovalService:
                     context.tenant_id,
                     f"interrupt:{interrupt_id}",
                     idempotency_key,
-                    self.db.encode(result),
+                    self.db.encode({"request_hash": request_hash, "response": result}),
                     now,
                 ),
             )
-        if should_resume:
-            await self.orchestrator.enqueue(run["id"])
-        return result
+        return result, should_resume, run["id"]

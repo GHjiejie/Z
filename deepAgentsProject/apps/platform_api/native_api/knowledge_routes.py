@@ -5,7 +5,8 @@ from urllib.parse import quote
 from fastapi import APIRouter, Depends, Header, Query, Request
 from fastapi.responses import RedirectResponse, Response
 
-from apps.platform_api.dependencies import services, tenant_context
+from apps.platform_api.dependencies import require_permission, services
+from packages.auth import Permission
 from packages.domain.models import TenantContext
 from packages.knowledge.models import (
     KnowledgeBaseCreate,
@@ -17,10 +18,13 @@ from packages.knowledge.models import (
 
 router = APIRouter(prefix="/api/v1", tags=["knowledge"])
 
+knowledge_read = require_permission(Permission.KNOWLEDGE_READ)
+knowledge_manage = require_permission(Permission.KNOWLEDGE_MANAGE)
+
 
 @router.get("/knowledge-bases")
 def list_knowledge_bases(
-    context: TenantContext = Depends(tenant_context), container=Depends(services)
+    context: TenantContext = Depends(knowledge_read), container=Depends(services)
 ):
     return {"items": container.knowledge.list_knowledge_bases(context)}
 
@@ -28,16 +32,17 @@ def list_knowledge_bases(
 @router.post("/knowledge-bases", status_code=201)
 def create_knowledge_base(
     payload: KnowledgeBaseCreate,
-    context: TenantContext = Depends(tenant_context),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"),
+    context: TenantContext = Depends(knowledge_manage),
     container=Depends(services),
 ):
-    return container.knowledge.create_knowledge_base(payload, context)
+    return container.knowledge.create_knowledge_base(payload, context, idempotency_key)
 
 
 @router.get("/knowledge-bases/{knowledge_base_id}")
 def get_knowledge_base(
     knowledge_base_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     return container.knowledge.get_knowledge_base(knowledge_base_id, context)
@@ -46,7 +51,7 @@ def get_knowledge_base(
 @router.get("/knowledge-bases/{knowledge_base_id}/documents")
 def list_knowledge_documents(
     knowledge_base_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     return {"items": container.knowledge.list_documents(knowledge_base_id, context)}
@@ -55,7 +60,7 @@ def list_knowledge_documents(
 @router.get("/knowledge-bases/{knowledge_base_id}/revisions")
 def list_knowledge_revisions(
     knowledge_base_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     return {"items": container.knowledge.list_revisions(knowledge_base_id, context)}
@@ -65,10 +70,11 @@ def list_knowledge_revisions(
 def prepare_knowledge_upload(
     knowledge_base_id: str,
     payload: UploadPrepare,
-    context: TenantContext = Depends(tenant_context),
+    idempotency_key: str | None = Header(default=None, alias="Idempotency-Key", min_length=1, max_length=200, pattern=r"^[A-Za-z0-9][A-Za-z0-9._:-]*$"),
+    context: TenantContext = Depends(knowledge_manage),
     container=Depends(services),
 ):
-    return container.knowledge.prepare_upload(knowledge_base_id, payload, context)
+    return container.knowledge.prepare_upload(knowledge_base_id, payload, context, idempotency_key)
 
 
 @router.put("/knowledge-document-versions/{version_id}/content")
@@ -76,7 +82,7 @@ async def upload_knowledge_content(
     version_id: str,
     request: Request,
     content_type: str = Header(default="application/octet-stream", alias="Content-Type"),
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_manage),
     container=Depends(services),
 ):
     content = await request.body()
@@ -87,7 +93,7 @@ async def upload_knowledge_content(
 async def complete_knowledge_upload(
     version_id: str,
     payload: UploadComplete,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_manage),
     container=Depends(services),
 ):
     return await container.knowledge.complete_upload(version_id, payload, context)
@@ -96,7 +102,7 @@ async def complete_knowledge_upload(
 @router.get("/knowledge-documents/{document_id}")
 def get_knowledge_document(
     document_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     return container.knowledge.get_document(document_id, context)
@@ -105,7 +111,7 @@ def get_knowledge_document(
 @router.get("/knowledge-documents/{document_id}/download")
 def download_knowledge_document(
     document_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     result = container.knowledge.download_document(document_id, context)
@@ -122,7 +128,7 @@ def download_knowledge_document(
 @router.get("/knowledge-document-versions/{version_id}/download")
 def download_knowledge_document_version(
     version_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     result = container.knowledge.download_document_version(version_id, context)
@@ -139,7 +145,7 @@ def download_knowledge_document_version(
 @router.get("/knowledge-ingestion-jobs/{job_id}")
 def get_knowledge_ingestion_job(
     job_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     return container.knowledge.get_ingestion_job(job_id, context)
@@ -148,7 +154,7 @@ def get_knowledge_ingestion_job(
 @router.post("/knowledge-ingestion-jobs/{job_id}:retry", status_code=202)
 async def retry_knowledge_ingestion_job(
     job_id: str,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_manage),
     container=Depends(services),
 ):
     return await container.knowledge.retry_ingestion_job(job_id, context)
@@ -157,7 +163,7 @@ async def retry_knowledge_ingestion_job(
 @router.post("/knowledge:search")
 def search_knowledge(
     payload: KnowledgeSearchRequest,
-    context: TenantContext = Depends(tenant_context),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
     return container.knowledge.search(payload, context)
@@ -166,13 +172,8 @@ def search_knowledge(
 @router.get("/knowledge-events")
 def list_knowledge_events(
     limit: int = Query(default=100, ge=1, le=500),
-    context: TenantContext = Depends(tenant_context),
+    cursor: str | None = Query(default=None, max_length=1024),
+    context: TenantContext = Depends(knowledge_read),
     container=Depends(services),
 ):
-    return {
-        "items": container.db.fetch_all(
-            """SELECT * FROM knowledge_events WHERE tenant_id=? AND project_id=?
-               ORDER BY created_at DESC LIMIT ?""",
-            (context.tenant_id, context.project_id, limit),
-        )
-    }
+    return container.knowledge.list_events(context, limit=limit, cursor=cursor)

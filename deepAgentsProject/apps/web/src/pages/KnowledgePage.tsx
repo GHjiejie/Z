@@ -20,6 +20,7 @@ import type { FormEvent } from 'react'
 import { useSearchParams } from 'react-router-dom'
 import { EmptyState, ErrorBanner, LoadingBlock, PageHeader, StatusPill, formatRelative } from '../components/UI'
 import { api } from '../lib/api'
+import { KnowledgeRetryStore, knowledgeUploadBody } from '../lib/knowledgeRetry'
 import { usePlatform } from '../context/PlatformContext'
 import type {
   KnowledgeBase,
@@ -55,8 +56,16 @@ export function KnowledgePage() {
   const [searchResult, setSearchResult] = useState<KnowledgeSearchResult | null>(null)
   const [searching, setSearching] = useState(false)
   const fileInput = useRef<HTMLInputElement>(null)
+  const writing = useRef(false)
   const [searchParams, setSearchParams] = useSearchParams()
   const { context } = usePlatform()
+
+  async function beginRequest(operation: string, body: unknown) {
+    if (!context) throw new Error('Wait for your account context to finish loading.')
+    return new KnowledgeRetryStore(window.sessionStorage).begin([
+      operation, context.tenant.id, context.project.id, context.environment.id, context.user.id,
+    ], body)
+  }
 
   const loadBases = useCallback(async (preferredId?: string) => {
     const result = await api.knowledgeBases()
@@ -115,11 +124,15 @@ export function KnowledgePage() {
 
   async function createBase(event: FormEvent) {
     event.preventDefault()
-    if (!name.trim()) return
+    if (!name.trim() || writing.current) return
+    writing.current = true
     setBusy(true)
     setError('')
     try {
-      const created = await api.createKnowledgeBase({ name: name.trim(), description: description.trim() })
+      const body = { name: name.trim(), description: description.trim() }
+      const intent = await beginRequest('create-base', body)
+      const created = await api.createKnowledgeBase(body, intent.key)
+      intent.finish()
       setName('')
       setDescription('')
       setShowCreate(false)
@@ -129,24 +142,34 @@ export function KnowledgePage() {
     } catch (err) {
       setError((err as Error).message)
     } finally {
+      writing.current = false
       setBusy(false)
     }
   }
 
   async function uploadFile(file?: File) {
-    if (!file || !selectedId) return
+    if (!file || !selectedId || writing.current) return
+    writing.current = true
     setBusy(true)
     setError('')
     setJob(null)
     try {
-      const preparation = await api.prepareKnowledgeUpload(selectedId, file)
+      const body = await knowledgeUploadBody(file)
+      const intent = await beginRequest(`prepare-upload:${selectedId}`, body)
+      const preparation = await api.prepareKnowledgeUpload(selectedId, body, intent.key)
+      if (preparation.status === 'EXPIRED') {
+        intent.finish()
+        throw new Error('Upload intent expired. Choose the file again to start a new upload.')
+      }
       const uploaded = await api.uploadKnowledgeFile(preparation, file)
       const nextJob = await api.completeKnowledgeUpload(preparation.document_version_id, uploaded.etag)
+      intent.finish()
       setJob(nextJob)
       await loadSelected(selectedId)
     } catch (err) {
       setError((err as Error).message)
     } finally {
+      writing.current = false
       setBusy(false)
       if (fileInput.current) fileInput.current.value = ''
     }

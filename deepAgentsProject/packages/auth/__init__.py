@@ -26,6 +26,13 @@ from packages.auth.service import (
     AuthService,
     AuthValidationError,
 )
+from packages.auth.permissions import (
+    Permission,
+    ROLE_PERMISSIONS,
+    is_allowed,
+    permissions_for_context,
+    permissions_for_roles,
+)
 
 __all__ = [
     "AuthAuditEventResponse",
@@ -46,10 +53,15 @@ __all__ = [
     "PasswordChangeRequest",
     "PasswordResetRequest",
     "PasswordUpdate",
+    "Permission",
+    "ROLE_PERMISSIONS",
     "SessionMutationResponse",
     "UserCreate",
     "UserDeleteRequest",
     "UserListResponse",
     "UserResponse",
     "UserUpdate",
+    "is_allowed",
+    "permissions_for_context",
+    "permissions_for_roles",
 ]

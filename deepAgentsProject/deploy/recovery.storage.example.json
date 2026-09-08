@@ -1,0 +1,5 @@
+{
+  "bucket": "replace-with-approved-source-or-distinct-recovery-bucket",
+  "region": "cn-beijing",
+  "endpoint": "https://oss-cn-beijing.aliyuncs.com"
+}

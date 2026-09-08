@@ -16,3 +16,19 @@ class KnowledgeStorageError(KnowledgeError):
 
 class KnowledgeValidationError(KnowledgeError):
     code = "KNOWLEDGE_VALIDATION_ERROR"
+
+
+class ParseLimitExceeded(KnowledgeValidationError):
+    code = "KNOWLEDGE_PARSE_LIMIT_EXCEEDED"
+
+
+class ParseTimeout(KnowledgeValidationError):
+    code = "KNOWLEDGE_PARSE_TIMEOUT"
+
+
+class ParseUnavailable(KnowledgeError):
+    code = "KNOWLEDGE_PARSE_UNAVAILABLE"
+
+
+class ParseProtocolError(KnowledgeError):
+    code = "KNOWLEDGE_PARSE_PROTOCOL_ERROR"

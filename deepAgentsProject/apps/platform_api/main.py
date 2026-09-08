@@ -1,23 +1,33 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 import os
-from contextlib import asynccontextmanager
+from contextlib import AsyncExitStack, asynccontextmanager
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Iterable
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import JSONResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from apps.platform_api.security import EnterpriseSecurityMiddleware, SecuritySettings
+from apps.platform_api.web_console import mount_web_console
 from apps.platform_api.native_api.knowledge_routes import router as knowledge_router
 from apps.platform_api.native_api.auth_routes import router as auth_router
 from apps.platform_api.native_api.coding_routes import router as coding_router
 from apps.platform_api.native_api.repository_routes import router as repository_router
 from apps.platform_api.native_api.routing_routes import router as routing_router
 from apps.platform_api.native_api.routes import router as native_router
+from apps.platform_api.native_api.evaluation_routes import router as evaluation_router
+from apps.platform_api.native_api.billing_routes import router as billing_router
+from apps.platform_api.native_api.model_routes import router as model_router
+from apps.platform_api.native_api.release_routes import router as release_router
+from packages.runtime.model_registry import ModelRegistry
+from packages.billing.service import BillingService
+from packages.billing.errors import BudgetExceeded, BillingConfigurationError
 from packages.application.approval_service import ApprovalService
 from packages.auth import (
     AuthAuthorizationError,
@@ -35,7 +45,9 @@ from packages.application.services import (
     seed_reference_data,
 )
 from packages.compiler import AgentPlanCompiler
-from packages.config import load_environment
+from packages.persistence.pagination import InvalidCursor, PageAccessChanged
+from packages.config import load_environment, read_environment
+from packages.content_security import create_content_scanner
 from packages.coding.errors import (
     CodingConflictError,
     CodingError,
@@ -52,12 +64,13 @@ from packages.knowledge.errors import (
 )
 from packages.knowledge.service import KnowledgeService
 from packages.knowledge.storage import create_object_storage
-from packages.persistence import Database
+from packages.persistence import create_database
 from packages.plugins import PluginLoader, SkillRegistry
 from packages.repositories import RepositoryService
+from packages.repositories.network import RepositoryNetworkPolicy
 from packages.routing import IntentRoutingService
 from packages.runtime import RunOrchestrator, RunService
-from packages.runtime.coding_model import create_coding_chat_model
+from packages.runtime.coding_model import close_coding_chat_model, create_coding_chat_model
 from packages.runtime.deepagents_executor import DeepAgentsRuntimeExecutor
 from packages.runtime.event_emitter import EventEmitter
 from packages.runtime.model_gateway import (
@@ -65,11 +78,19 @@ from packages.runtime.model_gateway import (
     ModelGatewayError,
     OpenAICompatibleModelGateway,
 )
-from packages.sandbox import DockerSandboxProvider, SandboxManager
+from packages.runtime.task_queue import create_task_queue
+from packages.sandbox import DockerSandboxProvider, RemoteSandboxProvider, SandboxManager
 from packages.sandbox.ports import SandboxProvider
+from packages.secrets import read_secret
 
 from langchain_core.language_models.chat_models import BaseChatModel
-from langgraph.checkpoint.sqlite.aio import AsyncSqliteSaver
+from packages.runtime.checkpoint_saver import FencedCheckpointSaver
+from packages.persistence.archive_store import SharedArchiveStore
+from packages.evaluations.service import EvaluationService
+from packages.operations.health import HealthMonitor
+from packages.operations.telemetry import Telemetry, TelemetrySettings
+from packages.operations.http import TelemetryMiddleware, MetricsResponse
+from packages.runtime.admission import CapacityExceeded
 
 
 logger = logging.getLogger(__name__)
@@ -86,37 +107,123 @@ def create_app(
     sandbox_providers: Iterable[SandboxProvider] | None = None,
 ) -> FastAPI:
     root = Path(__file__).resolve().parents[2]
+    file_environment, loaded_environment_files = (
+        read_environment(root) if load_env else ({}, [])
+    )
+
+    def configured(name: str, default: str) -> str:
+        return os.environ.get(name, file_environment.get(name, default))
+
+    security = SecuritySettings.from_environment(file_environment)
+    resolved_trust_identity_headers = (
+        trust_identity_headers
+        if trust_identity_headers is not None
+        else (
+            not load_env
+            or configured("DEEPAGENT_TRUST_IDENTITY_HEADERS", "false").lower()
+            in {"1", "true", "yes"}
+        )
+    )
+    resolved_allow_demo_identity = (
+        allow_demo_identity
+        if allow_demo_identity is not None
+        else (
+            not load_env
+            or configured("DEEPAGENT_ALLOW_DEMO_IDENTITY", "false").lower()
+            in {"1", "true", "yes"}
+        )
+    )
+    raw_identity_header_secret = configured("DEEPAGENT_IDENTITY_HEADER_SECRET", "").strip()
+    raw_bootstrap_password = configured(
+        "DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD", "Console1@"
+    )
+    resolved_process_role = configured("DEEPAGENT_PROCESS_ROLE", "all").strip().lower()
 
     @asynccontextmanager
-    async def lifespan(application: FastAPI):
-        loaded_environment_files = load_environment(root) if load_env else []
-        application.state.trust_identity_headers = (
-            trust_identity_headers
-            if trust_identity_headers is not None
-            else (
-                not load_env
-                or os.getenv("DEEPAGENT_TRUST_IDENTITY_HEADERS", "false").lower()
-                in {"1", "true", "yes"}
-            )
+    async def application_lifespan(application: FastAPI):
+        resources: AsyncExitStack = application.state.resource_cleanup
+        if load_env:
+            load_environment(root)
+        bootstrap_file = configured(
+            "DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD_FILE", ""
+        ).strip()
+        identity_secret_file = configured(
+            "DEEPAGENT_IDENTITY_HEADER_SECRET_FILE", ""
+        ).strip()
+        # Validate the complete production baseline before opening databases or
+        # starting workers. File-backed values are represented only for the
+        # presence checks and are read after validation.
+        bootstrap_candidate = (
+            "file-backed-secret" if bootstrap_file else raw_bootstrap_password
         )
-        application.state.allow_demo_identity = (
-            allow_demo_identity
-            if allow_demo_identity is not None
-            else (
-                not load_env
-                or os.getenv("DEEPAGENT_ALLOW_DEMO_IDENTITY", "false").lower()
-                in {"1", "true", "yes"}
-            )
+        identity_candidate = (
+            "file-backed-secret" if identity_secret_file else raw_identity_header_secret
         )
-        db_path = database_path or os.getenv(
+        security.validate_startup(
+            bootstrap_password=bootstrap_candidate,
+            cookie_secure=configured(
+                "DEEPAGENT_SESSION_COOKIE_SECURE", "false"
+            ).lower()
+            in {"1", "true", "yes"},
+            allow_demo_identity=resolved_allow_demo_identity,
+            trust_identity_headers=resolved_trust_identity_headers,
+            identity_header_secret=identity_candidate or None,
+        )
+        bootstrap_password = read_secret(
+            "DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD",
+            values={
+                **file_environment,
+                "DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD": raw_bootstrap_password,
+            },
+            required=True,
+            production=security.production,
+        )
+        identity_header_secret = read_secret(
+            "DEEPAGENT_IDENTITY_HEADER_SECRET",
+            values={
+                **file_environment,
+                "DEEPAGENT_IDENTITY_HEADER_SECRET": raw_identity_header_secret,
+            },
+            required=resolved_trust_identity_headers and security.production,
+            production=security.production,
+        ) or None
+        application.state.trust_identity_headers = resolved_trust_identity_headers
+        application.state.allow_demo_identity = resolved_allow_demo_identity
+        application.state.identity_header_secret = identity_header_secret
+        application.state.security = security
+        database_location = database_path or read_secret(
+            "DATABASE_URL", values=file_environment, production=security.production
+        ) or configured(
             "DEEPAGENT_DB_PATH", str(root / "data" / "deepagent.db")
         )
-        db = Database(db_path)
-        db.initialize()
-        auth = AuthService(db)
-        auth.bootstrap_super_admin(
-            os.getenv("DEEPAGENT_BOOTSTRAP_ADMIN_PASSWORD", "Console1@")
+        postgres_enabled = database_location.startswith(("postgresql://", "postgres://"))
+        process_role = resolved_process_role
+        if process_role not in {"all", "api", "worker"}:
+            raise RuntimeError("DEEPAGENT_PROCESS_ROLE must be all, api, or worker")
+        if security.production and (not postgres_enabled or process_role == "all"):
+            raise RuntimeError(
+                "Production requires PostgreSQL and separate api/worker process roles"
+            )
+        data_root = (
+            Path(configured("DEEPAGENT_DATA_DIR", str(root / "data")))
+            if postgres_enabled
+            else Path(database_location).parent
         )
+        db = create_database(database_location)
+        resources.callback(db.close)
+        from packages.operations.disaster_recovery import assert_not_recovery_database
+        assert_not_recovery_database(db)
+        auth = AuthService(db)
+        auto_migrate = configured(
+            "DEEPAGENT_AUTO_MIGRATE", "false" if security.production else "true"
+        ).lower() in {"1", "true", "yes"}
+        if security.production and auto_migrate:
+            raise RuntimeError("Production schema migrations must run as a separate release job")
+        db.initialize(auto_migrate=auto_migrate)
+        telemetry = Telemetry(TelemetrySettings.from_environment(process_role, file_environment, production=security.production))
+        db.telemetry = application.state.telemetry = telemetry
+        resources.push_async_callback(asyncio.to_thread, telemetry.close)
+        auth.bootstrap_super_admin(bootstrap_password)
         auth.purge_expired_sessions()
         plugin_roots = [root / "builtin_plugins"]
         configured_roots = os.getenv("DEEPAGENT_PLUGIN_PATHS", "")
@@ -134,16 +241,63 @@ def create_app(
         skill_registry = SkillRegistry(db)
         providers = list(sandbox_providers or [])
         if not providers:
-            providers.append(
-                DockerSandboxProvider(
+            sandbox_provider = configured(
+                "DEEPAGENT_SANDBOX_PROVIDER",
+                "remote" if security.production else "docker",
+            ).strip().lower()
+            if sandbox_provider == "remote":
+                providers.append(
+                    RemoteSandboxProvider(
+                        base_url=configured("DEEPAGENT_SANDBOX_SERVICE_URL", ""),
+                        service_token=read_secret(
+                            "DEEPAGENT_SANDBOX_SERVICE_TOKEN",
+                            values=file_environment,
+                            required=True,
+                            production=security.production,
+                        ),
+                        ca_file=configured("DEEPAGENT_SANDBOX_CA_FILE", "").strip()
+                        or None,
+                        client_cert_file=configured(
+                            "DEEPAGENT_SANDBOX_CLIENT_CERT_FILE", ""
+                        ).strip()
+                        or None,
+                        client_key_file=configured(
+                            "DEEPAGENT_SANDBOX_CLIENT_KEY_FILE", ""
+                        ).strip()
+                        or None,
+                        timeout_seconds=float(
+                            configured("DEEPAGENT_SANDBOX_TIMEOUT_SECONDS", "30")
+                        ),
+                        require_https=security.production,
+                    )
+                )
+            elif sandbox_provider == "docker":
+                providers.append(DockerSandboxProvider(
                     image=os.getenv(
                         "DEEPAGENT_CODING_IMAGE", "deepagent/coding-runtime:0.1.0"
                     ),
                     dockerfile_root=str(root / "docker" / "coding-runtime"),
                     auto_build=os.getenv("DEEPAGENT_CODING_AUTO_BUILD", "true").lower()
                     in {"1", "true", "yes"},
+                ))
+            else:
+                raise RuntimeError(
+                    "DEEPAGENT_SANDBOX_PROVIDER must be remote or docker"
                 )
+        if security.production:
+            if any(provider.name != "remote" for provider in providers):
+                raise RuntimeError(
+                    "Production workers must use the remote sandbox provider"
+                )
+            required_mtls = (
+                configured("DEEPAGENT_SANDBOX_CA_FILE", "").strip(),
+                configured("DEEPAGENT_SANDBOX_CLIENT_CERT_FILE", "").strip(),
+                configured("DEEPAGENT_SANDBOX_CLIENT_KEY_FILE", "").strip(),
             )
+            if not all(required_mtls):
+                raise RuntimeError(
+                    "Production remote sandboxes require CA, client certificate, and client key files"
+                )
 
         def resolve_sandbox_image(provider_name: str, image: str) -> str:
             provider = next(
@@ -179,49 +333,86 @@ def create_app(
                     disk_mb=1024,
                     pids_limit=64,
                 )
+            elif seed_provider.name == "remote":
+                coding_sandbox = SandboxProfileSpec(
+                    provider="remote",
+                    image=configured(
+                        "DEEPAGENT_CODING_IMAGE", "deepagent/coding-runtime:0.1.0"
+                    ),
+                )
             else:
-                coding_sandbox = SandboxProfileSpec()
+                raise RuntimeError(f"Unsupported seed sandbox provider: {seed_provider.name}")
             seed_reference_data(db, compiler, coding_sandbox=coding_sandbox)
-        object_storage = create_object_storage(Path(db_path).parent / "knowledge_objects")
-        knowledge = KnowledgeService(db, object_storage, create_embedding_provider())
+        content_scanner = create_content_scanner(production=security.production)
+        object_storage = create_object_storage(data_root / "knowledge_objects")
+        archive_store = SharedArchiveStore(object_storage) if object_storage.provider != "local" else None
+        embedding_provider = create_embedding_provider()
+        if security.production:
+            if object_storage.provider == "local":
+                raise RuntimeError("Production requires shared object storage")
+            if embedding_provider.model_revision.startswith("deepagent-hash-embedding-"):
+                raise RuntimeError("Production requires a semantic embedding provider")
+        knowledge = KnowledgeService(
+            db,
+            object_storage,
+            embedding_provider,
+            queue=create_task_queue(db, "knowledge-ingestion"),
+            content_scanner=content_scanner,
+        )
         events = EventEmitter(db)
         active_model_gateway = model_gateway or OpenAICompatibleModelGateway.from_environment()
-        repository_roots = (
-            os.getenv("DEEPAGENT_REPOSITORY_ROOTS", "").strip() or str(root.parent)
-        )
+        models = ModelRegistry(db,active_model_gateway,allow_test_override=not load_env and model_gateway is not None)
+        resources.push_async_callback(models.close)
+        repository_roots = os.getenv("DEEPAGENT_REPOSITORY_ROOTS", "").strip()
+        if not repository_roots and not security.production:
+            repository_roots = str(root.parent)
         repositories = RepositoryService(
             db,
-            Path(db_path).parent / "repository_snapshots",
+            data_root / "repository_snapshots",
             [
                 Path(value.strip())
                 for value in repository_roots.split(os.pathsep)
                 if value.strip()
             ],
+            content_scanner=content_scanner,
+            archive_store=archive_store,
+            network_policy=RepositoryNetworkPolicy.from_environment(production=security.production),
         )
         sandbox_manager = SandboxManager(
             db,
             events,
             repositories,
             providers,
-            Path(db_path).parent / "workspace_snapshots",
+            data_root / "workspace_snapshots",
+            content_scanner=content_scanner,
+            archive_store=archive_store,
         )
         coding = CodingService(db, repositories, sandbox_manager)
-        checkpointer_context = AsyncSqliteSaver.from_conn_string(
-            str(Path(db_path).with_suffix(".checkpoints.db"))
+        checkpointer = FencedCheckpointSaver(
+            db,
+            sqlite_path=None if postgres_enabled else str(Path(database_location).with_suffix(".checkpoints.db")),
         )
-        checkpointer = await checkpointer_context.__aenter__()
-        await checkpointer.setup()
+        resources.callback(checkpointer.close)
+        await asyncio.to_thread(checkpointer.initialize, auto_migrate=auto_migrate)
         active_coding_model = None
         try:
             active_coding_model = create_coding_chat_model(
                 active_model_gateway, coding_model
             )
+            if coding_model is None:
+                resources.push_async_callback(close_coding_chat_model, active_coding_model)
         except ModelGatewayError:
             logger.info(
                 "Native Coding Agent model is not configured; non-coding runs remain available"
             )
-        orchestrator = RunOrchestrator(db, events, knowledge, active_model_gateway)
-        if active_coding_model is not None:
+        orchestrator = RunOrchestrator(
+            db,
+            events,
+            knowledge,
+            active_model_gateway,
+            queue=create_task_queue(db, "runtime-runs"),
+        )
+        if active_coding_model is not None or models.profiles:
             orchestrator.executors.coding = DeepAgentsRuntimeExecutor(
                 db,
                 events,
@@ -233,6 +424,8 @@ def create_app(
                 knowledge,
             )
         run_service = RunService(db, events, orchestrator, coding)
+        orchestrator.executors.models = models
+        run_service.model_registry = models
         routing = IntentRoutingService(
             db, active_model_gateway, run_service, events
         )
@@ -255,19 +448,33 @@ def create_app(
             loaded_environment_files=loaded_environment_files,
             orchestrator=orchestrator,
             agents=AgentService(db, compiler),
+            evaluations=EvaluationService(db),
+            billing=BillingService(db),
+            models=models,
             runs=run_service,
             routing=routing,
             approvals=approvals,
         )
-        await knowledge.start()
-        await sandbox_manager.start()
-        await orchestrator.start()
+        workers_started = process_role in {"all", "worker"}
+        if workers_started:
+            resources.push_async_callback(knowledge.stop)
+            await knowledge.start()
+            resources.push_async_callback(sandbox_manager.stop)
+            await sandbox_manager.start()
+            resources.push_async_callback(orchestrator.stop)
+            await orchestrator.start()
+        application.state.services.health = HealthMonitor(application.state.services)
+        telemetry.health.monitor = application.state.services.health
+        resources.push_async_callback(application.state.services.health.stop)
+        await application.state.services.health.start()
         yield
-        await orchestrator.stop()
-        await sandbox_manager.stop()
-        await knowledge.stop()
-        await checkpointer_context.__aexit__(None, None, None)
-        db.close()
+
+    @asynccontextmanager
+    async def lifespan(application: FastAPI):
+        async with AsyncExitStack() as resources:
+            application.state.resource_cleanup = resources
+            async with application_lifespan(application):
+                yield
 
     application = FastAPI(
         title="DeepAgent Platform API",
@@ -277,19 +484,47 @@ def create_app(
     )
     application.add_middleware(
         CORSMiddleware,
-        allow_origins=os.getenv("DEEPAGENT_CORS_ORIGINS", "http://localhost:5173").split(","),
+        allow_origins=list(security.cors_origins),
         allow_credentials=True,
         allow_methods=["*"],
         allow_headers=["*"],
+        expose_headers=['X-Request-ID', 'X-Trace-ID'],
     )
+    application.add_middleware(
+        TrustedHostMiddleware,
+        allowed_hosts=list(security.allowed_hosts),
+    )
+    application.add_middleware(
+        EnterpriseSecurityMiddleware,
+        settings=security,
+    )
+    application.add_middleware(TelemetryMiddleware, application=application)
 
     @application.exception_handler(NotFoundError)
     async def not_found_handler(_: Request, exc: NotFoundError):
         return JSONResponse(status_code=404, content={"error": {"code": "NOT_FOUND", "message": str(exc)}})
 
     @application.exception_handler(ConflictError)
+    @application.exception_handler(PageAccessChanged)
     async def conflict_handler(_: Request, exc: ConflictError):
         return JSONResponse(status_code=409, content={"error": {"code": "CONFLICT", "message": str(exc)}})
+
+    @application.exception_handler(InvalidCursor)
+    async def invalid_cursor_handler(_: Request, exc: InvalidCursor):
+        return JSONResponse(status_code=400, content={"error": {"code": "INVALID_CURSOR", "message": str(exc)}})
+
+    @application.exception_handler(BudgetExceeded)
+    async def quota_handler(_: Request, exc: BudgetExceeded):
+        return JSONResponse(status_code=429, content={"error":{"code":"QUOTA_EXCEEDED","message":str(exc)}})
+
+    @application.exception_handler(CapacityExceeded)
+    async def capacity_handler(_: Request, exc: CapacityExceeded):
+        return JSONResponse(status_code=429, headers={"Retry-After": "5"},
+                            content={"error": {"code": "CAPACITY_EXCEEDED", "message": str(exc)}})
+
+    @application.exception_handler(BillingConfigurationError)
+    async def billing_config_handler(_: Request, exc: BillingConfigurationError):
+        return JSONResponse(status_code=503, content={"error":{"code":"BILLING_NOT_CONFIGURED","message":str(exc)}})
 
     @application.exception_handler(AuthenticationError)
     async def authentication_error_handler(_: Request, exc: AuthenticationError):
@@ -361,24 +596,30 @@ def create_app(
             content={"error": {"code": exc.code, "message": str(exc)}},
         )
 
+    @application.get("/livez")
+    async def liveness():
+        return {"status": "alive", "service": "platform-api"}
+
+    @application.get('/metrics', include_in_schema=False)
+    async def metrics(request: Request):
+        # A distinct collector credential, not a user's bearer/cookie session.
+        return MetricsResponse(request.app.state.telemetry)
+
+    @application.get("/readyz")
+    async def readiness(request: Request):
+        result = request.app.state.services.health.snapshot()
+        return JSONResponse(result, status_code=200 if result["status"] == "healthy" else 503,
+                            headers={"Cache-Control": "no-store"})
+
     @application.get("/health")
     async def health(request: Request):
         services = request.app.state.services
-        model_identity = services.model_gateway.identity()
-        return {
-            "status": "healthy",
-            "service": "platform-api",
-            "worker_id": services.orchestrator.worker_id,
-            "queue_depth": services.orchestrator.queue.qsize(),
-            "plugins_loaded": services.plugin_load_report.plugin_count,
-            "skills_loaded": services.plugin_load_report.skill_count,
-            "model": {
-                "configured": True,
-                "provider": model_identity["provider"],
-                "name": model_identity["model"],
-                "route": model_identity["route"],
-            },
-        }
+        result = services.health.snapshot(details=not security.production)
+        if not security.production:
+            result.update(plugins_loaded=services.plugin_load_report.plugin_count,
+                          skills_loaded=services.plugin_load_report.skill_count)
+        return JSONResponse(result, status_code=200 if result["status"] == "healthy" else 503,
+                            headers={"Cache-Control": "no-store"})
 
     application.include_router(auth_router)
     application.include_router(native_router)
@@ -386,19 +627,14 @@ def create_app(
     application.include_router(repository_router)
     application.include_router(coding_router)
     application.include_router(routing_router)
+    application.include_router(evaluation_router)
+    application.include_router(billing_router)
+    application.include_router(model_router)
+    application.include_router(release_router)
 
     # A production web build can be served by the API process for the local
     # reference deployment. Kubernetes deployments may serve it independently.
-    web_dist = root / "apps" / "web" / "dist"
-    if (web_dist / "index.html").is_file() and (web_dist / "assets").is_dir():
-        application.mount("/assets", StaticFiles(directory=web_dist / "assets"), name="web-assets")
-
-        @application.get("/{spa_path:path}", include_in_schema=False)
-        async def web_console(spa_path: str):
-            candidate = web_dist / spa_path
-            if spa_path and candidate.is_file():
-                return FileResponse(candidate)
-            return FileResponse(web_dist / "index.html")
+    mount_web_console(application, root / "apps" / "web" / "dist")
     return application
 
 

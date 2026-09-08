@@ -1,4 +1,12 @@
 import type {
+  ProductionRoutingProfile,
+  RoutingChangeDraft,
+  RoutingChangeRequest,
+  RoutingDeploymentSummary,
+  CursorPage,
+  EnvironmentGrant,
+  ReleaseChannel,
+  ReleaseRequest,
   Agent,
   AgentDraft,
   Deployment,
@@ -19,6 +27,7 @@ import type {
   RuntimeEvent,
   Skill,
   ThreadSummary,
+  ThreadAccess,
   Repository,
   LocalRepositoryFolderListing,
   CodingWorkspace,
@@ -31,38 +40,55 @@ import type {
   AuthSession,
   AuthAuditListResponse,
 } from '../types'
+import type { KnowledgeUploadBody } from './knowledgeRetry'
+import { uploadHeaders } from './knowledgeRetry'
+import { errorWithRequestIdentity, requestIdentity } from './requestIdentity'
 
 const API_BASE = import.meta.env.VITE_API_BASE ?? ''
+const UNSAFE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE'])
 
-async function sha256(file: File) {
-  const digest = await crypto.subtle.digest('SHA-256', await file.arrayBuffer())
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+function listQuery(params: { cursor?: string; limit?: number; q?: string; status?: string }) {
+  const query = new URLSearchParams(Object.entries(params)
+    .filter(([, value]) => value !== undefined && value !== '')
+    .map(([key, value]) => [key, String(value)]))
+  return query.size ? `?${query}` : ''
+}
+
+function csrfToken() {
+  const prefix = 'deepagent_csrf='
+  const item = document.cookie.split(';').map((value) => value.trim()).find((value) => value.startsWith(prefix))
+  return item ? decodeURIComponent(item.slice(prefix.length)) : undefined
 }
 
 export class ApiError extends Error {
   status: number
   code?: string
+  requestId?: string
 
-  constructor(message: string, status: number, code?: string) {
-    super(message)
+  constructor(message: string, status: number, code?: string, requestId?: string | null) {
+    super(errorWithRequestIdentity(message, requestId))
     this.name = 'ApiError'
     this.status = status
     this.code = code
+    this.requestId = requestIdentity(requestId)
   }
 }
 
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const method = (options.method ?? 'GET').toUpperCase()
+  const csrf = UNSAFE_METHODS.has(method) ? csrfToken() : undefined
   const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     credentials: 'include',
     headers: {
       ...(options.body ? { 'Content-Type': 'application/json' } : {}),
+      ...(csrf ? { 'X-CSRF-Token': csrf } : {}),
       ...options.headers,
     },
   })
   if (!response.ok) {
     const body = await response.json().catch(() => ({}))
-    const error = new ApiError(body?.error?.message ?? body?.detail ?? `Request failed (${response.status})`, response.status, body?.error?.code)
+    const error = new ApiError(body?.error?.message ?? body?.detail ?? `Request failed (${response.status})`, response.status, body?.error?.code, response.headers.get('X-Request-ID'))
     if (response.status === 401 && path !== '/api/v1/auth/login' && path !== '/api/v1/auth/me') {
       window.dispatchEvent(new CustomEvent('deepagent:unauthorized'))
     }
@@ -72,6 +98,21 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 }
 
 export const api = {
+  releaseGrants: () => request<{ items: EnvironmentGrant[] }>('/api/v1/deployment-environment-grants'),
+  releaseChannel: (agentId: string) => request<ReleaseChannel>(`/api/v1/agents/${agentId}/release-channel`),
+  releaseRequests: (params: { cursor?: string; limit?: number } = {}) =>
+    request<CursorPage<ReleaseRequest>>(`/api/v1/release-requests${listQuery(params)}`),
+  releaseRequest: (id: string) => request<ReleaseRequest>(`/api/v1/release-requests/${id}`),
+  createRelease: (body: { agent_revision_id: string; expected_channel_version: number; reason: string;
+    action: 'promote' | 'rollback'; rollback_deployment_id?: string }, key: string) =>
+    request<ReleaseRequest>('/api/v1/release-requests', { method: 'POST',
+      headers: { 'Idempotency-Key': key }, body: JSON.stringify(body) }),
+  decideRelease: (item: ReleaseRequest, decision: 'approve' | 'reject', reason: string) =>
+    request<ReleaseRequest>(`/api/v1/release-requests/${item.id}:decide`, { method: 'POST',
+      body: JSON.stringify({ version: item.version, decision, reason }) }),
+  cancelRelease: (item: ReleaseRequest, reason: string) =>
+    request<ReleaseRequest>(`/api/v1/release-requests/${item.id}:cancel`, { method: 'POST',
+      body: JSON.stringify({ version: item.version, reason }) }),
   login: (username: string, password: string) => request<LoginSession>('/api/v1/auth/login', {
     method: 'POST', body: JSON.stringify({ username, password }),
   }),
@@ -132,6 +173,20 @@ export const api = {
     request<{ revision: { id: string; revision_number: number }; resolved_plan: { id: string; plan_hash: string } }>(`/api/v1/agents/${id}/revisions:publish`, { method: 'POST' }),
   deployments: () => request<{ items: Deployment[] }>('/api/v1/agent-deployments'),
   routingProfile: () => request<IntentRoutingProfile>('/api/v1/intent-routing/profile'),
+  productionRouting: () => request<{ profile: ProductionRoutingProfile; deployments: RoutingDeploymentSummary[] }>('/api/v1/production-routing/profile'),
+  routingHistory: (cursor?: string) => request<CursorPage<ProductionRoutingProfile>>('/api/v1/production-routing/revisions' + listQuery({ cursor })),
+  routingChanges: (cursor?: string) => request<CursorPage<RoutingChangeRequest>>('/api/v1/routing-change-requests' + listQuery({ cursor })),
+  routingChange: (id: string) => request<RoutingChangeRequest>(`/api/v1/routing-change-requests/${id}`),
+  createRoutingChange: (body: {
+    expected_router_revision_id: string; action: 'update' | 'rollback'; reason: string;
+    profile?: RoutingChangeDraft; rollback_revision_id?: string
+  }, key: string) => request<RoutingChangeRequest>('/api/v1/routing-change-requests', {
+    method: 'POST', headers: { 'Idempotency-Key': key }, body: JSON.stringify(body),
+  }),
+  decideRoutingChange: (item: RoutingChangeRequest, action: 'approve' | 'reject' | 'cancel', reason: string) =>
+    request<RoutingChangeRequest>(`/api/v1/routing-change-requests/${item.id}:${action === 'cancel' ? 'cancel' : 'decide'}`, {
+      method: 'POST', body: JSON.stringify({ version: item.version, reason, ...(action === 'cancel' ? {} : { decision: action }) }),
+    }),
   updateRoutingProfile: (body: {
     mode: IntentRoutingProfile['mode']
     auto_route_threshold: number
@@ -169,23 +224,20 @@ export const api = {
   skills: () => request<{ items: Skill[] }>('/api/v1/skills'),
   knowledgeBases: () => request<{ items: KnowledgeBase[] }>('/api/v1/knowledge-bases'),
   knowledgeBase: (id: string) => request<KnowledgeBase>(`/api/v1/knowledge-bases/${id}`),
-  createKnowledgeBase: (body: { name: string; description: string }) =>
-    request<KnowledgeBase>('/api/v1/knowledge-bases', { method: 'POST', body: JSON.stringify(body) }),
+  createKnowledgeBase: (body: { name: string; description: string }, idempotencyKey: string) =>
+    request<KnowledgeBase>('/api/v1/knowledge-bases', {
+      method: 'POST', body: JSON.stringify(body), headers: { 'Idempotency-Key': idempotencyKey },
+    }),
   knowledgeRevisions: (knowledgeBaseId: string) =>
     request<{ items: KnowledgeRevision[] }>(`/api/v1/knowledge-bases/${knowledgeBaseId}/revisions`),
-  prepareKnowledgeUpload: async (knowledgeBaseId: string, file: File) =>
+  prepareKnowledgeUpload: (knowledgeBaseId: string, body: KnowledgeUploadBody, idempotencyKey: string) =>
     request<KnowledgeUploadPreparation>(`/api/v1/knowledge-bases/${knowledgeBaseId}/documents:prepare-upload`, {
       method: 'POST',
-      body: JSON.stringify({
-        filename: file.name,
-        content_type: file.type || 'application/octet-stream',
-        size_bytes: file.size,
-        sha256: await sha256(file),
-        visibility: 'project',
-        allowed_roles: [],
-      }),
+      headers: { 'Idempotency-Key': idempotencyKey },
+      body: JSON.stringify(body),
     }),
   uploadKnowledgeFile: async (preparation: KnowledgeUploadPreparation, file: File) => {
+    if (!preparation.upload) return { etag: undefined }
     const platformUpload = preparation.upload.url.startsWith('/')
     const response = await fetch(platformUpload ? `${API_BASE}${preparation.upload.url}` : preparation.upload.url, {
       method: preparation.upload.method,
@@ -193,7 +245,8 @@ export const api = {
       body: file,
       headers: {
         'Content-Type': file.type || 'application/octet-stream',
-        ...preparation.upload.required_headers,
+        ...(platformUpload && csrfToken() ? { 'X-CSRF-Token': csrfToken()! } : {}),
+        ...uploadHeaders(preparation.upload.required_headers, file.size),
       },
     })
     if (!response.ok) {
@@ -214,12 +267,15 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ knowledge_base_id: knowledgeBaseId, query, top_k: topK }),
     }),
-  threads: () => request<{ items: ThreadSummary[] }>('/api/v1/threads'),
+  threads: (params: { cursor?: string; limit?: number; q?: string } = {}) => request<CursorPage<ThreadSummary>>(`/api/v1/threads${listQuery(params)}`),
   thread: (id: string) => request<ThreadSummary>(`/api/v1/threads/${id}`),
-  runs: () => request<{ items: Run[] }>('/api/v1/runs'),
+  threadAccess: (id: string) => request<ThreadAccess>(`/api/v1/threads/${id}/access`),
+  sharingCandidates: (id: string, query: string) => request<{ items: Array<{ id: string; username: string; display_name: string }> }>(`/api/v1/threads/${id}/sharing-candidates?q=${encodeURIComponent(query)}`),
+  updateThreadAccess: (id: string, body: Pick<ThreadAccess, 'version' | 'visibility' | 'members'> & { reason: string }) => request<ThreadAccess>(`/api/v1/threads/${id}/access`, { method: 'PUT', body: JSON.stringify(body) }),
+  runs: (params: { cursor?: string; limit?: number; q?: string; status?: string } = {}) => request<CursorPage<Run>>(`/api/v1/runs${listQuery(params)}`),
   run: (id: string) => request<Run>(`/api/v1/runs/${id}`),
   runEvents: (id: string, after = 0) =>
-    request<{ items: RuntimeEvent[] }>(`/api/v1/runs/${id}/events?after_sequence=${after}`),
+    request<{ items: RuntimeEvent[]; next_sequence: number; has_more: boolean }>(`/api/v1/runs/${id}/events?after_sequence=${after}`),
   runArtifacts: (id: string) => request<{ items: RunArtifact[] }>(`/api/v1/runs/${id}/artifacts`),
   runSpans: (id: string) => request<{ items: Array<Record<string, unknown>> }>(`/api/v1/runs/${id}/spans`),
   createThread: (deploymentId: string, title: string) =>
@@ -248,9 +304,9 @@ export const api = {
   runDiff: (runId: string) => request<ChangeSet | { run_id: string; status: 'PENDING'; patch: string; changed_files: [] }>(`/api/v1/runs/${runId}/diff`),
   runVerification: (runId: string) => request<VerificationReport>(`/api/v1/runs/${runId}/verification`),
   runChangeSets: (runId: string) => request<{ items: ChangeSet[] }>(`/api/v1/runs/${runId}/changesets`),
-  decideChangeSet: (runId: string, changeSetId: string, approve: boolean, message?: string) =>
+  decideChangeSet: (runId: string, changeSetId: string, approve: boolean, version: number, message?: string) =>
     request<ChangeSet>(`/api/v1/runs/${runId}/changesets/${changeSetId}:${approve ? 'approve' : 'reject'}`, {
-      method: 'POST', body: JSON.stringify({ message }),
+      method: 'POST', body: JSON.stringify({ message, version }),
     }),
   createRun: (threadId: string, input: string) =>
     request<Run>(`/api/v1/threads/${threadId}/runs`, {

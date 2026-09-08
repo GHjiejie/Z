@@ -22,15 +22,15 @@ class EventEmitter:
         execution_path: Optional[List[str]] = None,
         visibility: str = "user",
     ) -> Dict[str, Any]:
-        with self.db.lock:
-            run_row = self.db.connection.execute("SELECT * FROM runs WHERE id=?", (run_id,)).fetchone()
-            if not run_row:
+        with self.db.transaction():
+            lock = " FOR UPDATE" if self.db.dialect == "postgresql" else ""
+            run = self.db.fetch_one("SELECT * FROM runs WHERE id=?" + lock, (run_id,))
+            if not run:
                 raise ValueError(f"Run {run_id} does not exist")
-            run = dict(run_row)
-            row = self.db.connection.execute(
+            row = self.db.fetch_one(
                 "SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence FROM run_events WHERE run_id=?",
                 (run_id,),
-            ).fetchone()
+            )
             sequence = int(row["sequence"])
             event = RuntimeEvent(
                 event_id=f"evt_{secrets.token_hex(8)}",
@@ -48,11 +48,10 @@ class EventEmitter:
                 visibility=visibility,
                 payload=payload or {},
             ).model_dump()
-            self.db.connection.execute(
+            self.db.execute(
                 "INSERT INTO run_events (event_id, run_id, sequence, event_json, created_at) VALUES (?, ?, ?, ?, ?)",
                 (event["event_id"], run_id, sequence, self.db.encode(event), event["occurred_at"]),
             )
-            self.db.connection.commit()
             return event
 
     def list(self, run_id: str, after_sequence: int = 0, limit: int = 500) -> List[Dict[str, Any]]:
@@ -62,4 +61,3 @@ class EventEmitter:
             (run_id, after_sequence, limit),
         )
         return [row["event"] for row in rows]
-

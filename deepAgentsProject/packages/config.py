@@ -13,6 +13,17 @@ def load_environment(project_root: Path, explicit_path: Optional[str] = None) ->
     explicitly exported process variable remains authoritative.
     """
 
+    merged, loaded = read_environment(project_root, explicit_path)
+    for name, value in merged.items():
+        os.environ.setdefault(name, value)
+    return loaded
+
+
+def read_environment(
+    project_root: Path, explicit_path: Optional[str] = None
+) -> tuple[Dict[str, str], list[Path]]:
+    """Read dotenv layers without mutating the importing process environment."""
+
     configured_path = explicit_path or os.getenv("DEEPAGENT_ENV_FILE")
     candidates: list[Path] = [project_root.parent / ".env", project_root / ".env"]
     if configured_path:
@@ -26,9 +37,7 @@ def load_environment(project_root: Path, explicit_path: Optional[str] = None) ->
             continue
         merged.update(_read_dotenv(path))
         loaded.append(path)
-    for name, value in merged.items():
-        os.environ.setdefault(name, value)
-    return loaded
+    return merged, loaded
 
 
 def _unique_paths(paths: Iterable[Path]) -> Iterable[Path]:

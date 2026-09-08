@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from packages.auth.resource_access import ResourceAccess
+from packages.auth.permissions import Permission
+from packages.auth.transactions import authorized_write
+
 import base64
 import hashlib
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List
 
@@ -18,6 +23,18 @@ from packages.sandbox.policy import SandboxPolicy
 _ALLOWED_BINARY_SUFFIXES = {".gif", ".ico", ".jpeg", ".jpg", ".pdf", ".png", ".webp"}
 
 
+@dataclass(frozen=True)
+class PreparedWorkspace:
+    issuer: object
+    context_hash: str
+    binding_hash: str
+    deployment_id: str
+    plan_id: str
+    snapshot_id: str
+    snapshot_sha256: str
+    repository_hash: str
+
+
 class CodingService:
     def __init__(
         self,
@@ -29,12 +46,25 @@ class CodingService:
         self.repositories = repositories
         self.sandbox_manager = sandbox_manager
 
+    def _binding_hash(self, value):
+        return hashlib.sha256(self.db.encode(value.model_dump(mode='json')).encode()).hexdigest()
+
+    def prepare_workspace(self, binding, context, *, deployment_id, plan_id):
+        repository = self.repositories.get_repository(binding.repository_id, context)
+        snapshot = self.repositories.create_runtime_snapshot(binding.repository_id,
+            RepositorySnapshotCreate(requested_ref=binding.base_ref, source_mode=binding.source_mode), context)
+        self.repositories._validate_repository(repository, context)
+        return PreparedWorkspace(self, self._binding_hash(context), self._binding_hash(binding),
+            deployment_id, plan_id, snapshot['id'], snapshot['archive_sha256'],
+            hashlib.sha256(self.db.encode(repository).encode()).hexdigest())
+
     def bind_thread(
         self,
         thread_id: str,
         binding: WorkspaceBinding,
         context: TenantContext,
         *,
+        prepared: PreparedWorkspace,
         lifecycle: str = "thread_scoped",
         ttl_seconds: int = 86400,
     ) -> Dict[str, Any]:
@@ -46,14 +76,20 @@ class CodingService:
             raise CodingNotFoundError("Thread not found")
         if self.db.fetch_one("SELECT id FROM coding_workspaces WHERE thread_id=?", (thread_id,)):
             raise CodingConflictError("Thread already has a coding workspace")
-        snapshot = self.repositories.create_snapshot(
-            binding.repository_id,
-            RepositorySnapshotCreate(
-                requested_ref=binding.base_ref,
-                source_mode=binding.source_mode,
-            ),
-            context,
-        )
+        deployment = self.db.fetch_one('SELECT resolved_plan_id FROM agent_deployments WHERE id=?', (thread['agent_deployment_id'],))
+        if (not self.db.in_transaction or not isinstance(prepared, PreparedWorkspace) or prepared.issuer is not self
+                or prepared.context_hash != self._binding_hash(context) or prepared.binding_hash != self._binding_hash(binding)
+                or prepared.deployment_id != thread['agent_deployment_id'] or not deployment
+                or prepared.plan_id != deployment['resolved_plan_id']):
+            raise CodingConflictError('Workspace preparation does not match the current actor, request and deployment')
+        snapshot = self.repositories.snapshot_metadata(prepared.snapshot_id, context)
+        repository = self.repositories.get_repository(binding.repository_id, context)
+        self.repositories._validate_repository(repository, context, lock=True)
+        repository = self.repositories.get_repository(binding.repository_id, context)
+        if hashlib.sha256(self.db.encode(repository).encode()).hexdigest() != prepared.repository_hash:
+            raise CodingConflictError('Repository changed after workspace preparation')
+        if snapshot['repository_id'] != binding.repository_id or snapshot['archive_sha256'] != prepared.snapshot_sha256:
+            raise CodingConflictError('Workspace snapshot changed after preparation')
         workspace_id = new_id("ws")
         now = datetime.now(timezone.utc)
         expires = now + timedelta(seconds=ttl_seconds)
@@ -109,6 +145,7 @@ class CodingService:
                     if key in metadata
                 }
             workspace["sandbox"] = sandbox
+        ResourceAccess(self.db).require_thread(thread_id, context)
         return workspace
 
     def get_run_workspace(self, run_id: str, context: TenantContext) -> Dict[str, Any]:
@@ -142,6 +179,7 @@ class CodingService:
                     "type": "file",
                 }
             )
+        ResourceAccess(self.db).require_run(run_id, context)
         return {
             "workspace_id": workspace["id"],
             "workspace_generation": workspace["workspace_generation"],
@@ -181,6 +219,7 @@ class CodingService:
                 raise CodingConflictError("Workspace binary file type is not previewable")
             text = base64.b64encode(content).decode("ascii")
             encoding = "base64"
+        ResourceAccess(self.db).require_run(run_id, context)
         return {
             "workspace_id": workspace["id"],
             "workspace_generation": workspace["workspace_generation"],
@@ -201,6 +240,7 @@ class CodingService:
         patch = self.db.fetch_one(
             "SELECT content FROM artifacts WHERE id=?", (change_set["patch_artifact_id"],)
         )
+        ResourceAccess(self.db).require_run(run_id, context)
         return {**change_set, "patch": patch["content"] if patch else ""}
 
     def verification(self, run_id: str, context: TenantContext) -> Dict[str, Any]:
@@ -210,13 +250,16 @@ class CodingService:
         )
         if not report:
             return {"run_id": run_id, "status": "PENDING", "checks": [], "summary": {}}
+        ResourceAccess(self.db).require_run(run_id, context)
         return report
 
     def change_sets(self, run_id: str, context: TenantContext) -> List[Dict[str, Any]]:
         self.get_run_workspace(run_id, context)
-        return self.db.fetch_all(
+        rows = self.db.fetch_all(
             "SELECT * FROM change_sets WHERE run_id=? ORDER BY created_at DESC", (run_id,)
         )
+        ResourceAccess(self.db).require_run(run_id, context)
+        return rows
 
     def decide_change_set(
         self,
@@ -225,42 +268,40 @@ class CodingService:
         approved: bool,
         context: TenantContext,
         message: str | None = None,
+        *,
+        expected_version: int,
     ) -> Dict[str, Any]:
-        self.get_run_workspace(run_id, context)
-        change_set = self.db.fetch_one(
-            "SELECT * FROM change_sets WHERE id=? AND run_id=?", (change_set_id, run_id)
-        )
-        if not change_set:
-            raise CodingNotFoundError("ChangeSet not found")
-        if change_set["status"] in {"DELIVERED", "REJECTED"}:
-            raise CodingConflictError("ChangeSet has already been decided")
-        if approved:
-            patch = self.db.fetch_one(
-                "SELECT * FROM artifacts WHERE id=?",
-                (change_set["patch_artifact_id"],),
+        fingerprint = hashlib.sha256(self.db.encode({"actor": context.user_id, "version": expected_version,
+                                                     "approved": approved, "message": message}).encode()).hexdigest()
+        with authorized_write(self.db, context, Permission.CODING_APPROVE) as context:
+            self.get_run_workspace(run_id, context)
+            lock = " FOR UPDATE" if self.db.dialect == "postgresql" else ""
+            self.db.fetch_one("SELECT id FROM runs WHERE id=?" + lock, (run_id,))
+            change_set = self.db.fetch_one(
+                "SELECT * FROM change_sets WHERE id=? AND run_id=?" + lock, (change_set_id, run_id)
             )
-            if not patch or hashlib.sha256(patch["content"].encode()).hexdigest() != patch[
-                "content_hash"
-            ]:
-                raise CodingConflictError("ChangeSet patch artifact failed integrity validation")
-            if (
-                patch.get("plan_hash") != change_set.get("plan_hash")
-                or patch.get("base_commit_sha") != change_set.get("base_commit_sha")
-                or int(patch.get("workspace_generation", -1))
-                != int(change_set["workspace_generation"])
-            ):
-                raise CodingConflictError("ChangeSet patch metadata does not match its review record")
-        next_status = "DELIVERED" if approved else "REJECTED"
-        self.db.execute(
-            "UPDATE change_sets SET status=? WHERE id=?", (next_status, change_set_id)
-        )
-        self.sandbox_manager.events.append(
-            run_id,
-            "changeset.delivered" if approved else "changeset.rejected",
-            {
-                "changeset_id": change_set_id,
-                "actor": context.user_id,
-                "message": message,
-            },
-        )
-        return self.db.fetch_one("SELECT * FROM change_sets WHERE id=?", (change_set_id,))
+            if not change_set:
+                raise CodingNotFoundError("ChangeSet not found")
+            if change_set["status"] in {"DELIVERED", "REJECTED"}:
+                if change_set["decision_hash"] == fingerprint and change_set["version"] == expected_version + 1:
+                    return change_set
+                raise CodingConflictError("ChangeSet has already been decided")
+            if change_set["version"] != expected_version:
+                raise CodingConflictError("ChangeSet changed; reload before reviewing")
+            if approved:
+                patch = self.db.fetch_one("SELECT * FROM artifacts WHERE id=?", (change_set["patch_artifact_id"],))
+                if not patch or hashlib.sha256(patch["content"].encode()).hexdigest() != patch["content_hash"]:
+                    raise CodingConflictError("ChangeSet patch artifact failed integrity validation")
+                if (patch.get("plan_hash") != change_set.get("plan_hash")
+                        or patch.get("base_commit_sha") != change_set.get("base_commit_sha")
+                        or int(patch.get("workspace_generation", -1)) != int(change_set["workspace_generation"])):
+                    raise CodingConflictError("ChangeSet patch metadata does not match its review record")
+            ResourceAccess(self.db).require_run(run_id, context)
+            next_status = "DELIVERED" if approved else "REJECTED"
+            changed = self.db.execute_count("""UPDATE change_sets SET status=?,version=version+1,decision_hash=?
+                WHERE id=? AND version=? AND status=?""", (next_status, fingerprint, change_set_id, expected_version, change_set["status"]))
+            if changed != 1:
+                raise CodingConflictError("ChangeSet was concurrently decided")
+            self.sandbox_manager.events.append(run_id, "changeset.delivered" if approved else "changeset.rejected",
+                {"changeset_id": change_set_id, "actor": context.user_id, "message": message, "version": expected_version + 1})
+            return self.db.fetch_one("SELECT * FROM change_sets WHERE id=?", (change_set_id,))

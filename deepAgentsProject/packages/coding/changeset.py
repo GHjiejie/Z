@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import shlex
+from contextlib import contextmanager
 from typing import Any, Dict, Optional
 
 from deepagents.backends.protocol import SandboxBackendProtocol
@@ -17,6 +18,23 @@ class VerificationService:
     def __init__(self, db: Database, events: EventEmitter):
         self.db = db
         self.events = events
+
+    def partial(self, run, workspace, *, reason):
+        """Replace the current report with an explicit unverified final state."""
+        summary = {'reason': reason, 'workspace_generation': workspace['workspace_generation'],
+                   'total': 0, 'passed': 0, 'failed': 0, 'require_success': True}
+        canonical = json.dumps({'status': 'PARTIAL', 'checks': [], 'summary': summary},
+            sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+        self.db.execute("""INSERT INTO verification_reports
+            (id,tenant_id,project_id,run_id,workspace_id,status,checks_json,summary_json,content_hash,created_at)
+            VALUES(?,?,?,?,?,'PARTIAL','[]',?,?,?) ON CONFLICT(run_id) DO UPDATE SET
+            status='PARTIAL',checks_json='[]',summary_json=excluded.summary_json,
+            content_hash=excluded.content_hash,created_at=excluded.created_at""",
+            (new_id('verify'),run['tenant_id'],run['project_id'],run['id'],workspace['id'],
+             self.db.encode(summary),hashlib.sha256(canonical.encode()).hexdigest(),utc_now()))
+        result = self.db.fetch_one('SELECT * FROM verification_reports WHERE run_id=?', (run['id'],))
+        self.events.append(run['id'], 'verification.partial', {'verification_report_id': result['id'], 'reason': reason})
+        return result
 
     def run(
         self,
@@ -154,17 +172,9 @@ class ChangeSetBuilder:
         self.db = db
         self.events = events
 
-    def build(
-        self,
-        run: Dict[str, Any],
-        workspace: Dict[str, Any],
-        snapshot: Dict[str, Any],
-        backend: SandboxBackendProtocol,
-        verification: Optional[Dict[str, Any]],
-        coding_profile: Dict[str, Any],
-        *,
-        plan_hash: str,
-    ) -> Dict[str, Any]:
+    @staticmethod
+    @contextmanager
+    def _temporary_index(run, backend):
         # The real repository index is read-only in patch_only sandboxes. A
         # platform-owned temporary index makes untracked files visible without
         # allowing the agent to rewrite Git metadata.
@@ -177,26 +187,52 @@ class ChangeSetBuilder:
             f"GIT_ALTERNATE_OBJECT_DIRECTORIES={shlex.quote(base_objects)}"
         )
         platform_execute = getattr(backend, "execute_platform", backend.execute)
-        prepared = platform_execute(
-            f"rm -f -- {shlex.quote(temporary_index)} {shlex.quote(base_objects)} && "
-            f"rm -rf -- {shlex.quote(temporary_objects)} && "
-            f"mkdir -p -- {shlex.quote(temporary_objects)} && "
-            f"ln -s /workspace/repo/.git/objects {shlex.quote(base_objects)} && "
-            f"{index_env} git read-tree HEAD && {index_env} git add -N -- ."
-        )
-        if prepared.exit_code:
-            raise RuntimeError(f"Unable to prepare workspace diff: {prepared.output[:500]}")
-        patch_result = backend.execute(
-            f"{index_env} git diff --binary --no-ext-diff --no-color HEAD"
-        )
-        if patch_result.exit_code:
-            raise RuntimeError(f"Unable to compute workspace patch: {patch_result.output[:500]}")
-        numstat_result = backend.execute(f"{index_env} git diff --numstat -z HEAD")
-        status_result = backend.execute("git status --porcelain=v1 -z")
+        cleanup = (f"rm -f -- {shlex.quote(temporary_index)} {shlex.quote(base_objects)} && "
+                   f"rm -rf -- {shlex.quote(temporary_objects)}")
+        try:
+            prepared = platform_execute(
+                cleanup + f" && mkdir -p -- {shlex.quote(temporary_objects)} && "
+                f"ln -s /workspace/repo/.git/objects {shlex.quote(base_objects)} && "
+                f"{index_env} git read-tree HEAD && {index_env} git add -N -- ."
+            )
+            if prepared.exit_code:
+                raise RuntimeError(f"Unable to prepare workspace diff: {prepared.output[:500]}")
+            yield index_env
+        finally:
+            # This platform-created .git link must not enter recovery archives.
+            # Never weaken archive validation to allow arbitrary user symlinks.
+            if platform_execute(cleanup).exit_code:
+                raise RuntimeError("Unable to remove temporary ChangeSet metadata")
+
+    def build(
+        self,
+        run: Dict[str, Any],
+        workspace: Dict[str, Any],
+        snapshot: Dict[str, Any],
+        backend: SandboxBackendProtocol,
+        verification: Optional[Dict[str, Any]],
+        coding_profile: Dict[str, Any],
+        *,
+        plan_hash: str,
+    ) -> Dict[str, Any]:
+        with self._temporary_index(run, backend) as index_env:
+            patch_result = backend.execute(f"{index_env} git diff --binary --no-ext-diff --no-color HEAD")
+            if patch_result.exit_code:
+                raise RuntimeError(f"Unable to compute workspace patch: {patch_result.output[:500]}")
+            numstat_result = backend.execute(f"{index_env} git diff --numstat -z HEAD")
+            status_result = backend.execute("git status --porcelain=v1 -z")
         patch = patch_result.output
         changed_files = self._parse_status(status_result.output)
         self._attach_file_hashes(changed_files, backend)
         diff_stat = self._parse_numstat(numstat_result.output)
+        return self.build_captured(run, workspace, snapshot,
+            {"patch": patch, "changed_files": changed_files, "diff_stat": diff_stat},
+            verification, coding_profile, plan_hash=plan_hash)
+
+    def build_captured(self, run, workspace, snapshot, capture, verification,
+                       coding_profile, *, plan_hash, review_reason=None):
+        """Persist platform-generated evidence; caller owns the commit fence/transaction."""
+        patch, changed_files, diff_stat = capture["patch"], capture["changed_files"], capture["diff_stat"]
         diff_lines = diff_stat["added"] + diff_stat["deleted"]
         over_limit = (
             len(changed_files) > int(coding_profile.get("max_changed_files", 50))
@@ -245,7 +281,7 @@ class ChangeSetBuilder:
             ).encode()
         ).hexdigest()
         change_set_id = new_id("chg")
-        status = "REVIEW_REQUIRED" if over_limit else "READY"
+        status = "REVIEW_REQUIRED" if over_limit or review_reason else "READY"
         self.db.execute(
             """INSERT INTO change_sets
                (id, tenant_id, project_id, run_id, workspace_id, base_commit_sha,
@@ -283,11 +319,11 @@ class ChangeSetBuilder:
                 "content_hash": content_hash,
             },
         )
-        if over_limit:
+        if over_limit or review_reason:
             self.events.append(
                 run["id"],
                 "changeset.review_required",
-                {"changeset_id": change_set_id, "reason": "change_limit_exceeded"},
+                {"changeset_id": change_set_id, "reason": review_reason or "change_limit_exceeded"},
             )
         return self.db.fetch_one("SELECT * FROM change_sets WHERE id=?", (change_set_id,))
 

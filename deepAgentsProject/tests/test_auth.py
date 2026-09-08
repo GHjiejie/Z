@@ -174,6 +174,24 @@ def test_bootstrap_forces_password_change_and_contracts_are_explicit(tmp_path):
     assert migrations == [
         (1, "record-existing-platform-schema"),
         (2, "auth-user-governance"),
+        (3, "durable-task-queue"),
+        (4, "worker-heartbeats"),
+        (5, "sandbox-execution-lease-authority"),
+        (6, "durable-model-budget"),
+        (7, "evaluation-release-gates"),
+        (8, "coding-consistent-recovery"),
+        (9, "unified-metering-and-quotas"),
+        (10, "thread-access-and-source-provenance"),
+        (11, "routing-ownership-and-atomic-review"),
+        (12, "complete-metering-attribution"),
+        (13, "immutable-model-bindings"),
+        (14, "knowledge-metadata-access"),
+        (15, "governed-production-releases"),
+        (16, "outstanding-work-admission-indexes"),
+        (17, "governed-production-routing"),
+        (18, "durable-cancellation-finalization"),
+        (19, "durable-trace-origins"),
+        (20, "bounded-knowledge-upload-pipeline"),
     ]
 
 
@@ -507,5 +525,5 @@ def test_legacy_database_is_upgraded_by_versioned_migration(tmp_path):
     ).fetchall()
     assert {"version", "deleted_at", "must_change_password", "locked_until"} <= user_columns
     assert {"ip_address", "user_agent"} <= session_columns
-    assert [row[0] for row in versions] == [1, 2]
+    assert [row[0] for row in versions] == list(range(1, 21))
     db.close()

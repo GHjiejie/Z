@@ -8,10 +8,14 @@ from typing import Any, Optional, Protocol
 
 from packages.routing.models import IntentClassification
 from packages.runtime.model_gateway import ModelGateway
+from packages.billing.calls import complete
+from packages.billing.errors import BudgetExceeded, BillingConfigurationError
+from packages.auth.service import AuthAuthorizationError, AuthenticationError
+from packages.domain.models import TenantContext
 
 
 class IntentClassifier(Protocol):
-    async def classify(self, text: str) -> IntentClassification: ...
+    async def classify(self, text: str, context: TenantContext) -> IntentClassification: ...
 
 
 class HybridIntentClassifier:
@@ -21,20 +25,24 @@ class HybridIntentClassifier:
     deployment selection remains a trusted platform policy decision.
     """
 
-    def __init__(self, model_gateway: ModelGateway, timeout_seconds: float | None = None):
+    def __init__(self, model_gateway: ModelGateway, db, timeout_seconds: float | None = None):
         self.model_gateway = model_gateway
+        self.db = db
         self.timeout_seconds = timeout_seconds or float(
             os.getenv("INTENT_CLASSIFIER_TIMEOUT_SECONDS", "4")
         )
 
-    async def classify(self, text: str) -> IntentClassification:
+    async def classify(self, text: str, context: TenantContext) -> IntentClassification:
         ruled = self._classify_with_rules(text)
         if ruled is not None:
             return ruled
         try:
             async with asyncio.timeout(self.timeout_seconds):
-                response = await self.model_gateway.complete(self._messages(text))
+                response = await complete(self.db, self.model_gateway, self._messages(text), context,
+                    purpose="intent_classification", resource_id="intent-router")
             return self._parse_model_output(response.output)
+        except (BudgetExceeded, BillingConfigurationError, AuthAuthorizationError, AuthenticationError):
+            raise
         except Exception:
             return IntentClassification(
                 primary_intent="general",

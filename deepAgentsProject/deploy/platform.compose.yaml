@@ -1,0 +1,78 @@
+# API/Worker host only. Never add the Docker socket or sandbox controller here.
+x-platform: &platform
+  restart: unless-stopped
+  user: "10001:10001"
+  read_only: true
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+  pids_limit: 256
+  stop_grace_period: 60s
+  env_file: ["${PLATFORM_ENV_FILE:?Provide a non-secret production configuration file}"]
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,nodev,size=256m,uid=10001,gid=10001,mode=0700
+    - /var/lib/deepagent:rw,noexec,nosuid,nodev,size=512m,uid=10001,gid=10001,mode=0700
+  secrets: &platform-secrets
+    - source: database-url
+      target: database-url
+    - bootstrap-password
+    - model-api-key
+    - embedding-api-key
+    - sandbox-token
+    - sandbox-ca
+    - controller-cert
+    - controller-key
+    - metrics-token
+    - otlp-token
+    - telemetry-ca
+
+services:
+  api:
+    <<: *platform
+    image: "${API_IMAGE:?Use an approved API image with @sha256 digest}"
+    command: [api]
+    cpus: 2
+    mem_limit: 2g
+    environment: {DEEPAGENT_PROCESS_ROLE: api, DEEPAGENT_ENVIRONMENT: production}
+    ports: ["127.0.0.1:8000:8000"]
+    healthcheck:
+      test: [CMD, python, -c, "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/livez',timeout=2).close()"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 60s
+  worker:
+    <<: *platform
+    image: "${WORKER_IMAGE:?Use an approved Worker image with @sha256 digest}"
+    command: [worker]
+    cpus: 4
+    mem_limit: 4g
+    environment: {DEEPAGENT_PROCESS_ROLE: worker, DEEPAGENT_ENVIRONMENT: production}
+    secrets:
+      - database-url
+      - bootstrap-password
+      - model-api-key
+      - embedding-api-key
+      - sandbox-token
+      - sandbox-ca
+      - controller-cert
+      - controller-key
+      - metrics-token
+      - otlp-token
+      - telemetry-ca
+      - worker-metrics-cert
+      - worker-metrics-key
+
+secrets:
+  database-url: {file: "${DATABASE_URL_SECRET_FILE:?Required}"}
+  bootstrap-password: {file: "${BOOTSTRAP_PASSWORD_SECRET_FILE:?Required}"}
+  model-api-key: {file: "${MODEL_API_KEY_SECRET_FILE:?Required}"}
+  embedding-api-key: {file: "${EMBEDDING_API_KEY_SECRET_FILE:?Required}"}
+  sandbox-token: {file: "${SANDBOX_TOKEN_SECRET_FILE:?Required}"}
+  sandbox-ca: {file: "${SANDBOX_CA_FILE:?Required}"}
+  controller-cert: {file: "${CONTROLLER_CERT_FILE:?Required}"}
+  controller-key: {file: "${CONTROLLER_KEY_FILE:?Required}"}
+  metrics-token: {file: "${METRICS_TOKEN_SECRET_FILE:?Required}"}
+  otlp-token: {file: "${OTLP_TOKEN_SECRET_FILE:?Required}"}
+  telemetry-ca: {file: "${TELEMETRY_CA_FILE:?Required}"}
+  worker-metrics-cert: {file: "${WORKER_METRICS_CERT_FILE:?Required}"}
+  worker-metrics-key: {file: "${WORKER_METRICS_KEY_FILE:?Required}"}

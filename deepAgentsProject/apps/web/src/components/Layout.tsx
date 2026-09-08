@@ -33,6 +33,7 @@ const primaryNav = [
 const advancedNav = [
   { to: '/advanced/overview', label: 'Overview', icon: LayoutDashboard },
   { to: '/advanced/agents', label: 'Agents', icon: Bot },
+  { to: '/advanced/releases', label: 'Production releases', icon: FileCheck2 },
   { to: '/advanced/coding', label: 'Coding Workbench', icon: CodeXml },
   { to: '/advanced/runs', label: 'Runs', icon: Activity },
   { to: '/advanced/approvals', label: 'Approvals', icon: FileCheck2 },
@@ -46,6 +47,7 @@ const titles: Record<string, string> = {
   '/advanced': 'Advanced features',
   '/advanced/overview': 'Platform overview',
   '/advanced/agents': 'Agent registry',
+  '/advanced/releases': 'Production releases',
   '/advanced/coding': 'Coding workbench',
   '/advanced/runs': 'Runs & traces',
   '/advanced/approvals': 'Approval center',
