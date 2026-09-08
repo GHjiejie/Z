@@ -1,6 +1,4 @@
-import json
 import os
-from typing import Any
 
 from dotenv import load_dotenv
 from langchain_openai import ChatOpenAI
@@ -30,14 +28,16 @@ chat_model = ChatOpenAI(
     base_url=api_base_url,
 )
 
-
-def get_current_model_profile() -> dict[str, Any]:
-    """Return the configured model name and its LangChain capability profile."""
-    return {
-        "model": chat_model.model_name,
-        "profile": dict(chat_model.profile) if chat_model.profile is not None else None,
-    }
+print("chat_model:", chat_model)
 
 
-if __name__ == "__main__":
-    print(json.dumps(get_current_model_profile(), ensure_ascii=False, indent=2))
+# def get_current_model_profile() -> dict[str, Any]:
+#     """Return the configured model name and its LangChain capability profile."""
+#     return {
+#         "model": chat_model.model_name,
+#         "profile": dict(chat_model.profile) if chat_model.profile is not None else None,
+#     }
+
+
+# if __name__ == "__main__":
+#     print(json.dumps(get_current_model_profile(), ensure_ascii=False, indent=2))
