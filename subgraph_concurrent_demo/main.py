@@ -377,9 +377,11 @@ def build_graph(
     builder.add_node("finalize", format_result)
 
     builder.add_edge(START, "intake")
+    # 下面的三条边表示三个专家分支可以并发执行，最终结果会在 synthesis 节点汇总。
     builder.add_edge("intake", "transport")
     builder.add_edge("intake", "hotel")
     builder.add_edge("intake", "activity")
+    # 三条分支并发执行后，结果会汇总到 synthesis 节点，然后再到 finalize 节点生成最终结果。
     builder.add_edge(["transport", "hotel", "activity"], "synthesis")
     builder.add_edge("synthesis", "finalize")
     builder.add_edge("finalize", END)
