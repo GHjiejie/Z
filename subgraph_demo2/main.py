@@ -67,9 +67,11 @@ class DinnerState(TypedDict, total=False):
 
 # 使用项目已有模型配置，Pydantic 将模型输出转换为经过校验的对象。
 requirement_model = chat_model.with_structured_output(
-    Requirements, method="function_calling"
+    Requirements, method="function_calling", tool_choice="auto"
 )
-menu_model = chat_model.with_structured_output(Menu, method="function_calling")
+menu_model = chat_model.with_structured_output(
+    Menu, method="function_calling", tool_choice="auto"
+)
 
 
 def extract(state: RequirementState) -> dict:
@@ -78,7 +80,8 @@ def extract(state: RequirementState) -> dict:
             (
                 "system",
                 (
-                    "解析家庭晚餐需求。只提取明确提供的信息，不默认两位大人、不默认30分钟。"
+                    "解析家庭晚餐需求，并且必须调用 Requirements 工具返回结果。"
+                    "只提取明确提供的信息，不默认两位大人、不默认30分钟。"
                     "统一食材别名，例如番茄统一为西红柿；保留所有口味、过敏及饮食限制。"
                 ),
             ),
@@ -115,7 +118,8 @@ def plan_menu(state: MealPlanState) -> dict:
             (
                 "system",
                 (
-                    "你是家庭晚餐规划助手。根据JSON需求用中文设计简单菜单和具体步骤。"
+                    "你是家庭晚餐规划助手，必须调用 Menu 工具返回结果。"
+                    "根据JSON需求用中文设计简单菜单和具体步骤。"
                     "优先使用现有食材，遵守所有忌口和人数需求。按一个人依次做菜估算含准备的时间，"
                     "各道菜耗时之和尽量不超过时间上限。食材列出油盐等全部必需品并统一命名。"
                     "不把未提及的食材视为已有；无法满足的要求和必要假设放入notes。"
