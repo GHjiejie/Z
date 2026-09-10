@@ -1,0 +1,17 @@
+flowchart LR
+    START([START]) --> content[content_review_subgraph]
+    START --> compliance[compliance_review_subgraph]
+    START --> delivery[delivery_review_subgraph]
+
+    content --> join{{join}}
+    compliance --> join
+    delivery --> join
+    join --> summarize[summarize]
+    summarize --> END([END])
+
+    subgraph review_subgraph[每个审核子图内部]
+        S([START]) --> build[build_proposal / 真实模型]
+        build --> review[human_review / interrupt]
+        review --> apply[apply_decision]
+        apply --> E([END])
+    end
