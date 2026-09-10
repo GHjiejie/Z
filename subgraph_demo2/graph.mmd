@@ -1,0 +1,13 @@
+flowchart TD
+    START --> requirements_subgraph
+    requirements_subgraph --> meal_plan_subgraph
+    meal_plan_subgraph --> format
+    format --> END
+    subgraph R[requirements_subgraph]
+        R1[START] --> extract[extract / 模型调用]
+        extract --> normalize[normalize] --> R2[END]
+    end
+    subgraph M[meal_plan_subgraph]
+        M1[START] --> plan_menu[plan_menu / 模型调用]
+        plan_menu --> summarize[summarize] --> M2[END]
+    end

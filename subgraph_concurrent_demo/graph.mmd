@@ -1,0 +1,40 @@
+flowchart TD
+    START --> intake
+    intake --> transport
+    intake --> hotel
+    intake --> activity
+    transport --> synthesis
+    hotel --> synthesis
+    activity --> synthesis
+    synthesis --> finalize --> END
+
+    subgraph I[intake_subgraph]
+        I0[START] --> normalize[normalize_request]
+        normalize --> publish_request --> I1[END]
+    end
+
+    subgraph T[transport_subgraph]
+        T0[START] --> TS[mark_started]
+        TS --> TL[load_candidates / async]
+        TL --> TR[rank_candidates / async model]
+        TR --> TP[publish_proposal] --> T1[END]
+    end
+
+    subgraph H[hotel_subgraph]
+        H0[START] --> HS[mark_started]
+        HS --> HL[load_candidates / async]
+        HL --> HR[rank_candidates / async model]
+        HR --> HP[publish_proposal] --> H1[END]
+    end
+
+    subgraph A[activity_subgraph]
+        A0[START] --> AS[mark_started]
+        AS --> AL[load_candidates / async]
+        AL --> AR[rank_candidates / async model]
+        AR --> AP[publish_proposal] --> A1[END]
+    end
+
+    subgraph S[synthesis_subgraph]
+        S0[START] --> order[order_and_validate]
+        order --> create[create_plan] --> S1[END]
+    end
