@@ -102,6 +102,7 @@ def default_proposal_builder(
         ]
     )
     result = GeneratedProposal.model_validate(generated)
+
     return ReviewProposal(
         branch=branch,
         title=result.title,
@@ -209,6 +210,15 @@ def summarize_reviews(state: ParentState) -> dict[str, Any]:
     message = (
         "三个审核均已通过，可以发布。" if ready else "审核未全部通过，本次发布已阻止。"
     )
+    content_result = next(
+        (item for item in ordered if item.branch == "content"),
+        None,
+    )
+    # Downstream publishing must consume the post-review value, never the
+    # original proposal retained for audit.
+    publish_content = (
+        content_result.final_value if ready and content_result is not None else None
+    )
     return {
         "final_summary": ReviewSummary(
             ready_to_publish=ready,
@@ -217,6 +227,7 @@ def summarize_reviews(state: ParentState) -> dict[str, Any]:
             rejected_count=rejected,
             results=ordered,
             message=message,
+            publish_content=publish_content,
         ),
         "audit_events": [
             AuditEvent(branch="parent", stage="summarized", message=message)
@@ -230,14 +241,17 @@ def build_graph(
 ):
     """Compile a parent graph containing exactly three parallel subgraphs."""
 
+    # 建立需要review的三个子图
     subgraphs = {
         branch: build_review_subgraph(branch, proposal_builder)
         for branch in BRANCH_ORDER
     }
+
     builder = StateGraph(ParentState, input_schema=ParentInput)
     for branch, subgraph in subgraphs.items():
         builder.add_node(branch, subgraph)
         builder.add_edge(START, branch)
+
     builder.add_node("summarize", summarize_reviews)
     builder.add_edge(list(BRANCH_ORDER), "summarize")
     builder.add_edge("summarize", END)
@@ -287,6 +301,8 @@ def print_summary(summary: ReviewSummary) -> None:
         if result.reason:
             line += f"；说明：{result.reason}"
         print(line)
+    if summary.ready_to_publish:
+        print(f"最终发布文案：{summary.publish_content}")
 
 
 def run_cli(thread_id: str, database_path: Path, request: ReviewRequest) -> None:
@@ -296,6 +312,8 @@ def run_cli(thread_id: str, database_path: Path, request: ReviewRequest) -> None
         sqlite3.connect(str(database_path), check_same_thread=False)
     ) as connection:
         checkpointer = SqliteSaver(connection, serde=checkpoint_serializer())
+        # 结构化输出一下checkpointer的内容，看看里面都有哪些信息
+
         graph = build_graph(checkpointer)
         snapshot = graph.get_state(config)
         if snapshot.next:
@@ -334,7 +352,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--thread-id",
-        default="subgraph-interrupt-demo",
+        default="subgraph-interrupt-demo3",
         help="持久化会话 ID；进程重启后使用同一值继续",
     )
     parser.add_argument(

@@ -106,6 +106,11 @@ LangGraph 恢复 interrupt 时会从 `human_review` 节点开头重新执行。�
 输出。只有三个结果齐全且没有 `rejected` 时，`ready_to_publish` 才为 `true`；`edit` 被视为
 人工审核通过，但保留 `edited` 状态以便审计。
 
+当 `ready_to_publish` 为 `true` 时，汇总结果还会写入 `final_summary.publish_content`。
+它只取 `content` 分支的 `ReviewResult.final_value`，因此人工 `edit` 后的文案会成为唯一的
+发布输入；`ReviewResult.original_value` 只保留原始方案用于审计。若任一分支拒绝，
+`publish_content` 为 `None`，发布必须被阻止。
+
 ## 7. 验收标准
 
 - 父图恰好包含三个并发的一等子图；

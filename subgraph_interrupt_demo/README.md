@@ -32,6 +32,11 @@ uv run python -m subgraph_interrupt_demo.main \
 - `edit`：输入替换值后采用人工修改；
 - `reject`：输入拒绝原因并阻止最终发布。
 
+审核完成且全部通过时，终端会额外输出“最终发布文案”。该字段来自内容审核分支的
+`final_value`：人工执行 `edit` 后，这里会显示修改后的文案；`original_value` 仅用于
+审计，不能作为发布输入。这个 demo 不执行外部发布副作用，接入真实发布器时应继续使用
+`final_summary.publish_content`。
+
 如果程序在暂停后退出，使用相同命令和相同 `--thread-id` 即可重新显示原来的三个
 interrupt 并继续。完成后的 thread ID 不会自动开始新审核；新审核应使用新 ID。
 

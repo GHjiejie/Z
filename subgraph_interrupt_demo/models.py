@@ -81,6 +81,9 @@ class ReviewSummary(BaseModel):
     rejected_count: int = Field(ge=0)
     results: list[ReviewResult]
     message: str
+    # The post-review value for downstream publishing. The original proposal
+    # remains available in ReviewResult.original_value for audit purposes.
+    publish_content: str | None = None
 
 
 class ParentInput(TypedDict):

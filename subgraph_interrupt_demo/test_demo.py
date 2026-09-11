@@ -121,6 +121,7 @@ class SubgraphInterruptTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(summary.results[0].final_value, "人工修改后的公告内容")
         self.assertFalse(summary.ready_to_publish)
+        self.assertIsNone(summary.publish_content)
 
     async def test_join_runs_once_after_all_approvals_and_private_state_is_hidden(
         self,
@@ -135,7 +136,17 @@ class SubgraphInterruptTests(unittest.IsolatedAsyncioTestCase):
         )
         completed = await graph.ainvoke(
             Command(
-                resume={item.id: {"type": "approve"} for item in paused.interrupts}
+                resume={
+                    item.id: (
+                        {
+                            "type": "edit",
+                            "replacement": "人工修改后的最终发布文案",
+                        }
+                        if item.value["branch"] == "content"
+                        else {"type": "approve"}
+                    )
+                    for item in paused.interrupts
+                }
             ),
             config=cfg,
             version="v2",
@@ -143,6 +154,10 @@ class SubgraphInterruptTests(unittest.IsolatedAsyncioTestCase):
         state = completed.value
 
         self.assertTrue(state["final_summary"].ready_to_publish)
+        self.assertEqual(
+            state["final_summary"].publish_content,
+            "人工修改后的最终发布文案",
+        )
         self.assertEqual(len(state["review_results"]), 3)
         self.assertEqual(
             sum(event.stage == "summarized" for event in state["audit_events"]),
