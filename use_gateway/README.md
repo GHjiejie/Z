@@ -4,7 +4,8 @@
 
 ## 运行
 
-项目使用 `uv` 管理依赖。需要 Python 3.13+，并准备一个真实模型服务的 API key：
+项目使用仓库根目录的 `uv` 配置和 `.venv` 管理依赖。下面的命令可以在
+`use_gateway/` 中执行，`uv` 会向上查找根目录的 `pyproject.toml`；不需要在此目录创建独立环境。需要 Python 3.13+，并准备一个真实模型服务的 API key：
 
 ```bash
 cd use_gateway
