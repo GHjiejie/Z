@@ -352,7 +352,7 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "--thread-id",
-        default="subgraph-interrupt-demo3",
+        default="subgraph-interrupt-demo4",
         help="持久化会话 ID；进程重启后使用同一值继续",
     )
     parser.add_argument(

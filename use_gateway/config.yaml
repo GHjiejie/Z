@@ -1,0 +1,12 @@
+model_list:
+  # Clients use this stable alias; the real provider model comes from MODEL.
+  - model_name: gateway-model
+    litellm_params:
+      model: os.environ/MODEL
+      custom_llm_provider: openai
+      api_base: os.environ/OPENAI_BASE_URL
+      api_key: os.environ/OPENAI_API_KEY
+
+general_settings:
+  # Keeps the proxy compatible with OpenAI SDK clients.
+  master_key: os.environ/LITELLM_MASTER_KEY
