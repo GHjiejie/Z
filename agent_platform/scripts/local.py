@@ -13,6 +13,7 @@ import sys
 import time
 import urllib.error
 import urllib.request
+from collections.abc import Mapping
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -65,6 +66,39 @@ def prepare_config(path: Path) -> bool:
     with os.fdopen(fd, "w") as stream:
         stream.write(contents)
     return True
+
+
+def load_runtime_environment(
+    platform_env_file: Path,
+    root_env_file: Path = ROOT / ".env",
+    environ: Mapping[str, str] | None = None,
+) -> dict[str, str]:
+    """Load local configuration without copying root credentials to the app file."""
+    from dotenv import dotenv_values
+
+    process_environment = os.environ if environ is None else environ
+
+    def values(path: Path) -> dict[str, str]:
+        if not path.is_file():
+            return {}
+        return {
+            key: value
+            for key, value in dotenv_values(path).items()
+            if value is not None
+        }
+
+    env = {
+        **values(root_env_file),
+        **values(platform_env_file),
+        **process_environment,
+    }
+    if not env.get("PLATFORM_LITELLM_URL", "").strip():
+        env["PLATFORM_LITELLM_URL"] = env.get("OPENAI_BASE_URL", "").strip()
+    if not env.get("PLATFORM_LITELLM_KEY", "").strip():
+        env["PLATFORM_LITELLM_KEY"] = env.get("OPENAI_API_KEY", "").strip()
+    if not env.get("PLATFORM_DEFAULT_MODEL", "").strip():
+        env["PLATFORM_DEFAULT_MODEL"] = env.get("MODEL", "").strip()
+    return env
 
 
 def check_port(host: str, port: int) -> None:
@@ -193,31 +227,17 @@ class Supervisor:
             try:
                 self.record("准备依赖")
                 say("准备 Python 和前端依赖…")
-                self.run(["uv", "sync", "--frozen"])
+                # This repository intentionally has one shared Python environment.
+                # Keep every dependency group so starting this app cannot remove
+                # packages required by another demo or service in the workspace.
+                self.run(["uv", "sync", "--frozen", "--all-groups"])
                 self.run(["npm", "--prefix", str(PLATFORM / "apps/web"), "ci"])
                 created = prepare_config(env_file)
                 if created:
                     say(
                         f"已创建 {env_file}（仅当前用户可读写），初始管理员密码在 PLATFORM_ADMIN_PASSWORD 中。"
                     )
-                from dotenv import dotenv_values
-
-                # Explicit file first; command-line environment overrides it.
-                env = {
-                    **os.environ,
-                    **{
-                        key: value
-                        for key, value in dotenv_values(env_file).items()
-                        if value is not None
-                    },
-                }
-                env.update(
-                    {
-                        key: value
-                        for key, value in os.environ.items()
-                        if key.startswith("PLATFORM_")
-                    }
-                )
+                env = load_runtime_environment(env_file)
                 self.record("构建界面")
                 self.run(
                     ["npm", "--prefix", str(PLATFORM / "apps/web"), "run", "build"]
@@ -266,6 +286,10 @@ class Supervisor:
                 ):
                     say(
                         "模型网关尚未配置：管理界面可用，接入真实模型请填写配置中的 LiteLLM 地址与受限密钥。"
+                    )
+                elif env.get("PLATFORM_DEFAULT_MODEL"):
+                    say(
+                        "已从有效配置接入 OpenAI 兼容模型网关；根目录密钥仅在当前进程中使用。"
                     )
                 while api.poll() is None:
                     if any(child.poll() is not None for child in self.children):

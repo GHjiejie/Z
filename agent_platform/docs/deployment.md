@@ -10,9 +10,11 @@
 make -C agent_platform start
 ```
 
-在 `agent_platform` 内直接执行 `make`、`make start` 或 `make run` 等价。该入口串行完成 `uv sync --frozen`、`npm ci`、前端构建、数据库迁移和账号初始化，健康检查通过后才报告就绪。React 构建产物由 API 同源提供，不需要额外启动 Vite。
+在 `agent_platform` 内直接执行 `make`、`make start` 或 `make run` 等价。该入口串行完成 `uv sync --frozen --all-groups`、`npm ci`、前端构建、数据库迁移和账号初始化，健康检查通过后才报告就绪。仓库共用同一个 Python 环境，保留全部依赖组可以避免启动平台时卸载其他示例所需的包。React 构建产物由 API 同源提供，不需要额外启动 Vite。
 
-缺少 `.env` 时，从模板自动创建权限为0600的配置，并生成随机初始密码；默认邮箱 `admin@example.com`。密码在 `.env` 中查看，不会打印到启动日志。已有文件完整保留；已有账号不会因引导变量改变而重置。显式设置的 `PLATFORM_*` 环境变量优先于文件；如果已有配置的密码为空且数据库尚无管理员，初始化会明确报错，需要自行填写至少12位密码。
+缺少 `.env` 时，从模板自动创建权限为0600的配置，并生成随机初始密码；默认邮箱 `admin@example.com`。密码在 `.env` 中查看，不会打印到启动日志。已有文件完整保留；已有账号不会因引导变量改变而重置。显式设置的环境变量优先于平台文件，平台文件优先于仓库根目录 `.env`；如果已有配置的密码为空且数据库尚无管理员，初始化会明确报错，需要自行填写至少12位密码。
+
+一键启动读取根目录 `.env` 中的 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `MODEL`。当平台文件中的 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 为空时，前两项作为 OpenAI 兼容网关配置回退。该映射只存在于当前进程内，不会复制或输出密钥。生产部署仍应使用独立的 `PLATFORM_LITELLM_URL` 和受限密钥。
 
 ```bash
 make -C agent_platform start PORT=8010

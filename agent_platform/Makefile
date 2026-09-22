@@ -32,7 +32,7 @@ help:
 	@echo 'make infra / gateway-key / up / down  Docker 部署命令'
 
 install:
-	cd "$(ROOT)" && uv sync --frozen
+	cd "$(ROOT)" && uv sync --frozen --all-groups
 	npm --prefix "$(ROOT)/agent_platform/apps/web" ci
 
 migrate:

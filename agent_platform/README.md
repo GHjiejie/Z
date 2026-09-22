@@ -38,7 +38,9 @@ make start
 
 直接执行 `make` 或 `make run` 也会启动。从仓库根目录可以使用 `make -C agent_platform start`。
 
-启动命令会依次安装根 Python 环境和前端依赖、构建 React、执行数据库迁移、初始化管理员，再启动提供前端页面的 API 和 Worker。缺少 `.env` 时自动从模板创建，生成随机管理员密码，配置文件权限为 `0600`；已有配置、账号和数据不会被覆盖。
+启动命令会依次同步根 Python 环境的全部依赖组和前端依赖、构建 React、执行数据库迁移、初始化管理员，再启动提供前端页面的 API 和 Worker。缺少 `.env` 时自动从模板创建，生成随机管理员密码，配置文件权限为 `0600`；已有配置、账号和数据不会被覆盖。
+
+启动时也会读取仓库根目录的 `.env`。当平台配置中的 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 为空时，会在当前进程中使用根目录的 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，并读取 `MODEL`。密钥不会被复制到子目录配置或打印到日志；平台专用配置和当前进程变量的优先级更高。
 
 打开 [控制台](http://127.0.0.1:8000)。默认邮箱为 `admin@example.com`，初始密码位于本目录 `.env` 的 `PLATFORM_ADMIN_PASSWORD`；显式设置的环境变量优先于文件。首次初始化后更改引导密码不会重置已有账号。
 
@@ -51,7 +53,7 @@ make help             # 查看所有命令
 
 启动在前台运行，按 `Ctrl+C` 也会停止关联服务。端口被其他程序占用时会明确报错；`stop` 只处理本启动脚本记录并核验过的进程，不会按端口终止其他项目。
 
-模型调用仍需在 `.env` 填写 `PLATFORM_LITELLM_URL` 与受限的 `PLATFORM_LITELLM_KEY`，填写后重启；未配置时管理功能可用。现有 `install / migrate / init / dev / web / build` 分步命令和 Docker 命令继续保留。
+如果根目录没有 OpenAI 兼容配置，模型调用仍需在本目录 `.env` 填写 `PLATFORM_LITELLM_URL` 与受限的 `PLATFORM_LITELLM_KEY`，填写后重启；未配置时管理功能可用。现有 `install / migrate / init / dev / web / build` 分步命令和 Docker 命令继续保留。
 
 从空平台完成首次运行：
 

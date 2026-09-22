@@ -13,7 +13,9 @@ from sqlalchemy import Column, MetaData, Table, inspect, text
 
 from agent_platform.infrastructure.db import Database
 from agent_platform.scripts.local import (
+    Supervisor,
     check_port,
+    load_runtime_environment,
     managed_state,
     prepare_config,
     setup_database,
@@ -45,6 +47,52 @@ class LocalStartupTests(unittest.TestCase):
         path.write_text("PLATFORM_ADMIN_PASSWORD=\n# preserve me\n")
         self.assertFalse(prepare_config(path))
         self.assertEqual(path.read_text(), "PLATFORM_ADMIN_PASSWORD=\n# preserve me\n")
+
+    def test_start_preserves_all_shared_dependency_groups(self):
+        source = Path(__file__).resolve().parents[1] / "scripts/local.py"
+        self.assertIn('["uv", "sync", "--frozen", "--all-groups"]', source.read_text())
+        self.assertTrue(hasattr(Supervisor, "start"))
+
+    def test_runtime_environment_uses_root_openai_fallback_without_copying_secret(self):
+        root_env = self.root / "root.env"
+        platform_env = self.root / "platform.env"
+        root_env.write_text(
+            "OPENAI_BASE_URL=https://gateway.example/v1\n"
+            "OPENAI_API_KEY=root-secret\n"
+            "MODEL=root-model\n"
+        )
+        platform_env.write_text(
+            "PLATFORM_ADMIN_EMAIL=owner@example.com\n"
+            "PLATFORM_LITELLM_URL=\n"
+            "PLATFORM_LITELLM_KEY=\n"
+        )
+
+        env = load_runtime_environment(platform_env, root_env, {})
+
+        self.assertEqual(env["PLATFORM_LITELLM_URL"], "https://gateway.example/v1")
+        self.assertEqual(env["PLATFORM_LITELLM_KEY"], "root-secret")
+        self.assertEqual(env["PLATFORM_DEFAULT_MODEL"], "root-model")
+        self.assertNotIn("root-secret", platform_env.read_text())
+
+    def test_platform_and_process_gateway_settings_override_root_fallback(self):
+        root_env = self.root / "root.env"
+        platform_env = self.root / "platform.env"
+        root_env.write_text(
+            "OPENAI_BASE_URL=https://root.example/v1\nOPENAI_API_KEY=root-key\n"
+        )
+        platform_env.write_text(
+            "PLATFORM_LITELLM_URL=https://platform.example/v1\n"
+            "PLATFORM_LITELLM_KEY=platform-key\n"
+        )
+
+        env = load_runtime_environment(
+            platform_env,
+            root_env,
+            {"PLATFORM_LITELLM_KEY": "process-key"},
+        )
+
+        self.assertEqual(env["PLATFORM_LITELLM_URL"], "https://platform.example/v1")
+        self.assertEqual(env["PLATFORM_LITELLM_KEY"], "process-key")
 
     def test_occupied_port_is_rejected_without_touching_listener(self):
         with socket.socket() as listener:
