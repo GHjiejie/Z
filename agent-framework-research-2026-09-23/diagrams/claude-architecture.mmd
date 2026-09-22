@@ -1,0 +1,45 @@
+flowchart TB
+    USER["用户输入：文本、图片、/命令、@文件 [D]"]
+    TUI["Claude Code 终端 / IDE 界面 [D]<br/>UI 内部实现未公开 [U]"]
+    APP["宿主应用：Python query / ClaudeSDKClient [S]"]
+    subgraph SDK["公开 Python SDK 源码边界：0.2.156 [S]"]
+        ENTRY["InternalClient / ClaudeSDKClient<br/>配置、connect、initialize、user 消息 [S]"]
+        TRANS["SubprocessCLITransport<br/>启动 native CLI；stdin/stdout NDJSON [S]"]
+        QUERY["Query 消息分流 [S]<br/>control_request / response / cancel"]
+        CALLBACK["can_use_tool / hook_callback / SDK MCP [S]"]
+        PARSE["parse_message [S]<br/>StreamEvent / AssistantMessage / ResultMessage"]
+    end
+    subgraph OPAQUE["Claude Code native CLI 内部：以下均为文档中的逻辑阶段，不是公开内部类名"]
+        INPUT["输入预处理与附件 [D]<br/>slash 分派、@展开、UserPromptSubmit"]
+        CONTEXT["上下文管理 [D]<br/>system、CLAUDE.md、skills、history、工具定义"]
+        LOOP["agentic loop [D]<br/>模型判断 → 工具 → 结果 → 再判断"]
+        PERM["工具权限与 PreToolUse hooks [D]<br/>规则 / permission mode / 运行时审批"]
+        LOCAL["内置工具及外部 MCP [D]<br/>Read / Edit / Bash / Agent"]
+        SESSION["会话持久化、resume、compact [D]<br/>内部阈值与调度算法 [U]"]
+    end
+    API["Claude 模型服务 [D]<br/>Messages API / SSE 是公开协议契约<br/>CLI provider adapter 具体实现 [U]"]
+    VIEW["宿主输出：增量展示、块事件、轮结果 [S/D]"]
+    USER --> TUI --> INPUT
+    APP --> ENTRY --> TRANS
+    TRANS -->|"initialize + user NDJSON [S]"| INPUT
+    INPUT --> CONTEXT --> LOOP
+    CONTEXT <--> SESSION
+    LOOP <-->|"请求上下文 / 文本与 tool_use [D]"| API
+    LOOP --> PERM
+    PERM -->|"允许"| LOCAL
+    PERM -->|"拒绝 / 反馈"| LOOP
+    LOCAL -->|"工具结果加入后续上下文 [D]"| CONTEXT
+    PERM <-->|"control_request / response [S]"| QUERY
+    LOCAL <-->|"SDK MCP 控制消息 [S]"| QUERY
+    INPUT <-->|"SDK hook 回调 [S]"| QUERY
+    QUERY <--> CALLBACK
+    TRANS -->|"stdout 分行 [S]"| QUERY
+    LOOP -->|"stdout SDK 消息 [D/S]"| TRANS
+    QUERY -->|"常规数据消息 [S]"| PARSE --> VIEW
+    LOOP -->|"界面显示 [D]"| TUI
+    classDef source fill:#e8f5ef,stroke:#18845b,color:#14352b
+    classDef documented fill:#eaf1fd,stroke:#4074c5,color:#17355d
+    classDef opaque fill:#fff3df,stroke:#b77918,color:#563a12
+    class ENTRY,TRANS,QUERY,CALLBACK,PARSE,APP source
+    class USER,INPUT,CONTEXT,LOOP,PERM,LOCAL,SESSION,VIEW documented
+    class TUI,API opaque

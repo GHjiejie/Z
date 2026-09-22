@@ -1,0 +1,65 @@
+sequenceDiagram
+  autonumber
+  actor U as 用户
+  participant UI as 交互 CLI 宿主
+  participant C as GeminiClient
+  participant T as Turn
+  participant H as GeminiChat
+  participant G as ContentGenerator
+  participant L as 远端 LLM 服务
+  participant S as Scheduler
+  participant P as Policy / MessageBus
+  participant X as Tool / MCP
+  U->>UI: 输入文本、@引用或多模态 Parts
+  UI->>UI: slash / shell 本地分流；@引用展开 [G01-G02]
+  Note over UI,X: 以下为默认交互路径；开启 AgentSession 后，外层循环迁至 LegacyAgentProtocol [G30-G33]
+  loop 一次用户任务可包含多次模型请求
+    UI->>C: sendMessageStream(parts, signal, prompt_id)
+    C->>C: BeforeAgent 按 prompt_id 去重；上下文容量/压缩；路由和循环检测
+    C->>T: run(modelConfigKey, parts)
+    T->>H: sendMessageStream
+    H->>H: 等待 sendPromise；记录用户/工具响应历史
+    H->>H: BeforeModel；BeforeToolSelection；构造请求
+    H->>G: generateContentStream(model, contents, config)
+    alt API key / Vertex / gateway
+      G->>L: GoogleGenAI.models 适配
+    else OAuth / Compute ADC
+      G->>L: Code Assist 转换请求，POST alt=sse
+    end
+    loop 响应 chunk
+      L-->>G: GenerateContentResponse 或 Code Assist SSE
+      G-->>H: 归一化 GenerateContentResponse
+      H->>H: 流处理 / AfterModel hook
+      H-->>T: chunk 或 retry
+      T-->>UI: Content / Thought / ToolCallRequest / Finished
+      UI-->>U: 文本增量、思考摘要或状态
+    end
+    C->>C: 无待工具时检查 next-speaker；最外层等条件满足才运行 AfterAgent
+    Note over C,L: 可额外推理或递归续写；完成后才结束本次生成器
+    C-->>UI: sendMessageStream 迭代结束
+    Note over UI,S: 工具请求收集到本轮流结束后，才提交调度批次 [G16]
+    alt 存在工具调用
+      UI->>S: schedule(toolCallRequests, signal)
+      S->>S: 参数验证；BeforeTool 可改参
+      S->>P: PolicyEngine.check(name,args,annotations)
+      alt ASK_USER
+        P-->>UI: confirmation request
+        UI-->>U: 审批界面
+        U->>UI: 批准 / 拒绝
+        UI->>P: confirmation response
+        P-->>S: 决定
+      else DENY
+        P-->>S: 策略错误
+      else ALLOW
+        P-->>S: 继续
+      end
+      S->>X: 允许时执行；可并行批次 / 串行边界
+      X-->>S: llmContent + returnDisplay；AfterTool
+      S-->>UI: CompletedToolCall[] / responseParts
+      UI-->>U: 工具状态与显示结果
+      UI->>UI: 合并 functionResponse Parts；continuation
+    else 无待执行工具
+      UI-->>U: 完成本次任务，或错误 / 取消状态
+    end
+  end
+  Note over UI,X: AbortSignal 贯穿请求、队列和工具；取消并不自动回滚已发生的外部副作用

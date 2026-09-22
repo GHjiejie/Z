@@ -1,0 +1,468 @@
+{
+  "framework": "OpenAI Codex",
+  "repository": "https://github.com/openai/codex",
+  "branch": "main (remote default HEAD)",
+  "commit": "2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d",
+  "commit_date": "2026-09-22T16:16:15Z",
+  "commit_subject": "Fix Escape navigation in read-only agent sessions (#47320)",
+  "retrieved_at": "2026-09-22T16:24:56Z",
+  "research_date_local": "2026-09-23",
+  "timezone": "Asia/Shanghai",
+  "version_observed": {
+    "cargo_workspace": "0.0.0",
+    "npm_wrapper": "0.0.0-dev",
+    "note": "开发分支占位版本；不等于最新发行版，也不声称与用户安装二进制相同。"
+  },
+  "retrieval": "git clone --depth 1 https://github.com/openai/codex.git .cache/codex",
+  "scope": "公开 Rust CLI/TUI、exec、app-server、core 与 Responses 客户端；不含模型服务内部实现",
+  "verification": "静态源码阅读与行号核对；未构建、运行或性能测试。",
+  "evidence": [
+    {
+      "id": "C01",
+      "type": "S",
+      "claim": "CLI 将无子命令入口与 exec/app-server 区分",
+      "path": "codex-rs/cli/src/main.rs",
+      "line_start": 112,
+      "line_end": 173,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/cli/src/main.rs#L112-L173"
+    },
+    {
+      "id": "C02",
+      "type": "S",
+      "claim": "TUI 支持 embedded / daemon / remote app-server",
+      "path": "codex-rs/tui/src/lib.rs",
+      "line_start": 307,
+      "line_end": 340,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/lib.rs#L307-L340"
+    },
+    {
+      "id": "C03",
+      "type": "S",
+      "claim": "TUI 连接或启动进程内 app-server",
+      "path": "codex-rs/tui/src/lib.rs",
+      "line_start": 512,
+      "line_end": 568,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/lib.rs#L512-L568"
+    },
+    {
+      "id": "C04",
+      "type": "S",
+      "claim": "exec 启动 InProcessAppServerClient",
+      "path": "codex-rs/exec/src/lib.rs",
+      "line_start": 950,
+      "line_end": 980,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/exec/src/lib.rs#L950-L980"
+    },
+    {
+      "id": "C05",
+      "type": "S",
+      "claim": "exec 发出 TurnStartParams",
+      "path": "codex-rs/exec/src/lib.rs",
+      "line_start": 1134,
+      "line_end": 1288,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/exec/src/lib.rs#L1134-L1288"
+    },
+    {
+      "id": "C06",
+      "type": "S",
+      "claim": "输入多态和 rich text 标记",
+      "path": "codex-rs/protocol/src/user_input.rs",
+      "line_start": 12,
+      "line_end": 57,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/protocol/src/user_input.rs#L12-L57"
+    },
+    {
+      "id": "C07",
+      "type": "S",
+      "claim": "slash 在 TUI 分发",
+      "path": "codex-rs/tui/src/chatwidget/slash_dispatch.rs",
+      "line_start": 43,
+      "line_end": 84,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/chatwidget/slash_dispatch.rs#L43-L84"
+    },
+    {
+      "id": "C08",
+      "type": "S",
+      "claim": "!shell 输入绕过模型提示提交",
+      "path": "codex-rs/tui/src/chatwidget/input_submission.rs",
+      "line_start": 219,
+      "line_end": 249,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/chatwidget/input_submission.rs#L219-L249"
+    },
+    {
+      "id": "C09",
+      "type": "S",
+      "claim": "技能、插件、连接器提及变成结构化 UserInput",
+      "path": "codex-rs/tui/src/chatwidget/input_submission.rs",
+      "line_start": 286,
+      "line_end": 394,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/chatwidget/input_submission.rs#L286-L394"
+    },
+    {
+      "id": "C10",
+      "type": "S",
+      "claim": "TUI app-server turn/start 与 steer 请求",
+      "path": "codex-rs/tui/src/app_server_session.rs",
+      "line_start": 1284,
+      "line_end": 1380,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/app_server_session.rs#L1284-L1380"
+    },
+    {
+      "id": "C11",
+      "type": "S",
+      "claim": "app-server 转换输入并 start_or_steer_turn",
+      "path": "codex-rs/app-server/src/request_processors/turn_processor.rs",
+      "line_start": 610,
+      "line_end": 683,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/app-server/src/request_processors/turn_processor.rs#L610-L683"
+    },
+    {
+      "id": "C12",
+      "type": "S",
+      "claim": "当前 Op::TurnInput 与 Interrupt 协议",
+      "path": "codex-rs/protocol/src/protocol.rs",
+      "line_start": 580,
+      "line_end": 645,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/protocol/src/protocol.rs#L580-L645"
+    },
+    {
+      "id": "C13",
+      "type": "S",
+      "claim": "submission_loop 消费操作",
+      "path": "codex-rs/core/src/session/handlers.rs",
+      "line_start": 411,
+      "line_end": 493,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/handlers.rs#L411-L493"
+    },
+    {
+      "id": "C14",
+      "type": "S",
+      "claim": "turn-input 回执与采样/落盘解耦",
+      "path": "codex-rs/core/src/session/turn_input.rs",
+      "line_start": 1,
+      "line_end": 12,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn_input.rs#L1-L12"
+    },
+    {
+      "id": "C15",
+      "type": "S",
+      "claim": "AGENTS.md 层级发现、信任与预算",
+      "path": "codex-rs/core/src/agents_md.rs",
+      "line_start": 1,
+      "line_end": 115,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/agents_md.rs#L1-L115"
+    },
+    {
+      "id": "C16",
+      "type": "S",
+      "claim": "AGENTS.override.md 优先候选",
+      "path": "codex-rs/core/src/agents_md.rs",
+      "line_start": 272,
+      "line_end": 293,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/agents_md.rs#L272-L293"
+    },
+    {
+      "id": "C17",
+      "type": "S",
+      "claim": "AGENTS 指令作为 user 角色上下文片段",
+      "path": "codex-rs/core/src/context/user_instructions.rs",
+      "line_start": 1,
+      "line_end": 35,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/context/user_instructions.rs#L1-L35"
+    },
+    {
+      "id": "C18",
+      "type": "S",
+      "claim": "StepContext 固定设置、MCP、工具与 AGENTS 快照",
+      "path": "codex-rs/core/src/session/step_context.rs",
+      "line_start": 26,
+      "line_end": 45,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/step_context.rs#L26-L45"
+    },
+    {
+      "id": "C19",
+      "type": "S",
+      "claim": "显式技能载入并形成注入片段",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 1004,
+      "line_end": 1097,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L1004-L1097"
+    },
+    {
+      "id": "C20",
+      "type": "S",
+      "claim": "主循环前置压缩及上下文捕获",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 163,
+      "line_end": 308,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L163-L308"
+    },
+    {
+      "id": "C21",
+      "type": "S",
+      "claim": "历史变成请求并进入下一次采样",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 458,
+      "line_end": 563,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L458-L563"
+    },
+    {
+      "id": "C22",
+      "type": "S",
+      "claim": "自动压缩与 Stop hooks 可延续 turn",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 598,
+      "line_end": 676,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L598-L676"
+    },
+    {
+      "id": "C23",
+      "type": "S",
+      "claim": "构建 Prompt、工具运行时及请求重试",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 1554,
+      "line_end": 1688,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L1554-L1688"
+    },
+    {
+      "id": "C24",
+      "type": "S",
+      "claim": "标准 Responses 与 Responses Lite 请求组装",
+      "path": "codex-rs/core/src/client.rs",
+      "line_start": 881,
+      "line_end": 1003,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/client.rs#L881-L1003"
+    },
+    {
+      "id": "C25",
+      "type": "S",
+      "claim": "WebSocket 能力开关",
+      "path": "codex-rs/core/src/client.rs",
+      "line_start": 1017,
+      "line_end": 1027,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/client.rs#L1017-L1027"
+    },
+    {
+      "id": "C26",
+      "type": "S",
+      "claim": "WebSocket 增量复用前提",
+      "path": "codex-rs/core/src/client.rs",
+      "line_start": 1381,
+      "line_end": 1413,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/client.rs#L1381-L1413"
+    },
+    {
+      "id": "C27",
+      "type": "S",
+      "claim": "优先 WebSocket 与 HTTP 回落",
+      "path": "codex-rs/core/src/client.rs",
+      "line_start": 2125,
+      "line_end": 2199,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/client.rs#L2125-L2199"
+    },
+    {
+      "id": "C28",
+      "type": "S",
+      "claim": "HTTP /responses 的 SSE 请求",
+      "path": "codex-rs/codex-api/src/endpoint/responses.rs",
+      "line_start": 123,
+      "line_end": 157,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/codex-api/src/endpoint/responses.rs#L123-L157"
+    },
+    {
+      "id": "C29",
+      "type": "S",
+      "claim": "SSE 输出 item 与文本 delta 解析",
+      "path": "codex-rs/codex-api/src/sse/responses.rs",
+      "line_start": 350,
+      "line_end": 383,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/codex-api/src/sse/responses.rs#L350-L383"
+    },
+    {
+      "id": "C30",
+      "type": "S",
+      "claim": "响应完成与 end_turn=false、delta 发出",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 2827,
+      "line_end": 2895,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L2827-L2895"
+    },
+    {
+      "id": "C31",
+      "type": "S",
+      "claim": "完整工具调用先记历史再执行",
+      "path": "codex-rs/core/src/stream_events_utils.rs",
+      "line_start": 310,
+      "line_end": 345,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/stream_events_utils.rs#L310-L345"
+    },
+    {
+      "id": "C32",
+      "type": "S",
+      "claim": "工具并行共享锁与独占锁",
+      "path": "codex-rs/core/src/tools/parallel.rs",
+      "line_start": 124,
+      "line_end": 219,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/tools/parallel.rs#L124-L219"
+    },
+    {
+      "id": "C33",
+      "type": "S",
+      "claim": "审批决策与沙盒执行",
+      "path": "codex-rs/core/src/tools/orchestrator.rs",
+      "line_start": 122,
+      "line_end": 224,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/tools/orchestrator.rs#L122-L224"
+    },
+    {
+      "id": "C34",
+      "type": "S",
+      "claim": "沙盒选择与初次执行",
+      "path": "codex-rs/core/src/tools/orchestrator.rs",
+      "line_start": 227,
+      "line_end": 435,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/tools/orchestrator.rs#L227-L435"
+    },
+    {
+      "id": "C35",
+      "type": "S",
+      "claim": "完成后收集工具 futures、取消检查",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 3026,
+      "line_end": 3054,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L3026-L3054"
+    },
+    {
+      "id": "C36",
+      "type": "S",
+      "claim": "core 文本事件转换 app-server 通知",
+      "path": "codex-rs/app-server-protocol/src/protocol/event_mapping.rs",
+      "line_start": 362,
+      "line_end": 385,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/app-server-protocol/src/protocol/event_mapping.rs#L362-L385"
+    },
+    {
+      "id": "C37",
+      "type": "S",
+      "claim": "TUI 处理通知与 delta",
+      "path": "codex-rs/tui/src/chatwidget/protocol.rs",
+      "line_start": 87,
+      "line_end": 118,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/chatwidget/protocol.rs#L87-L118"
+    },
+    {
+      "id": "C38",
+      "type": "S",
+      "claim": "TUI StreamController 增量缓冲",
+      "path": "codex-rs/tui/src/chatwidget/streaming.rs",
+      "line_start": 570,
+      "line_end": 614,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/tui/src/chatwidget/streaming.rs#L570-L614"
+    },
+    {
+      "id": "C39",
+      "type": "S",
+      "claim": "压缩的 TokenBudget、remote v2、本地分支",
+      "path": "codex-rs/core/src/session/turn.rs",
+      "line_start": 1443,
+      "line_end": 1500,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/turn.rs#L1443-L1500"
+    },
+    {
+      "id": "C40",
+      "type": "S",
+      "claim": "网络重试策略及传输回退",
+      "path": "codex-rs/core/src/responses_retry.rs",
+      "line_start": 48,
+      "line_end": 145,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/responses_retry.rs#L48-L145"
+    },
+    {
+      "id": "C41",
+      "type": "S",
+      "claim": "Rollout 异步记录与持久化确认",
+      "path": "codex-rs/rollout/src/recorder.rs",
+      "line_start": 1035,
+      "line_end": 1087,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/rollout/src/recorder.rs#L1035-L1087"
+    },
+    {
+      "id": "C42",
+      "type": "S",
+      "claim": "JSONL 时间戳与逐行写入",
+      "path": "codex-rs/rollout/src/recorder.rs",
+      "line_start": 2061,
+      "line_end": 2095,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/rollout/src/recorder.rs#L2061-L2095"
+    },
+    {
+      "id": "C43",
+      "type": "S",
+      "claim": "Rollout Create/Resume 与历史元信息",
+      "path": "codex-rs/rollout/src/recorder.rs",
+      "line_start": 86,
+      "line_end": 138,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/rollout/src/recorder.rs#L86-L138"
+    },
+    {
+      "id": "C44",
+      "type": "S",
+      "claim": "当前源码版本占位值",
+      "path": "codex-rs/Cargo.toml",
+      "line_start": 153,
+      "line_end": 160,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/Cargo.toml#L153-L160"
+    },
+    {
+      "id": "C45",
+      "type": "S",
+      "claim": "工具调用 FunctionCall / CustomToolCall 解码",
+      "path": "codex-rs/core/src/tools/router.rs",
+      "line_start": 244,
+      "line_end": 295,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/tools/router.rs#L244-L295"
+    },
+    {
+      "id": "C46",
+      "type": "S",
+      "claim": "history 转为模型模态兼容 prompt",
+      "path": "codex-rs/core/src/context_manager/history.rs",
+      "line_start": 471,
+      "line_end": 507,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/context_manager/history.rs#L471-L507"
+    },
+    {
+      "id": "C47",
+      "type": "S",
+      "claim": "会话内存和 rollout 同步记录入口",
+      "path": "codex-rs/core/src/session/mod.rs",
+      "line_start": 3520,
+      "line_end": 3646,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/core/src/session/mod.rs#L3520-L3646"
+    },
+    {
+      "id": "C48",
+      "type": "S",
+      "claim": "WS request 的 previous_response_id 与 response.create",
+      "path": "codex-rs/codex-api/src/common.rs",
+      "line_start": 284,
+      "line_end": 377,
+      "url": "https://github.com/openai/codex/blob/2c087a0cc2ef1d731086a1d0cb0081bdd792cc4d/codex-rs/codex-api/src/common.rs#L284-L377"
+    }
+  ],
+  "official_documentation": [
+    {
+      "id": "CD01",
+      "type": "D",
+      "title": "Codex App Server",
+      "url": "https://learn.chatgpt.com/docs/app-server?translationFallback=zh-Hans",
+      "note": "通过官方 OpenAI documentation 搜索并打开；只用于确认外部协议定位。",
+      "retrieved_date_local": "2026-09-23"
+    }
+  ],
+  "unknowns": [
+    "服务端模型分词、注意力、推理计算和隐藏提示的内部实现",
+    "特定发行版或用户安装版是否启用本文列举的可选特性",
+    "不同传输或框架的实际延迟、吞吐及成本（未做统一实测）"
+  ]
+}

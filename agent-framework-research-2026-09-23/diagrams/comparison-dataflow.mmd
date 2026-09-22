@@ -1,0 +1,40 @@
+flowchart TB
+    U["同一用户任务：读取文件 → 修改代码 → 跑测试 → 解释结果"]
+    subgraph C["Codex — 固定源码 S"]
+        C1["TUI / exec / 集成客户端"] --> C2["app-server-client / app-server<br/>thread、turn、item 协议"]
+        C2 --> C3["core Session / run_turn<br/>历史与多次 sampling 的所有者"]
+        C3 --> C4["Responses request<br/>常规 / lite 分支"]
+        C4 --> CM["LLM transport<br/>WebSocket / HTTP SSE"]
+        CM --> C3
+        C3 <--> CT["ToolRouter / runtime<br/>权限、沙盒、并发"]
+        C3 --> CE["核心事件 → app-server 通知<br/>delta / item / turn 生命周期"]
+    end
+    subgraph G["Gemini CLI — 默认路径 S"]
+        G1["交互 React/Ink 或 headless 输入<br/>各入口分别预处理"] --> G2["useGeminiStream / headless<br/>外层协调工具后续轮次"]
+        G2 --> G3["GeminiClient → Turn → GeminiChat"]
+        G3 --> G4["ContentGenerator<br/>Gemini API / Code Assist"]
+        G4 --> GM["LLM stream<br/>GenerateContentResponse"]
+        GM --> G3
+        G2 <--> GT["Scheduler → policy / hooks<br/>tool result → functionResponse"]
+        G3 --> GE["GeminiEventType<br/>Content / ToolCallRequest / Finished"]
+        GE --> G2
+    end
+    subgraph A["Claude Code — 公开 SDK S 与核心文档 D"]
+        A0["直接终端用户 / CLI UI D"] --> A3
+        A1["SDK 宿主应用"] --> A2["Python SDK：query / client<br/>subprocess + NDJSON S"]
+        A2 <--> A3["CLI 内部 harness D<br/>函数、调度细节 U"]
+        A3 <--> AM["Claude 模型服务 D<br/>API 协议不等于内部调用栈"]
+        A3 <--> AT["工具、权限、hooks D<br/>SDK 回调处理器 S"]
+        A3 --> AE["stream_event / assistant / result<br/>SDK Query._read_messages 分流 S"]
+        AE --> A2
+    end
+    U --> C1
+    U --> G1
+    U --> A1
+    U --> A0
+    CE --> C2
+    C2 -. "客户端渲染" .-> UI["用户可见：增量文本、工具状态、轮次终态"]
+    G2 -. "客户端渲染" .-> UI
+    A2 -. "SDK 消费者渲染" .-> UI
+    A3 -. "内置 CLI UI" .-> A0
+    A0 -. "直接终端显示" .-> UI

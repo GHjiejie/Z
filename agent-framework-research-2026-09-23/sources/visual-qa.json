@@ -1,0 +1,67 @@
+{
+  "title": "Agent 框架输入到输出：Codex · Gemini CLI · Claude Code",
+  "figures": 9,
+  "brokenImages": [],
+  "overflow": false,
+  "zoomWorks": true,
+  "mobileOverflow": false,
+  "brokenLinks": [],
+  "jsErrors": [],
+  "diagrams": [
+    {
+      "file": "claude-architecture.svg",
+      "width": 2490.5078125,
+      "height": 1754,
+      "rendered": true
+    },
+    {
+      "file": "claude-sequence.svg",
+      "width": 1099,
+      "height": 2902,
+      "rendered": true
+    },
+    {
+      "file": "codex-architecture.svg",
+      "width": 1395.14453125,
+      "height": 3525.365234375,
+      "rendered": true
+    },
+    {
+      "file": "codex-sequence.svg",
+      "width": 1760,
+      "height": 3116,
+      "rendered": true
+    },
+    {
+      "file": "comparison-dataflow.svg",
+      "width": 3198.1796875,
+      "height": 1025,
+      "rendered": true
+    },
+    {
+      "file": "gemini-architecture.svg",
+      "width": 2833.2109375,
+      "height": 1923,
+      "rendered": true
+    },
+    {
+      "file": "gemini-sequence.svg",
+      "width": 2162,
+      "height": 3490,
+      "rendered": true
+    },
+    {
+      "file": "harness-scope.svg",
+      "width": 1160.1875,
+      "height": 176,
+      "rendered": true
+    },
+    {
+      "file": "lifecycle-boundaries.svg",
+      "width": 1543.6796875,
+      "height": 1256,
+      "rendered": true
+    }
+  ],
+  "checked_at": "2026-09-22T16:41:22.935Z"
+}

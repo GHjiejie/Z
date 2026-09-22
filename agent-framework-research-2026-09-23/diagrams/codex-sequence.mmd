@@ -1,0 +1,59 @@
+sequenceDiagram
+  actor U as 用户
+  participant UI as TUI / exec / 外部客户端
+  participant AS as app-server
+  participant Core as Session / run_turn
+  participant H as ContextManager / Rollout
+  participant C as ModelClientSession
+  participant L as Responses 模型服务
+  participant T as ToolRuntime / Handler
+  U->>UI: 提交输入和附件
+  UI->>UI: TUI 路径先 slash / ! 分流、提及绑定；形成 UserInput
+  UI->>AS: turn/start 或 turn/steer
+  AS->>Core: TurnInputRequest → Op::TurnInput
+  Core-->>AS: Started / Steered / NotSubmitted
+  Note over AS,Core: 接受回执不等于已采样或已落盘
+  AS-->>UI: turn/start 响应及生命周期通知
+  Core->>Core: 预压缩；捕获 StepContext；hooks / skills
+  Core->>H: 记录上下文差量和用户输入
+  loop 同一 turn 内的多次采样
+    Core->>H: clone_history().for_prompt()
+    Core->>C: Prompt + StepContext 设置
+    C->>L: WS response.create 或 HTTP POST /responses
+    Note over C,L: 满足前缀条件才使用 previous_response_id + 增量
+    L-->>C: output_text.delta / output_item.done
+    C-->>Core: ResponseEvent
+    Core-->>AS: AgentMessageContentDelta / item lifecycle
+    AS-->>UI: item/agentMessage/delta
+    UI-->>U: 增量渲染
+    par 模型流继续接收
+      L-->>C: response.completed
+      C-->>Core: Completed
+    and 完整工具调用可在流结束前启动
+      opt 完整工具调用
+        Core->>H: 先记录模型调用 item
+        Core->>T: dispatch；按并行能力加锁
+        opt 工具要求审批
+          T->>AS: server request
+          AS->>UI: 显示审批
+          UI->>AS: 审批决定
+          AS->>T: 继续 / 拒绝
+        end
+        T->>T: handler 执行；适用时沙盒约束
+        T-->>Core: 结构化工具结果
+      end
+    end
+    Core->>Core: drain_in_flight
+    Core->>H: 工具结果写入 history / rollout
+    Core->>Core: 检查继续条件、pending input 和上下文预算
+    opt 需要压缩
+      Core->>H: compact 后替换模型上下文并记录
+    end
+    opt 已无待续跑条件
+      Core->>Core: Stop hooks；可能添加续跑提示
+    end
+  end
+  Core-->>AS: turn 终态
+  AS-->>UI: turn/completed
+  UI-->>U: 最终文本及工具状态
+  Note over U,T: interrupt 通过 CancellationToken 传播；后台终端另有清理操作

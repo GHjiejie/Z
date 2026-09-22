@@ -1,0 +1,491 @@
+{
+  "framework": "Claude Code / Claude Agent SDK for Python",
+  "research_date": "2026-09-23",
+  "timezone": "Asia/Shanghai",
+  "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+  "repositories": [
+    {
+      "name": "claude-code",
+      "url": "https://github.com/anthropics/claude-code",
+      "commit": "b486776a2eef0d3f39abaebaa3c03e378c7480b8",
+      "commit_time": "2026-09-21T15:23:27-07:00",
+      "version": "2.1.278",
+      "scope": "Public product materials, changelog, examples and plugins; no full CLI core implementation in this checkout.",
+      "local_path": "/Users/jie/Github/Z/agent-framework-research-2026-09-23/.cache/claude-code",
+      "clone_mode": "depth=1, static read only"
+    },
+    {
+      "name": "claude-agent-sdk-python",
+      "url": "https://github.com/anthropics/claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "commit_time": "2026-09-20T02:48:23-04:00",
+      "version": "0.2.156",
+      "scope": "Open-source Python wrapper, subprocess transport and bidirectional control protocol.",
+      "local_path": "/Users/jie/Github/Z/agent-framework-research-2026-09-23/.cache/claude-agent-sdk-python",
+      "clone_mode": "depth=1, static read only"
+    }
+  ],
+  "version_discrepancies": [
+    {
+      "field": "bundled CLI",
+      "source_constant": "2.1.278",
+      "source_changelog": "2.1.276",
+      "resolution": "Report both. Constant identifies checkout build intent; no installed binary was executed."
+    }
+  ],
+  "evidence_legend": {
+    "S": "Pinned official source code",
+    "D": "Official rolling documentation",
+    "I": "Inference, explicitly identified in document",
+    "U": "Unknown from available official public material"
+  },
+  "verification": {
+    "method": "Static source and official documentation review",
+    "ran_model_requests": false,
+    "ran_cli_binary": false,
+    "used_leaked_or_decompiled_sources": false
+  },
+  "unknowns": [
+    "CLI core classes and prompt serialization",
+    "Provider adapter HTTP details",
+    "Exact model-request retry policy",
+    "Internal tool concurrency and scheduling rules",
+    "Compaction trigger and summary implementation"
+  ],
+  "sources": [
+    {
+      "id": "C-S01",
+      "evidence": "S",
+      "repository": "claude-code",
+      "commit": "b486776a2eef0d3f39abaebaa3c03e378c7480b8",
+      "path": "README.md",
+      "lines": [
+        1,
+        55
+      ],
+      "url": "https://github.com/anthropics/claude-code/blob/b486776a2eef0d3f39abaebaa3c03e378c7480b8/README.md#L1-L55",
+      "supports": "Repository contains distribution instructions and plugins, not the core CLI source."
+    },
+    {
+      "id": "C-S02",
+      "evidence": "S",
+      "repository": "claude-code",
+      "commit": "b486776a2eef0d3f39abaebaa3c03e378c7480b8",
+      "path": "LICENSE.md",
+      "lines": [
+        1,
+        1
+      ],
+      "url": "https://github.com/anthropics/claude-code/blob/b486776a2eef0d3f39abaebaa3c03e378c7480b8/LICENSE.md#L1-L1",
+      "supports": "All rights reserved / commercial terms."
+    },
+    {
+      "id": "C-S03",
+      "evidence": "S",
+      "repository": "claude-code",
+      "commit": "b486776a2eef0d3f39abaebaa3c03e378c7480b8",
+      "path": "CHANGELOG.md",
+      "lines": [
+        1,
+        13
+      ],
+      "url": "https://github.com/anthropics/claude-code/blob/b486776a2eef0d3f39abaebaa3c03e378c7480b8/CHANGELOG.md#L1-L13",
+      "supports": "Latest changelog 2.1.278; AGENTS.md support introduced in 2.1.277."
+    },
+    {
+      "id": "C-S04",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "pyproject.toml",
+      "lines": [
+        1,
+        15
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/pyproject.toml#L1-L15",
+      "supports": "Package 0.2.156, MIT license."
+    },
+    {
+      "id": "C-S05",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_cli_version.py",
+      "lines": [
+        1,
+        3
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_cli_version.py#L1-L3",
+      "supports": "Declared bundled CLI 2.1.278; differs from changelog."
+    },
+    {
+      "id": "C-S06",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "CHANGELOG.md",
+      "lines": [
+        1,
+        7
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/CHANGELOG.md#L1-L7",
+      "supports": "0.2.156 entry declares bundled CLI 2.1.276; discrepancy retained."
+    },
+    {
+      "id": "C-S07",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/query.py",
+      "lines": [
+        118,
+        126
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/query.py#L118-L126",
+      "supports": "query delegates to InternalClient.process_query."
+    },
+    {
+      "id": "C-S08",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/client.py",
+      "lines": [
+        80,
+        98
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/client.py#L80-L98",
+      "supports": "Select default SubprocessCLITransport or custom transport; connect."
+    },
+    {
+      "id": "C-S09",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/client.py",
+      "lines": [
+        137,
+        210
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/client.py#L137-L210",
+      "supports": "Always streaming internally; start reader, initialize, write user JSON then parse yielded messages."
+    },
+    {
+      "id": "C-S10",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/transport/subprocess_cli.py",
+      "lines": [
+        539,
+        585
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/transport/subprocess_cli.py#L539-L585",
+      "supports": "skills configuration and system-prompt command construction."
+    },
+    {
+      "id": "C-S11",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/transport/subprocess_cli.py",
+      "lines": [
+        787,
+        883
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/transport/subprocess_cli.py#L787-L883",
+      "supports": "stream-json input; native subprocess pipes and environment."
+    },
+    {
+      "id": "C-S12",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/transport/subprocess_cli.py",
+      "lines": [
+        1049,
+        1148
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/transport/subprocess_cli.py#L1049-L1148",
+      "supports": "Locked stdin writes, NDJSON framing, size guard and process errors."
+    },
+    {
+      "id": "C-S13",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        254,
+        308
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L254-L308",
+      "supports": "initialize control request with hook IDs, agents and skill filters."
+    },
+    {
+      "id": "C-S14",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        333,
+        424
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L333-L424",
+      "supports": "Control/data routing; control cancellation; transcript mirror flush; background task result boundary."
+    },
+    {
+      "id": "C-S15",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        494,
+        617
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L494-L617",
+      "supports": "Permission, hook and SDK MCP callbacks with control responses; signals remain None."
+    },
+    {
+      "id": "C-S16",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        622,
+        665
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L622-L665",
+      "supports": "Control request IDs and timeout; not a network retry policy."
+    },
+    {
+      "id": "C-S17",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        709,
+        711
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L709-L711",
+      "supports": "interrupt control request."
+    },
+    {
+      "id": "C-S18",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        855,
+        886
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L855-L886",
+      "supports": "Wait for result without tracked background tasks; explicit queued AsyncIterable limitation."
+    },
+    {
+      "id": "C-S19",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/client.py",
+      "lines": [
+        552,
+        591
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/client.py#L552-L591",
+      "supports": "receive_response stops after first ResultMessage."
+    },
+    {
+      "id": "C-S20",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/message_parser.py",
+      "lines": [
+        150,
+        220
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/message_parser.py#L150-L220",
+      "supports": "Assistant content blocks are parsed, no transport-to-model API call here."
+    },
+    {
+      "id": "C-S21",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/message_parser.py",
+      "lines": [
+        308,
+        356
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/message_parser.py#L308-L356",
+      "supports": "ResultMessage and raw StreamEvent construction."
+    },
+    {
+      "id": "C-S22",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/types.py",
+      "lines": [
+        2195,
+        2222
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/types.py#L2195-L2222",
+      "supports": "verbatim_prompts and CLI client_composed semantics; minimum CLI 2.1.248."
+    },
+    {
+      "id": "C-S23",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/types.py",
+      "lines": [
+        2273,
+        2298
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/types.py#L2273-L2298",
+      "supports": "setting_sources None follows CLI defaults; [] isolates; skills configuration."
+    },
+    {
+      "id": "C-S24",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        102,
+        113
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L102-L113",
+      "supports": "stamp_user_message writes client_composed=True."
+    },
+    {
+      "id": "C-S25",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/_internal/query.py",
+      "lines": [
+        426,
+        491
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/_internal/query.py#L426-L491",
+      "supports": "ErrorResult/ProcessError transformation, failure notification and cleanup."
+    },
+    {
+      "id": "C-S26",
+      "evidence": "S",
+      "repository": "claude-agent-sdk-python",
+      "commit": "f7547d7233527739ece8b12ed28c57be96c966b5",
+      "path": "src/claude_agent_sdk/types.py",
+      "lines": [
+        1340,
+        1387
+      ],
+      "url": "https://github.com/anthropics/claude-agent-sdk-python/blob/f7547d7233527739ece8b12ed28c57be96c966b5/src/claude_agent_sdk/types.py#L1340-L1387",
+      "supports": "Result terminal_reason/origin; raw StreamEvent fields."
+    },
+    {
+      "id": "C-D01",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/how-claude-code-works",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Harness/agent loop, session JSONL, clear old tool output before compaction.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D02",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/interactive-mode",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Slash, @ file mention and shell-mode input semantics.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D03",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/memory",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "CLAUDE.md hierarchy, lazy subdirectory loading and compaction reload.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D04",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/skills",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Skill descriptions versus full on-demand instructions; dynamic context substitution.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D05",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/hooks",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "UserPromptSubmit before model processing; @ attachments bypass PreToolUse.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D06",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/agent-sdk/overview",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Agent SDK wraps Claude Code runtime.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D07",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/agent-sdk/agent-loop",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Documented agent lifecycle and compact boundary.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D08",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/agent-sdk/permissions",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Permission evaluation order and allowlist versus tool visibility.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D09",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/agent-sdk/streaming-output",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Each nonempty content block gets AssistantMessage before block_stop; partial main-session events.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D10",
+      "evidence": "D",
+      "url": "https://code.claude.com/docs/en/agent-sdk/claude-code-features",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Filesystem settings and feature integration.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D11",
+      "evidence": "D",
+      "url": "https://platform.claude.com/docs/en/build-with-claude/streaming",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Public Messages SSE contract only, not proof of opaque CLI HTTP implementation.",
+      "version_pinned": false
+    },
+    {
+      "id": "C-D12",
+      "evidence": "D",
+      "url": "https://platform.claude.com/docs/en/agents-and-tools/tool-use/handle-tool-calls",
+      "accessed_at_utc": "2026-09-22T16:30:07.151381+00:00",
+      "supports": "Public tool_use / tool_result correlation and continuation contract.",
+      "version_pinned": false
+    }
+  ]
+}

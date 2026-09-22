@@ -1,0 +1,33 @@
+stateDiagram-v2
+    [*] --> InputAccepted
+    InputAccepted --> PrepareContext
+    PrepareContext --> ModelRequest
+    ModelRequest --> StreamReceiving
+    StreamReceiving --> ToolReady: 可执行调用已形成
+    ToolReady --> PolicyCheck
+    PolicyCheck --> AwaitApproval: 需要交互
+    AwaitApproval --> ToolRunning: 允许
+    PolicyCheck --> ToolRunning: 策略允许
+    PolicyCheck --> RecordResult: 拒绝或验证失败
+    AwaitApproval --> RecordResult: 拒绝
+    ToolRunning --> RecordResult: 成功或错误
+    RecordResult --> PrepareContext: 结果回写并继续
+    StreamReceiving --> ContinuationCheck: 本次模型响应结束
+    ContinuationCheck --> PrepareContext: 待处理输入 / 后续工具 / hook 等
+    ContinuationCheck --> TurnFinished: 无须继续
+    ModelRequest --> RetryDecision: 网络或服务错误
+    RetryDecision --> ModelRequest: 可安全重试
+    RetryDecision --> Failed: 重试耗尽
+    StreamReceiving --> Interrupted: 用户取消
+    TurnFinished --> [*]
+    Failed --> [*]
+    Interrupted --> [*]
+    note left of Interrupted
+        取消也可发生于审批或工具执行
+        取消信号不保证回滚副作用
+    end note
+    note right of ContinuationCheck
+        比较用的抽象状态机 I
+        不是三者共有的函数或枚举
+        图中省略了并行工具与后台子任务
+    end note

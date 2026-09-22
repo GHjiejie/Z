@@ -1,0 +1,378 @@
+{
+  "framework": "Gemini CLI",
+  "repository": "https://github.com/google-gemini/gemini-cli",
+  "ref": "main",
+  "commit": "d5b3e3accb26000d273abf16e0f1dd83aa5428a9",
+  "commit_time": "2026-09-21T20:36:40Z",
+  "fetched_at": "2026-09-22T16:22:27Z",
+  "local_date": "2026-09-23 Asia/Shanghai",
+  "package_version": "0.62.0-nightly.20260918.g9450ade79",
+  "method": "git clone --depth 1; static source reading; official repository docs; no runtime/model request",
+  "evidence": [
+    {
+      "id": "G01",
+      "type": "S",
+      "path": "packages/cli/src/ui/hooks/useGeminiStream.ts",
+      "line_start": 960,
+      "line_end": 1079,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/ui/hooks/useGeminiStream.ts#L960-L1079",
+      "claim": "输入分流：slash、本地 shell、@ 引用、普通 prompt"
+    },
+    {
+      "id": "G02",
+      "type": "S",
+      "path": "packages/cli/src/ui/hooks/atCommandProcessor.ts",
+      "line_start": 660,
+      "line_end": 763,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/ui/hooks/atCommandProcessor.ts#L660-L763",
+      "claim": "@ 引用区分 agent、MCP resource、文件并构造 PartListUnion"
+    },
+    {
+      "id": "G03",
+      "type": "S",
+      "path": "packages/core/src/config/config.ts",
+      "line_start": 2570,
+      "line_end": 2614,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/config/config.ts#L2570-L2614",
+      "claim": "systemInstruction memory 与首条 user session memory 分层"
+    },
+    {
+      "id": "G04",
+      "type": "S",
+      "path": "packages/core/src/utils/environmentContext.ts",
+      "line_start": 50,
+      "line_end": 110,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/utils/environmentContext.ts#L50-L110",
+      "claim": "环境上下文和第一条 user Content"
+    },
+    {
+      "id": "G05",
+      "type": "S",
+      "path": "packages/core/src/prompts/snippets.ts",
+      "line_start": 314,
+      "line_end": 333,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/prompts/snippets.ts#L314-L333",
+      "claim": "skills 描述目录进入 system prompt"
+    },
+    {
+      "id": "G06",
+      "type": "S",
+      "path": "packages/core/src/tools/activate-skill.ts",
+      "line_start": 111,
+      "line_end": 153,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/tools/activate-skill.ts#L111-L153",
+      "claim": "activate_skill 返回技能正文和资源目录"
+    },
+    {
+      "id": "G07",
+      "type": "S",
+      "path": "packages/core/src/core/client.ts",
+      "line_start": 380,
+      "line_end": 417,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/client.ts#L380-L417",
+      "claim": "startChat 创建 systemInstruction、工具声明和 GeminiChat"
+    },
+    {
+      "id": "G08",
+      "type": "S",
+      "path": "packages/core/src/core/client.ts",
+      "line_start": 614,
+      "line_end": 807,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/client.ts#L614-L807",
+      "claim": "processTurn 上下文管理、容量检查、循环检测和模型路由"
+    },
+    {
+      "id": "G09",
+      "type": "S",
+      "path": "packages/core/src/core/client.ts",
+      "line_start": 875,
+      "line_end": 1033,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/client.ts#L875-L1033",
+      "claim": "next-speaker continuation 与 BeforeAgent/AfterAgent hooks"
+    },
+    {
+      "id": "G10",
+      "type": "S",
+      "path": "packages/core/src/core/geminiChat.ts",
+      "line_start": 480,
+      "line_end": 675,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/geminiChat.ts#L480-L675",
+      "claim": "发送互斥、用户与工具响应记录、流重试入口"
+    },
+    {
+      "id": "G11",
+      "type": "S",
+      "path": "packages/core/src/core/geminiChat.ts",
+      "line_start": 955,
+      "line_end": 1090,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/geminiChat.ts#L955-L1090",
+      "claim": "请求组装和 BeforeModel/BeforeToolSelection hooks"
+    },
+    {
+      "id": "G12",
+      "type": "S",
+      "path": "packages/core/src/core/contentGenerator.ts",
+      "line_start": 292,
+      "line_end": 410,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/contentGenerator.ts#L292-L410",
+      "claim": "OAuth/ADC 到 Code Assist；API key/Vertex/gateway 到 GoogleGenAI"
+    },
+    {
+      "id": "G13",
+      "type": "S",
+      "path": "packages/core/src/code_assist/server.ts",
+      "line_start": 93,
+      "line_end": 152,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/code_assist/server.ts#L93-L152",
+      "claim": "Code Assist 请求转换和响应归一化"
+    },
+    {
+      "id": "G14",
+      "type": "S",
+      "path": "packages/core/src/code_assist/server.ts",
+      "line_start": 470,
+      "line_end": 521,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/code_assist/server.ts#L470-L521",
+      "claim": "POST alt=sse 与 data 行 JSON 解析"
+    },
+    {
+      "id": "G15",
+      "type": "S",
+      "path": "packages/core/src/core/turn.ts",
+      "line_start": 269,
+      "line_end": 414,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/turn.ts#L269-L414",
+      "claim": "SDK 响应映射为 Thought、Content、ToolCallRequest、Finished"
+    },
+    {
+      "id": "G16",
+      "type": "S",
+      "path": "packages/cli/src/ui/hooks/useGeminiStream.ts",
+      "line_start": 1533,
+      "line_end": 1658,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/ui/hooks/useGeminiStream.ts#L1533-L1658",
+      "claim": "UI 消费事件；整个流结束后调度工具"
+    },
+    {
+      "id": "G17",
+      "type": "S",
+      "path": "packages/cli/src/ui/hooks/useGeminiStream.ts",
+      "line_start": 2149,
+      "line_end": 2195,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/ui/hooks/useGeminiStream.ts#L2149-L2195",
+      "claim": "工具 responseParts 汇总并以 continuation 重新提交"
+    },
+    {
+      "id": "G18",
+      "type": "S",
+      "path": "packages/core/src/scheduler/scheduler.ts",
+      "line_start": 303,
+      "line_end": 348,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/scheduler/scheduler.ts#L303-L348",
+      "claim": "批次入口、update_topic 排序、ToolRegistry 参数验证"
+    },
+    {
+      "id": "G19",
+      "type": "S",
+      "path": "packages/core/src/scheduler/scheduler.ts",
+      "line_start": 472,
+      "line_end": 577,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/scheduler/scheduler.ts#L472-L577",
+      "claim": "连续可并行批次、Promise.all、edit/topic 串行与 wait_for_previous"
+    },
+    {
+      "id": "G20",
+      "type": "S",
+      "path": "packages/core/src/scheduler/scheduler.ts",
+      "line_start": 612,
+      "line_end": 718,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/scheduler/scheduler.ts#L612-L718",
+      "claim": "BeforeTool、Policy、MessageBus confirmation、取消"
+    },
+    {
+      "id": "G21",
+      "type": "S",
+      "path": "packages/core/src/scheduler/tool-executor.ts",
+      "line_start": 114,
+      "line_end": 163,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/scheduler/tool-executor.ts#L114-L163",
+      "claim": "executeToolWithHooks 执行和模型/显示结果分流"
+    },
+    {
+      "id": "G22",
+      "type": "S",
+      "path": "packages/core/src/scheduler/policy.ts",
+      "line_start": 53,
+      "line_end": 107,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/scheduler/policy.ts#L53-L107",
+      "claim": "PolicyEngine 与非交互 ASK_USER 错误"
+    },
+    {
+      "id": "G23",
+      "type": "S",
+      "path": "packages/core/src/context/chatCompressionService.ts",
+      "line_start": 38,
+      "line_end": 99,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/context/chatCompressionService.ts#L38-L99",
+      "claim": "默认压缩阈值及按字符估算的保留切分"
+    },
+    {
+      "id": "G24",
+      "type": "S",
+      "path": "packages/core/src/context/chatCompressionService.ts",
+      "line_start": 267,
+      "line_end": 410,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/context/chatCompressionService.ts#L267-L410",
+      "claim": "工具输出预算截断、摘要生成和第二次 probe 验证"
+    },
+    {
+      "id": "G25",
+      "type": "S",
+      "path": "packages/core/src/core/geminiChat.ts",
+      "line_start": 1093,
+      "line_end": 1146,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/geminiChat.ts#L1093-L1146",
+      "claim": "retryWithBackoff、持久 429 fallback"
+    },
+    {
+      "id": "G26",
+      "type": "S",
+      "path": "packages/cli/src/ui/hooks/useGeminiStream.ts",
+      "line_start": 2221,
+      "line_end": 2264,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/ui/hooks/useGeminiStream.ts#L2221-L2264",
+      "claim": "实际 checkpoint 在 edit AwaitingApproval 触发"
+    },
+    {
+      "id": "G27",
+      "type": "D",
+      "path": "docs/cli/checkpointing.md",
+      "line_start": 8,
+      "line_end": 40,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/docs/cli/checkpointing.md#L8-L40",
+      "claim": "checkpoint 官方语义及默认关闭"
+    },
+    {
+      "id": "G28",
+      "type": "S",
+      "path": "packages/cli/src/nonInteractiveCli.ts",
+      "line_start": 311,
+      "line_end": 355,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/nonInteractiveCli.ts#L311-L355",
+      "claim": "默认 headless 拥有外层 loop 和文本/JSON 输出"
+    },
+    {
+      "id": "G29",
+      "type": "S",
+      "path": "packages/cli/src/nonInteractiveCli.ts",
+      "line_start": 482,
+      "line_end": 539,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/nonInteractiveCli.ts#L482-L539",
+      "claim": "headless 调度批次并记录工具输出"
+    },
+    {
+      "id": "G30",
+      "type": "S",
+      "path": "packages/core/src/config/config.ts",
+      "line_start": 1375,
+      "line_end": 1380,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/config/config.ts#L1375-L1380",
+      "claim": "AgentSession 配置默认 false"
+    },
+    {
+      "id": "G31",
+      "type": "S",
+      "path": "packages/cli/src/ui/AppContainer.tsx",
+      "line_start": 1175,
+      "line_end": 1203,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/ui/AppContainer.tsx#L1175-L1203",
+      "claim": "交互模式 feature flag 选择 LegacyAgentProtocol 或 useGeminiStream"
+    },
+    {
+      "id": "G32",
+      "type": "S",
+      "path": "packages/core/src/agent/legacy-agent-session.ts",
+      "line_start": 181,
+      "line_end": 271,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/agent/legacy-agent-session.ts#L181-L271",
+      "claim": "可选 Core-owned agent loop"
+    },
+    {
+      "id": "G33",
+      "type": "S",
+      "path": "packages/core/src/config/config.ts",
+      "line_start": 3869,
+      "line_end": 3880,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/config/config.ts#L3869-L3880",
+      "claim": "GEMINI_CLI_EXP_AGENT 环境开关"
+    },
+    {
+      "id": "G34",
+      "type": "S",
+      "path": "packages/core/src/tools/read-file.ts",
+      "line_start": 194,
+      "line_end": 201,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/tools/read-file.ts#L194-L201",
+      "claim": "工具输出附加 JIT 子目录上下文"
+    },
+    {
+      "id": "G35",
+      "type": "S",
+      "path": "packages/core/src/core/geminiChat.ts",
+      "line_start": 1464,
+      "line_end": 1487,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/geminiChat.ts#L1464-L1487",
+      "claim": "AfterModel 在 stream chunk 路径触发"
+    },
+    {
+      "id": "G36",
+      "type": "S",
+      "path": "packages/core/src/core/geminiChat.ts",
+      "line_start": 434,
+      "line_end": 443,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/core/geminiChat.ts#L434-L443",
+      "claim": "ChatRecordingService 初始化和历史持久化"
+    },
+    {
+      "id": "G37",
+      "type": "S",
+      "path": "packages/core/src/config/config.ts",
+      "line_start": 1198,
+      "line_end": 1212,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/config/config.ts#L1198-L1212",
+      "claim": "contextManagement 默认关闭"
+    },
+    {
+      "id": "G38",
+      "type": "S",
+      "path": "packages/core/src/code_assist/converter.ts",
+      "line_start": 33,
+      "line_end": 75,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/code_assist/converter.ts#L33-L75",
+      "claim": "Code Assist 外层项目、prompt id 与嵌套 request 数据结构"
+    },
+    {
+      "id": "G39",
+      "type": "S",
+      "path": "packages/cli/src/nonInteractiveCli.ts",
+      "line_start": 72,
+      "line_end": 81,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/cli/src/nonInteractiveCli.ts#L72-L81",
+      "claim": "headless 的 AgentSession 选择入口"
+    },
+    {
+      "id": "G40",
+      "type": "S",
+      "path": "packages/core/src/scheduler/tool-executor.ts",
+      "line_start": 369,
+      "line_end": 400,
+      "url": "https://github.com/google-gemini/gemini-cli/blob/d5b3e3accb26000d273abf16e0f1dd83aa5428a9/packages/core/src/scheduler/tool-executor.ts#L369-L400",
+      "claim": "tool llmContent 转 responseParts 与 returnDisplay 分离"
+    }
+  ],
+  "limitations": [
+    "main snapshot is not the published stable release",
+    "Code Assist and Gemini server internals are not present in this client repository",
+    "Feature flags and account configuration may change active paths"
+  ]
+}

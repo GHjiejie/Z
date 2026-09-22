@@ -1,0 +1,64 @@
+flowchart TB
+  U["用户文本、图片、音频、技能和提及"]
+  TUI["Rust TUI<br/>composer / slash dispatch / mention binding"]
+  EXEC["codex exec<br/>参数或 stdin / 事件输出"]
+  HOST["IDE 或其他 app-server 客户端"]
+  CMD["本地命令分支<br/>slash 设置 / !shell"]
+  AS["app-server<br/>进程内 / daemon / remote"]
+  API["thread/start 或 resume<br/>turn/start / steer"]
+  Q["CodexThread → Op::TurnInput<br/>submission_loop / turn_input"]
+  TURN["RegularTask → run_turn<br/>TurnContext / CancellationToken"]
+  CTX["StepContext 不可变快照<br/>模型、环境、权限、MCP、ToolRouter"]
+  INSTR["base instructions<br/>AGENTS.md / skills / plugins / hooks"]
+  HIST[("ContextManager 历史<br/>ResponseItem + world-state 差量")]
+  PROMPT["build_prompt<br/>input + 工具规格 + instructions"]
+  REQ["ModelClientSession<br/>build_responses_request"]
+  LITE["Responses Lite 分支<br/>前缀 input 承载指令与 AdditionalTools"]
+  WS["Responses WebSocket<br/>可复用连接与增量 input"]
+  SSE["HTTP POST /responses<br/>SSE"]
+  LLM["模型服务<br/>内部推理实现不公开"]
+  STREAM["ResponseEvent<br/>added / text delta / item done / completed"]
+  ROUTE["ToolRouter → ToolCallRuntime<br/>按工具能力选择共享或独占锁"]
+  POLICY["ToolOrchestrator<br/>审批 → 沙盒 → 执行 / 有条件重试"]
+  OTHER["其他工具 handler<br/>MCP / dynamic / Code Mode 等"]
+  RESULT["tool output 回写历史<br/>等待 in-flight 结果"]
+  NEXT{"需要继续？<br/>工具 / pending input / end_turn=false / Stop hook"}
+  COMPACT["达到上下文阈值<br/>TokenBudget 或 remote/local compact"]
+  EVENT["core EventMsg → ServerNotification<br/>item/agentMessage/delta 等"]
+  RENDER["TUI StreamController<br/>或 exec JSON / 文本输出"]
+  STORE[("Rollout JSONL / State DB<br/>resume / fork / recovery")]
+  DONE["turn/completed"]
+  U --> TUI
+  U --> EXEC
+  U --> HOST
+  TUI --> CMD
+  TUI --> AS
+  EXEC --> AS
+  HOST --> AS
+  AS --> API --> Q --> TURN
+  AS --> CANCEL["turn/interrupt → Op::Interrupt"]
+  CANCEL -. "取消信号" .-> TURN
+  TURN --> CTX
+  INSTR --> CTX
+  CTX --> HIST --> PROMPT --> REQ
+  REQ -.模型配置启用.-> LITE
+  LITE --> WS
+  LITE --> SSE
+  REQ --> WS
+  REQ --> SSE
+  WS -.能力不支持或降级.-> SSE
+  WS --> LLM
+  SSE --> LLM
+  LLM --> STREAM
+  STREAM -->|完整工具调用| ROUTE
+  ROUTE --> POLICY --> RESULT
+  ROUTE --> OTHER --> RESULT
+  RESULT --> HIST
+  STREAM -->|文本增量和生命周期| EVENT --> RENDER
+  STREAM --> NEXT
+  RESULT --> NEXT
+  NEXT -->|继续| CTX
+  NEXT -->|阈值触发| COMPACT --> HIST
+  NEXT -->|完成| DONE --> EVENT
+  HIST --> STORE
+  STORE -->|恢复| HIST

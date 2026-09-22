@@ -1,0 +1,55 @@
+sequenceDiagram
+    autonumber
+    actor U as 用户 / 宿主
+    participant S as Python SDK [S]
+    participant C as native CLI [内部不透明]
+    participant M as Claude 服务 [D 协议]
+    participant T as 内置工具 / MCP [D]
+    U->>S: query(prompt, options) 或 client.connect/query
+    S->>C: spawn --input-format stream-json --output-format stream-json
+    S->>C: control_request initialize（hook IDs / agents / skills）
+    C-->>S: control_response（同 request_id）
+    S->>C: NDJSON user；可带 client_composed
+    Note over C: 输入/附件、hooks、上下文准备 [D]；具体内部函数 [U]
+    opt 配置了 SDK UserPromptSubmit hook
+        C->>S: control_request hook_callback
+        S-->>C: control_response 允许 / 阻止 / additionalContext
+    end
+    loop 模型与工具迭代 [D]
+        C->>M: 系统指令 + history + 工具定义 [D]
+        M-->>C: 文本 / tool_use 及 SSE 事件 [D 契约]
+        opt include_partial_messages=True
+            C-->>S: stream_event：start / delta 等
+            S-->>U: StreamEvent；宿主累积 text / input_json delta
+        end
+        C-->>S: assistant（非空 content block 完成）[D]
+        S-->>U: AssistantMessage [S 解析]
+        Note over C,S: partial 开启时，AssistantMessage 先于对应 content_block_stop [D]
+        alt 模型请求工具
+            Note over C: PreToolUse → deny / ask / mode / allow / callback [D]
+            opt 需要宿主审批
+                C->>S: control_request can_use_tool
+                S->>U: 应用审批逻辑
+                U-->>S: allow / deny / updatedInput
+                S-->>C: control_response
+            end
+            alt 工具被允许
+                C->>T: 执行工具；SDK MCP 可回经 S [D/S]
+                T-->>C: 工具结果 / 错误
+            else 工具被拒绝
+                Note over C: 将拒绝信息反馈给模型 [D]
+            end
+            C-->>S: user / tool_result 数据消息 [D]
+            Note over C: 更新上下文，再次模型请求 [D]
+        else 产出最终文本或达到限制
+            C-->>S: result：文本、usage、is_error、session_id
+            S-->>U: ResultMessage
+        end
+    end
+    opt 用户请求中断
+        U->>S: client.interrupt()
+        S->>C: control_request interrupt [S]
+        C-->>S: control_cancel_request / 终止相关事件 [S 支持]
+    end
+    Note over S,C: result 不必等于进程 EOF；后台任务可能继续 [S]
+    Note over S,U: receive_response() 在首个 result 结束；接收完整流需 receive_messages() [S]

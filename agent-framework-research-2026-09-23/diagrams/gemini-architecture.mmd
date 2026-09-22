@@ -1,0 +1,57 @@
+flowchart TB
+  U["用户：终端 / stdin / prompt"]
+  subgraph CLI["packages/cli：默认宿主和外层工具循环 [S]"]
+    IN["输入分流 G01-G02<br/>slash / @ / 普通内容<br/>shell mode 仅交互入口"]
+    LOCAL["本地命令或直接调度工具<br/>可以不调用 LLM"]
+    HOST["交互 useGeminiStream<br/>headless runNonInteractive"]
+    VIEW["Content / Thought / 工具状态<br/>Ink UI 或 text / JSON / stream-json"]
+    COLLECT["收集 ToolCallRequest<br/>流结束后批量 schedule"]
+    BACK["合并 responseParts<br/>交互 submitQuery continuation<br/>headless 更新 currentMessages"]
+  end
+  subgraph CORE["packages/core：推理控制与状态 [S]"]
+    MEM["分层上下文 G03-G06<br/>Tier 1 system memory<br/>Tier 2 首条 user 环境<br/>Tier 3 JIT 工具上下文<br/>skills 目录 + 按需激活"]
+    CLIENT["GeminiClient G07-G09<br/>BeforeAgent / 压缩或ContextManager<br/>token检查 / loop检测 / 模型路由"]
+    TURN["Turn G15<br/>标准 GeminiEvent 流"]
+    CHAT["GeminiChat G10-G11<br/>sendPromise / AgentChatHistory<br/>请求整理 / hooks / 重试"]
+    REQ["GenerateContentParameters<br/>model + contents + config<br/>systemInstruction + tools + abortSignal"]
+    GEN["ContentGenerator 接口 G12"]
+    LOG["ChatRecordingService<br/>历史与工具元数据 G36"]
+    SCHED["Scheduler G18-G22<br/>注册表解析与验证 → BeforeTool<br/>PolicyEngine → 确认 → 执行"]
+    BUS["MessageBus<br/>ALLOW / DENY / ASK_USER"]
+    TOOLS["内置工具 / MCP / agent / skills<br/>连续可并行批次 Promise.all<br/>edit 与 topic 串行；wait_for_previous"]
+    RESULT["ToolResult G40<br/>llmContent → functionResponse<br/>returnDisplay → 用户界面"]
+    OPT["可选迁移路径 G30-G33<br/>LegacyAgentProtocol / LegacyAgentSession<br/>在 core 中拥有外层工具循环<br/>配置默认关闭"]
+  end
+  subgraph NET["传输适配和远端边界 [S] / 服务内部未知 [U]"]
+    SDK["API key / Vertex / gateway<br/>GoogleGenAI.models"]
+    CA["OAuth / Compute ADC<br/>CodeAssistServer<br/>请求转换 / POST alt=sse"]
+    MODEL["Gemini / Code Assist 服务<br/>内部推理与服务调度 [U]"]
+  end
+  U --> IN
+  IN --> LOCAL
+  IN --> HOST
+  MEM --> CLIENT
+  HOST --> CLIENT
+  CLIENT --> TURN
+  TURN --> CHAT
+  CHAT --> REQ --> GEN
+  CHAT --> LOG
+  GEN --> SDK --> MODEL
+  GEN --> CA --> MODEL
+  MODEL -->|GenerateContentResponse| CHAT
+  CHAT -->|chunk / retry| TURN
+  TURN -->|GeminiEvent| VIEW
+  TURN -->|ToolCallRequest| COLLECT
+  COLLECT --> SCHED
+  SCHED <--> BUS
+  BUS <--> VIEW
+  SCHED --> TOOLS --> RESULT
+  RESULT --> VIEW
+  RESULT --> BACK --> CLIENT
+  IN -. feature flag .-> OPT
+  OPT -. owns loop .-> CLIENT
+  OPT -. schedule .-> SCHED
+  classDef optional fill:#fff6df,stroke:#b78725,stroke-dasharray:5 4;
+  classDef unknown fill:#f1f3f7,stroke:#7c879b,stroke-dasharray:5 4;
+  class OPT optional;
+  class MODEL unknown;
