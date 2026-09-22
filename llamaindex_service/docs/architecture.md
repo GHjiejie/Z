@@ -1,6 +1,8 @@
 # LlamaIndex 企业知识库与 RAG 服务方案
 
-状态：待 review · 日期：2026-09-22 · 本轮仅设计，不实现、不部署
+状态：已批准并进入实现 · 日期：2026-09-22
+
+用户已批准本方案。下文保留设计基线；实际实现方式、验证结果和未完成的外部验收见 [实现与验证记录](implementation.md)，启动和操作见 [README](../README.md)。
 
 ## 1. 目标与推荐决策
 
@@ -92,7 +94,7 @@ IngestionPipeline 支持转换、缓存及基于文档 ID/哈希的变更检测�
 ### 6.1 上传与处理
 
 1. 用户上传到指定知识库，API 先检查写权限、文件类型与大小，流式保存文件并计算 SHA-256。
-2. 默认单文件上限 20 MiB，PDF/DOCX 上限 500 页；可由管理员配置。校验 MIME 与文件签名，DOCX 设置解压大小、压缩比和条目数限制。
+2. 默认单文件上限 20 MiB，PDF 上限 500 个物理页；DOCX 检查显式分页符并限制解压大小、压缩比、条目数及提取字符数，不承诺推断自动排版后的页数。限额可配置，校验 MIME 与文件签名。
 3. 完整文件写入不可变对象路径后，在一个数据库事务中创建 `DocumentVersion` 和 `IngestionJob`，返回 `202 + document_id + version_id + job_id`。数据库提交失败产生的孤立对象由清理任务回收。
 4. Worker 以 `FOR UPDATE SKIP LOCKED` 领取任务，设置租约、心跳和领取代次；执行解析 → 分块 → 向量化 → 暂存索引 → 校验 → 发布。
 5. 解析保留标题层级、PDF 物理页号、段落或表格标识。DOCX 没有稳定页码时返回章节与段落，不制造页码。扫描件或空文本返回明确的“需要 OCR”状态。
@@ -233,7 +235,7 @@ LlamaIndex 的内部序列化结构不是对外 API。业务表作为事实来�
 
 ## 11. 后续目录规划
 
-以下仅为实现规划；当前仅 README 和本文已创建。
+以下为原始模块规划；当前实现按相同职责组织，实际文件以 README 和源码为准。
 
 ```text
 llamaindex_service/
@@ -299,11 +301,11 @@ PostgreSQL 与原文对象均需备份，恢复演练校验对象、活动版本
 | 部署 | 本地 Compose 开发；生产对象存储 | 生产云厂商、认证 issuer 和存储参数在部署阶段确定 |
 | 与已有项目关系 | 独立新服务，后续 API 集成 | 一期不承担旧知识库迁移或 Agent 平台改造 |
 
-优先 review：一期是否只做后端、是否接受 PostgreSQL/pgvector、首批文档是否必须包含飞书同步或扫描 PDF，以及模型是否必须完全内网运行。以上建议尚未视为用户已批准的实现范围。
+用户已确认按本方案实施：一期后端 API、PostgreSQL/pgvector、手动上传。飞书同步和 OCR 保持后续范围；真实 Embedding 模型、生产端点及部署验收需要外部配置。
 
 ## 15. 参考与验证边界
 
-官方资料于 2026-09-22 查阅，用于确认组件职责与可集成方向；任务队列、权限、版本发布、API 和验收标准属于本方案设计，不是 LlamaIndex 自动提供的产品能力。文中组件和接口以 P0 锁定版本及验证结果为准，本轮没有安装依赖、运行模型或进行性能测试。
+官方资料于 2026-09-22 查阅，用于确认组件职责与可集成方向；任务队列、权限、版本发布、API 和验收标准属于本方案设计，不是 LlamaIndex 自动提供的产品能力。组件和接口以锁定版本及实际验证为准，实施后的验证记录另见 [实现与验证记录](implementation.md)。
 
 - [LlamaIndex Ingestion Pipeline](https://developers.llamaindex.ai/python/framework/module_guides/loading/ingestion_pipeline/)
 - [LlamaIndex PostgreSQL Vector Store](https://developers.llamaindex.ai/python/framework/integrations/vector_stores/postgres/)

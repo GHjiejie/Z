@@ -1,0 +1,20 @@
+{"id":"atlas-01","query":"Atlas 默认请求超时是多少秒？最多重试几次？","answerable":true,"expected_sources":["atlas-service.md"],"split":"synthetic_smoke"}
+{"id":"atlas-02","query":"Which API path retrieves an Atlas task's status?","answerable":true,"expected_sources":["atlas-service.md"],"split":"synthetic_smoke"}
+{"id":"atlas-03","query":"ATLAS-TIMEOUT 错误码是什么意思，重试前需要检查什么？","answerable":true,"expected_sources":["atlas-service.md"],"split":"synthetic_smoke"}
+{"id":"atlas-04","query":"When is the Atlas release window and who maintains the service?","answerable":true,"expected_sources":["atlas-service.md"],"split":"synthetic_smoke"}
+{"id":"expense-01","query":"市内交通报销需要哪些材料，单次金额上限是多少？","answerable":true,"expected_sources":["expense-policy.md"],"split":"synthetic_smoke"}
+{"id":"expense-02","query":"What is the expense submission deadline and how long does Finance review take?","answerable":true,"expected_sources":["expense-policy.md"],"split":"synthetic_smoke"}
+{"id":"expense-03","query":"海外差旅需要谁批准？外币按哪天的汇率换算？","answerable":true,"expected_sources":["expense-policy.md"],"split":"synthetic_smoke"}
+{"id":"expense-04","query":"How can I submit an expense claim if I lost the invoice?","answerable":true,"expected_sources":["expense-policy.md"],"split":"synthetic_smoke"}
+{"id":"onboarding-01","query":"新员工首个工作日需要启用什么认证？谁负责电脑交接？","answerable":true,"expected_sources":["onboarding-guide.md"],"split":"synthetic_smoke"}
+{"id":"onboarding-02","query":"Who approves and provisions repository access for new employees?","answerable":true,"expected_sources":["onboarding-guide.md"],"split":"synthetic_smoke"}
+{"id":"onboarding-03","query":"VPN 可以使用个人设备吗？MFA 重置找谁处理？","answerable":true,"expected_sources":["onboarding-guide.md"],"split":"synthetic_smoke"}
+{"id":"onboarding-04","query":"When is orientation and when must probation objectives be agreed?","answerable":true,"expected_sources":["onboarding-guide.md"],"split":"synthetic_smoke"}
+{"id":"incident-01","query":"S1 故障多久内必须确认？多久更新一次进展？","answerable":true,"expected_sources":["incident-runbook.md"],"split":"synthetic_smoke"}
+{"id":"incident-02","query":"Who is the initial incident commander and what is recorded at handover?","answerable":true,"expected_sources":["incident-runbook.md"],"split":"synthetic_smoke"}
+{"id":"incident-03","query":"通过功能开关回退后，需要观察多久才能宣布恢复？","answerable":true,"expected_sources":["incident-runbook.md"],"split":"synthetic_smoke"}
+{"id":"incident-04","query":"When is the incident review due and what should it contain?","answerable":true,"expected_sources":["incident-runbook.md"],"split":"synthetic_smoke"}
+{"id":"unknown-01","query":"2027 年公司年度营业收入是多少？","answerable":false,"expected_sources":[],"split":"synthetic_smoke"}
+{"id":"unknown-02","query":"What is the cafeteria menu this coming Friday?","answerable":false,"expected_sources":[],"split":"synthetic_smoke"}
+{"id":"unknown-03","query":"上海办公室 2028 年租约的到期日期是哪天？","answerable":false,"expected_sources":[],"split":"synthetic_smoke"}
+{"id":"unknown-04","query":"How many employees work in the company Tokyo office?","answerable":false,"expected_sources":[],"split":"synthetic_smoke"}

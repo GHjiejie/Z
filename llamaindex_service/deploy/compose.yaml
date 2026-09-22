@@ -1,0 +1,55 @@
+name: z-llamaindex
+services:
+  postgres:
+    image: pgvector/pgvector:0.8.1-pg17@sha256:3e8b3adfd27b5707128f60956f62a793c3c9326ea8cfaf0eab7adccb5d700b21
+    environment:
+      POSTGRES_USER: rag
+      POSTGRES_PASSWORD: ${RAG_DB_PASSWORD:-rag}
+      POSTGRES_DB: rag
+    ports:
+      - "127.0.0.1:55432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U rag -d rag"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+  api:
+    profiles: ["service"]
+    build:
+      context: ../..
+      dockerfile: llamaindex_service/deploy/Dockerfile
+    env_file: ../../.env
+    environment:
+      RAG_DATABASE_URL: ${RAG_API_DATABASE_URL:-postgresql+psycopg://rag:${RAG_DB_PASSWORD:-rag}@postgres:5432/rag}
+      RAG_AUTH_MODE: jwt
+      RAG_AUTO_MIGRATE: "false"
+      RAG_STORAGE_PATH: /app/llamaindex_service/data/objects
+    ports:
+      - "127.0.0.1:8090:8090"
+    volumes:
+      - objects:/app/llamaindex_service/data/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+  worker:
+    profiles: ["service"]
+    build:
+      context: ../..
+      dockerfile: llamaindex_service/deploy/Dockerfile
+    env_file: ../../.env
+    environment:
+      RAG_DATABASE_URL: ${RAG_WORKER_DATABASE_URL:-postgresql+psycopg://rag:${RAG_DB_PASSWORD:-rag}@postgres:5432/rag}
+      RAG_AUTH_MODE: jwt
+      RAG_AUTO_MIGRATE: "false"
+      RAG_STORAGE_PATH: /app/llamaindex_service/data/objects
+    command: ["uv", "run", "--no-sync", "python", "-m", "llamaindex_service.workers"]
+    volumes:
+      - objects:/app/llamaindex_service/data/objects
+    depends_on:
+      postgres:
+        condition: service_healthy
+volumes:
+  postgres_data:
+  objects:
