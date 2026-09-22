@@ -6,6 +6,7 @@ Python 使用仓库根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`；没�
 
 ## 文档
 
+- [当前实现架构图](docs/architecture-diagrams.md)：系统组件、本地/容器部署拓扑、Agent 调用时序与计费状态。
 - [架构设计方案](docs/architecture.md)：长期架构与责任边界。
 - [第一版实现契约](docs/implementation-contract.md)：API、运行协议与模块接口。
 - [实际完成范围](docs/implementation-status.md)：当前功能、设计差异和验证记录。
