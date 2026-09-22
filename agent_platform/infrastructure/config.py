@@ -3,6 +3,7 @@
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 @dataclass(frozen=True)
@@ -11,6 +12,7 @@ class Settings:
     redis_url: str | None = None
     litellm_url: str = ""
     litellm_key: str = ""
+    litellm_admin_url: str = ""
     gateway_local_address: str | None = None
     default_model: str = ""
     default_model_input_price: str = ""
@@ -26,6 +28,34 @@ class Settings:
     worker_poll_seconds: float = 0.5
     web_directory: Path = Path(__file__).resolve().parents[1] / "apps/web/dist"
 
+    def __post_init__(self) -> None:
+        if not self.litellm_admin_url:
+            return
+        # This address is returned to the browser as an external link. Reject
+        # credentials and ambiguous browser URL syntax before it can be exposed.
+        try:
+            url = urlsplit(self.litellm_admin_url)
+            valid = (
+                url.scheme in {"http", "https"}
+                and bool(url.hostname)
+                and url.username is None
+                and url.password is None
+                and not any(char in self.litellm_admin_url for char in "\\?#")
+                and not any(
+                    char.isspace() or ord(char) < 32 or ord(char) == 127
+                    for char in self.litellm_admin_url
+                )
+                and "%" not in url.netloc
+                and (url.port is None or 0 < url.port <= 65535)
+            )
+        except ValueError:
+            valid = False
+        if not valid:
+            raise ValueError(
+                "PLATFORM_LITELLM_ADMIN_URL must be an HTTP(S) URL without "
+                "credentials, query parameters or fragments."
+            )
+
     @classmethod
     def from_env(cls) -> "Settings":
         return cls(
@@ -33,6 +63,7 @@ class Settings:
             redis_url=os.getenv("PLATFORM_REDIS_URL") or None,
             litellm_url=os.getenv("PLATFORM_LITELLM_URL", ""),
             litellm_key=os.getenv("PLATFORM_LITELLM_KEY", ""),
+            litellm_admin_url=os.getenv("PLATFORM_LITELLM_ADMIN_URL", "").strip(),
             gateway_local_address=os.getenv("PLATFORM_GATEWAY_LOCAL_ADDRESS") or None,
             default_model=os.getenv("PLATFORM_DEFAULT_MODEL", "").strip(),
             default_model_input_price=os.getenv(

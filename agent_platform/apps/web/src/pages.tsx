@@ -28,6 +28,7 @@ import type {
   Agent,
   Audit,
   Dashboard,
+  GatewayAdmin,
   Ledger,
   Model,
   Quota,
@@ -635,6 +636,74 @@ function AgentEditor({
         )}
       </Form>
     </Modal>
+  );
+}
+
+export function GatewayPage() {
+  const resource = useResource<GatewayAdmin>("/gateway");
+  const gateway = resource.data;
+  return (
+    <>
+      <PageTitle
+        eyebrow="MODEL GATEWAY"
+        title="LiteLLM 网关"
+        description="进入 LiteLLM 管理台，管理上游模型、访问密钥与网关调用用量。"
+        action={
+          <Button variant="secondary" onClick={() => void resource.reload()}>
+            <RefreshCw size={16} />
+            刷新配置
+          </Button>
+        }
+      />
+      <ResourceState
+        loading={resource.loading}
+        error={resource.error}
+        retry={() => void resource.reload()}
+      >
+        {gateway?.configured && gateway.admin_url ? (
+          <Panel
+            title="LiteLLM Admin UI"
+            detail="管理入口已配置"
+            className="gateway-panel"
+          >
+            <div className="gateway-details">
+              <p>
+                管理台将在新标签页中打开，请使用 LiteLLM 管理员账号登录。
+                在这里配置模型供应商、虚拟密钥、网关限流和调用记录。
+              </p>
+              <span className="gateway-address">{gateway.admin_url}</span>
+              <a
+                className="button primary"
+                href={gateway.admin_url}
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                打开 LiteLLM 管理台
+                <ExternalLink size={16} />
+              </a>
+              <p className="gateway-help">
+                如果页面无法打开，请检查 LiteLLM 服务是否已启动。
+                此处显示的是入口配置状态。
+              </p>
+            </div>
+          </Panel>
+        ) : gateway ? (
+          <Panel>
+            <Empty
+              title="尚未配置 LiteLLM 管理入口"
+              description="启动 LiteLLM 管理服务并配置管理入口后，刷新此页即可打开管理台。"
+            />
+          </Panel>
+        ) : null}
+      </ResourceState>
+      <div className="inline-note gateway-note">
+        <ShieldCheck size={17} />
+        <span>
+          Agent 平台的模型报价、成员余额和 Agent 运行记录仍在本平台管理。
+          LiteLLM 的调用费用反映网关侧的统计口径。
+        </span>
+      </div>
+    </>
   );
 }
 

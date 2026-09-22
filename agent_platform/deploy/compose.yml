@@ -7,12 +7,13 @@ x-platform: &platform
     dockerfile: agent_platform/deploy/Dockerfile
   restart: unless-stopped
   env_file:
-    - path: ../.data/.env.gateway
+    - path: ${GATEWAY_BOOTSTRAP_DIR:-../.data}/.env.gateway
       required: false
   environment: &platform-environment
     PLATFORM_DATABASE_URL: postgresql+psycopg://platform:${PLATFORM_DB_PASSWORD:?Set PLATFORM_DB_PASSWORD}@postgres:5432/platform
     PLATFORM_REDIS_URL: redis://redis:6379/0
     PLATFORM_LITELLM_URL: http://litellm:4000/v1
+    PLATFORM_LITELLM_ADMIN_URL: ${PLATFORM_LITELLM_ADMIN_URL:-http://127.0.0.1:${LITELLM_HTTP_PORT:-4000}/ui}
     PLATFORM_EMBEDDED_WORKER: "false"
     PLATFORM_SECURE_COOKIES: ${PLATFORM_SECURE_COOKIES:-false}
     PLATFORM_RUN_TIMEOUT: ${PLATFORM_RUN_TIMEOUT:-300}
@@ -53,10 +54,14 @@ services:
     image: ghcr.io/berriai/litellm:v1.83.0-nightly@sha256:3a8f981557838dea1340d318ba22225bfc2f2e86e4b415d6b1bc9cbe8dd26b72
     restart: unless-stopped
     command: ["--config", "/app/platform-config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    ports:
+      - "127.0.0.1:${LITELLM_HTTP_PORT:-4000}:4000"
     environment:
       DATABASE_URL: postgresql://litellm:${LITELLM_DB_PASSWORD:?Set LITELLM_DB_PASSWORD}@postgres:5432/litellm
       LITELLM_MASTER_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY}
       LITELLM_SALT_KEY: ${LITELLM_SALT_KEY:?Set LITELLM_SALT_KEY}
+      UI_USERNAME: ${UI_USERNAME:-admin}
+      UI_PASSWORD: ${UI_PASSWORD:?Set UI_PASSWORD independently of gateway keys}
       UPSTREAM_MODEL: ${UPSTREAM_MODEL:-openai/gpt-4o-mini}
       UPSTREAM_API_BASE: ${UPSTREAM_API_BASE:-https://api.openai.com/v1}
       UPSTREAM_API_KEY: ${UPSTREAM_API_KEY:-}
@@ -65,12 +70,12 @@ services:
       GATEWAY_KEY_RPM: ${GATEWAY_KEY_RPM:-60}
       GATEWAY_KEY_TPM: ${GATEWAY_KEY_TPM:-120000}
       GATEWAY_KEY_CONCURRENT: ${GATEWAY_KEY_CONCURRENT:-4}
-      STORE_MODEL_IN_DB: "false"
+      STORE_MODEL_IN_DB: "true"
       LITELLM_LOG: ERROR
     volumes:
       - ./litellm.yaml:/app/platform-config.yaml:ro
       - ./bootstrap_gateway_key.py:/app/platform-bootstrap-key.py:ro
-      - ../.data:/bootstrap
+      - ${GATEWAY_BOOTSTRAP_DIR:-../.data}:/bootstrap
     depends_on:
       postgres:
         condition: service_healthy

@@ -2,6 +2,8 @@ ROOT := $(abspath $(dir $(lastword $(MAKEFILE_LIST)))/..)
 ENV_FILE ?= $(ROOT)/agent_platform/.env
 PORT ?= 8000
 HOST ?= 127.0.0.1
+GATEWAY ?= managed
+LITELLM_PORT ?= 4000
 STATE_DIR ?= $(ROOT)/agent_platform/.data/local
 ENV_PATH := $(abspath $(ENV_FILE))
 STATE_PATH := $(abspath $(STATE_DIR))
@@ -14,7 +16,7 @@ LOCAL := uv run --no-sync python -m agent_platform.scripts.local
 
 # Dependencies are prepared sequentially by the supervisor, including under -j.
 start:
-	@cd "$(ROOT)" && $(LOCAL) start --env-file "$(ENV_PATH)" --state-dir "$(STATE_PATH)" --host "$(HOST)" --port "$(PORT)"
+	@cd "$(ROOT)" && $(LOCAL) start --env-file "$(ENV_PATH)" --state-dir "$(STATE_PATH)" --host "$(HOST)" --port "$(PORT)" --gateway "$(GATEWAY)" --gateway-port "$(LITELLM_PORT)"
 
 run: start
 
@@ -25,8 +27,10 @@ status:
 	@cd "$(ROOT)" && $(LOCAL) status --state-dir "$(STATE_PATH)"
 
 help:
-	@echo 'make start / make     一键准备并启动；Ctrl+C 停止'
+	@echo 'make start / make     一键启动平台和 LiteLLM 管理页（需要 Docker）；Ctrl+C 停止'
 	@echo 'make start PORT=8010  使用指定端口'
+	@echo 'make start LITELLM_PORT=4001  修改 LiteLLM 管理页与网关端口'
+	@echo 'make start GATEWAY=external  使用配置中的外部网关，不启动本地 LiteLLM'
 	@echo 'make status / stop    查看状态 / 停止本脚本启动的服务'
 	@echo 'make dev / web        分别运行后端 / Vite 热更新前端'
 	@echo 'make infra / gateway-key / up / down  Docker 部署命令'

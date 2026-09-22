@@ -4,17 +4,21 @@
 
 ## 本地启动
 
-安装 `uv`、Node.js/npm 与 make 后，从仓库根目录执行一条命令：
+安装 `uv`、Node.js/npm 与 make 并启动 Docker 后，从仓库根目录执行一条命令：
 
 ```bash
 make -C agent_platform start
 ```
 
-在 `agent_platform` 内直接执行 `make`、`make start` 或 `make run` 等价。该入口串行完成 `uv sync --frozen --all-groups`、`npm ci`、前端构建、数据库迁移和账号初始化，健康检查通过后才报告就绪。仓库共用同一个 Python 环境，保留全部依赖组可以避免启动平台时卸载其他示例所需的包。React 构建产物由 API 同源提供，不需要额外启动 Vite。
+在 `agent_platform` 内执行 `make`、`make start` 或 `make run` 等价。该入口串行完成依赖准备、LiteLLM / PostgreSQL / Redis 启动、受限调用密钥引导、前端构建、平台数据库迁移和账号初始化，健康检查通过后才报告就绪。Python 使用 `uv sync --frozen --all-groups` 保留仓库共用环境。React 由 API 同源提供，无需额外启动 Vite。
 
 缺少 `.env` 时，从模板自动创建权限为0600的配置，并生成随机初始密码；默认邮箱 `admin@example.com`。密码在 `.env` 中查看，不会打印到启动日志。已有文件完整保留；已有账号不会因引导变量改变而重置。显式设置的环境变量优先于平台文件，平台文件优先于仓库根目录 `.env`；如果已有配置的密码为空且数据库尚无管理员，初始化会明确报错，需要自行填写至少12位密码。
 
-一键启动读取根目录 `.env` 中的 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `MODEL`。当平台文件中的 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 为空时，前两项作为 OpenAI 兼容网关配置回退。该映射只存在于当前进程内，不会复制或输出密钥。生产部署仍应使用独立的 `PLATFORM_LITELLM_URL` 和受限密钥。
+一键启动默认使用 `GATEWAY=managed`，读取根目录 `.env` 中的 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `MODEL`，将上游模型配置为 `openai/<MODEL>`，对平台提供同名别名。有显式 `UPSTREAM_API_KEY` 时使用 `UPSTREAM_MODEL` / `UPSTREAM_API_BASE` / `UPSTREAM_API_KEY`。平台运行进程只接收本机 LiteLLM 地址与受限 key；master key、UI 密码和上游 key 不进入平台运行进程。
+
+官方管理页面默认是 `http://127.0.0.1:4000/ui`，平台管理员从侧栏「LiteLLM 网关」进入。首次启动自动生成 `.data/local/gateway/.env.control`（权限0600），其中 `UI_USERNAME` 默认为 `admin`，`UI_PASSWORD` 是独立管理页密码；数据库密码、master key、salt 也在该文件中持久保存。运行密钥保存在同目录 `.env.gateway`，仅允许当前别名的 Chat Completions，并有预算、RPM、TPM、并发与30天过期限制。重启验证后复用该密钥，不重置有效期，不自动轮换；无效或过期时启动失败并明确提示。请不要删除控制文件后复用旧数据库卷，否则保存的加密数据和数据库认证将无法匹配。
+
+本地容器归属于由 `STATE_DIR` 派生的独立 Compose 项目，平台仍使用现有 SQLite 数据。`make stop` / Ctrl+C 停止该实例的网关容器并保留卷；不会停止其他 Compose 项目。`LITELLM_PORT` 控制本机管理页与调用端口。Docker 不可用时不会偷偷回退直连上游；已有外部服务可显式使用 `GATEWAY=external`，此时读取 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY`，空值回退根 `OPENAI_*`，并可通过 `PLATFORM_LITELLM_ADMIN_URL` 指定外部管理页。
 
 默认模型通过 `PLATFORM_DEFAULT_MODEL` 配置，一键启动也会从根 `MODEL` 回退读取。模型目录显示默认标记，创建 Agent 时预选已启用的默认模型。首次注册默认模型时可设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 和 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token），启动时会为配置管理员所属组织创建模型；重启不覆盖已存在的模型。没有报价时仅在页面提示和预填，不自动生成收费价格。
 
@@ -22,6 +26,8 @@ make -C agent_platform start
 
 ```bash
 make -C agent_platform start PORT=8010
+make -C agent_platform start PORT=8010 LITELLM_PORT=4001
+make -C agent_platform start PORT=8010 GATEWAY=external
 make -C agent_platform status
 make -C agent_platform stop
 ```
@@ -34,7 +40,7 @@ make -C agent_platform stop
 
 每个 Run 默认最高预占/消费合计 1 USD，可通过 `PLATFORM_MAX_RUN_COST` 设置有限正数。`PLATFORM_RUN_TIMEOUT` 同时限制排队和执行时长（默认300秒）；`PLATFORM_MODEL_TIMEOUT` 限制单次网关调用（默认90秒）。
 
-已有 LiteLLM Proxy 时，设置：
+已有 LiteLLM Proxy、使用 `GATEWAY=external` 启动时，设置：
 
 ```dotenv
 PLATFORM_LITELLM_URL=http://127.0.0.1:4000/v1
@@ -49,7 +55,7 @@ PLATFORM_LITELLM_KEY=受限的LiteLLM虚拟密钥
 
 需要 Docker Compose 2.24 或更高版本，支持可选 `env_file`。构建上下文是仓库根目录；构建使用根 `uv.lock`，并在构建阶段生成 React 静态资源。不要移动部署目录后直接构建。
 
-默认仅在 `127.0.0.1:8000` 暴露平台 API/静态页面。PostgreSQL、Redis、LiteLLM 均只在 Compose 网络内开放。部署包含：
+默认在 `127.0.0.1:8000` 暴露平台 API/静态页面，并在 `127.0.0.1:4000` 暴露 LiteLLM 管理页和网关接口。PostgreSQL、Redis 只在 Compose 网络内开放。部署包含：
 
 | 服务 | 用途 |
 | --- | --- |
@@ -69,6 +75,9 @@ PLATFORM_LITELLM_KEY=受限的LiteLLM虚拟密钥
 | `LITELLM_DB_PASSWORD` | LiteLLM 数据库角色密码，推荐独立随机十六进制字符串 |
 | `LITELLM_MASTER_KEY` | LiteLLM 管理密钥，以 `sk-` 开头；不注入 API 和 Worker |
 | `LITELLM_SALT_KEY` | 独立随机加密盐；首次部署后保留，不随重启更改 |
+| `UI_USERNAME` / `UI_PASSWORD` | LiteLLM 管理页账号与独立密码；密码必填，不能使用平台运行 key |
+| `LITELLM_HTTP_PORT` | LiteLLM 本机端口，默认4000 |
+| `PLATFORM_LITELLM_ADMIN_URL` | 外部模式 / 完整容器部署的浏览器可访问管理地址 |
 | `UPSTREAM_MODEL` | LiteLLM provider/model，例如 `openai/gpt-4o-mini` |
 | `UPSTREAM_API_BASE` | 上游接口地址，例如 `https://api.openai.com/v1` |
 | `UPSTREAM_API_KEY` | 真实上游模型密钥，仅 LiteLLM 持有 |
@@ -86,7 +95,7 @@ make -C agent_platform up
 
 默认运行密钥有效期 30 天，生命周期成本上限 100 USD、RPM 60、TPM 120000、并发 4，可在 `.env` 中通过 `GATEWAY_KEY_*` 调整。这里的网关预算是第二层上游保护，和平台钱包分别维护；生成密钥不会给平台充值。生产应建立到期前轮换流程。脚本发现输出文件已存在会拒绝再生成，避免重复创建凭据；轮换要在 LiteLLM 管理侧显式创建新 key、更新文件并重建 API/Worker，然后撤销旧 key。
 
-`up` 构建并启动平台服务。Compose 的数据库地址、Redis 地址、内嵌 Worker 开关均显式覆盖本地 `.env` 值。不要把 master key 填入 `PLATFORM_LITELLM_KEY`。支持更多模型时，应同时更新 LiteLLM `model_list`、运行密钥的模型白名单和平台模型目录；当前引导脚本只为一个别名授权。
+`up` 构建并启动平台服务。Compose 的数据库地址、Redis 地址、内嵌 Worker 开关均显式覆盖本地 `.env` 值。不要把 master key 填入 `PLATFORM_LITELLM_KEY`。LiteLLM 允许在管理页中新增模型并持久化至其数据库；支持更多模型时仍需同步更新运行密钥的模型白名单和平台模型目录，当前引导脚本只为一个别名授权。平台目录中的报价与 LiteLLM 上游成本配置各自维护，不会自动互相同步。
 
 `agent_platform/.env` 中的 `PLATFORM_LITELLM_KEY` 供本地运行使用；Compose 中的运行 key 由 `.data/.env.gateway` 单独注入。已有受限 key 的管理员可直接创建该 0600 文件，内容为单行 `PLATFORM_LITELLM_KEY=...`，无需重复引导。
 

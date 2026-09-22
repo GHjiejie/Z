@@ -5,6 +5,7 @@ import unittest
 from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select, update
@@ -52,6 +53,7 @@ class APIIntegrationTest(unittest.TestCase):
             embedded_worker=False,
             litellm_url="http://test",
             litellm_key="test",
+            litellm_admin_url="http://127.0.0.1:4017/ui",
             web_directory=Path(self.temporary.name) / "web",
         )
         self.gateway = FakeGateway()
@@ -86,6 +88,66 @@ class APIIntegrationTest(unittest.TestCase):
             result = client.get("/api/v1/models")
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.json(), {"items": [], "default_model": "k3"})
+
+    def test_gateway_admin_entry_is_admin_only_and_does_not_expose_secrets(self):
+        result = self.request("GET", "/gateway")
+        self.assertEqual(result.status_code, 200)
+        self.assertEqual(
+            result.json(),
+            {"admin_url": "http://127.0.0.1:4017/ui", "configured": True},
+        )
+        self.assertNotIn(self.settings.litellm_key, result.text)
+        self.assertNotIn(self.settings.admin_password, result.text)
+        self.assertEqual(self.request("GET", "/gateway", auth=None).status_code, 401)
+        member = self.create_user()
+        context = self.login(member["email"])
+        self.assertEqual(self.request("GET", "/gateway", auth=context).status_code, 403)
+
+    def test_gateway_without_admin_url_reports_unconfigured(self):
+        settings = replace(self.settings, litellm_admin_url="")
+        with TestClient(create_app(settings, gateway=self.gateway)) as client:
+            client.post(
+                "/api/v1/auth/login",
+                json={"email": settings.admin_email, "password": PASSWORD},
+            )
+            response = client.get("/api/v1/gateway")
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), {"admin_url": "", "configured": False})
+
+    def test_gateway_admin_url_rejects_unsafe_links_without_echoing_values(self):
+        for address in (
+            "javascript:alert(1)",
+            "//example.test/ui",
+            "/ui",
+            "http:///ui",
+            "https://user:secret@example.test/ui",
+            "https://user@example.test/ui",
+            "https://example.test/ui?key=secret",
+            "https://example.test/ui#secret",
+            "https://example.test/ui?",
+            "https://example.test/ui#",
+            "https://example.test\\@other.test/ui",
+            "https://example.test/\nui",
+            "https://example.test:invalid/ui",
+            "https://example.test:0/ui",
+            "https://example.test:99999/ui",
+            "https://example%2etest/ui",
+        ):
+            with self.subTest(address=address):
+                with self.assertRaises(ValueError) as raised:
+                    replace(self.settings, litellm_admin_url=address)
+                self.assertNotIn(address, str(raised.exception))
+
+    def test_gateway_admin_url_can_be_configured_with_custom_ports(self):
+        address = "https://gateway.example.test:4443/ui"
+        with patch.dict("os.environ", {"PLATFORM_LITELLM_ADMIN_URL": address}):
+            self.assertEqual(Settings.from_env().litellm_admin_url, address)
+        self.assertEqual(
+            replace(
+                self.settings, litellm_admin_url="http://[::1]:4001/ui"
+            ).litellm_admin_url,
+            "http://[::1]:4001/ui",
+        )
 
     def test_default_model_bootstrap_is_idempotent_and_preserves_catalog_edits(self):
         settings = replace(

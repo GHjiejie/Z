@@ -17,6 +17,10 @@ export type Model = {
   context_window: number;
   max_output_tokens: number;
 };
+export type GatewayAdmin = {
+  admin_url: string;
+  configured: boolean;
+};
 export type Agent = {
   id: string;
   name: string;

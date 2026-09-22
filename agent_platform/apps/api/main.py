@@ -228,6 +228,13 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
     def dashboard(user=Depends(auth)):
         return platform.dashboard(user)
 
+    @app.get("/api/v1/gateway")
+    def gateway_admin(_user=Depends(admin)):
+        return {
+            "admin_url": settings.litellm_admin_url,
+            "configured": bool(settings.litellm_admin_url),
+        }
+
     @app.get("/api/v1/users")
     def users(user=Depends(admin)):
         return {

@@ -36,6 +36,7 @@ import {
   DashboardPage,
   AgentsPage,
   ModelsPage,
+  GatewayPage,
   UsersPage,
   UsagePage,
   BillingPage,
@@ -51,6 +52,7 @@ type Route =
   | "playground"
   | "runs"
   | "models"
+  | "gateway"
   | "usage"
   | "billing"
   | "users"
@@ -80,6 +82,13 @@ const navigation: {
   { route: "models", title: "模型目录", icon: Boxes, group: "资源与费用" },
   { route: "usage", title: "调用统计", icon: Gauge, group: "资源与费用" },
   { route: "billing", title: "费用中心", icon: Wallet, group: "资源与费用" },
+  {
+    route: "gateway",
+    title: "LiteLLM 网关",
+    icon: SlidersHorizontal,
+    admin: true,
+    group: "组织管理",
+  },
   {
     route: "users",
     title: "成员管理",
@@ -315,6 +324,7 @@ function Workspace() {
           {safeRoute === "playground" && <Playground />}
           {safeRoute === "runs" && <RunsPage navigate={navigate} />}
           {safeRoute === "models" && <ModelsPage admin={admin} />}
+          {safeRoute === "gateway" && <GatewayPage />}
           {safeRoute === "users" && <UsersPage currentUser={user} />}
           {safeRoute === "usage" && <UsagePage />}
           {safeRoute === "billing" && <BillingPage admin={admin} />}

@@ -168,6 +168,7 @@ class Supervisor:
         self.state_dir = state_dir
         self.children: list[subprocess.Popen] = []
         self.state: dict = {}
+        self.gateway = None
 
     def record(self, phase: str) -> None:
         self.state["phase"] = phase
@@ -201,9 +202,22 @@ class Supervisor:
             except subprocess.TimeoutExpired:
                 os.killpg(child.pid, signal.SIGKILL)
                 child.wait()
+        if self.gateway is not None:
+            self.gateway.stop()
         (self.state_dir / "process.json").unlink(missing_ok=True)
 
-    def start(self, env_file: Path, host: str, port: int) -> None:
+    def start(
+        self,
+        env_file: Path,
+        host: str,
+        port: int,
+        gateway_mode: str = "managed",
+        gateway_port: int = 4000,
+    ) -> None:
+        if gateway_mode == "managed" and port == gateway_port:
+            raise RuntimeError(
+                "平台 PORT 与 LiteLLM 的 LITELLM_PORT 必须使用不同端口。"
+            )
         self.state_dir.mkdir(parents=True, exist_ok=True)
         with (self.state_dir / "process.lock").open("a") as lock:
             try:
@@ -238,6 +252,17 @@ class Supervisor:
                         f"已创建 {env_file}（仅当前用户可读写），初始管理员密码在 PLATFORM_ADMIN_PASSWORD 中。"
                     )
                 env = load_runtime_environment(env_file)
+                if gateway_mode == "managed":
+                    from agent_platform.scripts.gateway import LocalGateway
+
+                    self.record("准备 LiteLLM 网关与管理页")
+                    say("准备 LiteLLM、PostgreSQL 和 Redis；首次启动可能需要下载镜像…")
+                    self.gateway = LocalGateway(self.state_dir, env, gateway_port)
+                    env = self.gateway.start(self.run, check_port)
+                    self.state["gateway_url"] = self.gateway.url + "/ui"
+                    say(
+                        f"LiteLLM 管理页：{self.gateway.url}/ui；登录账号和密码保存在 {self.gateway.control_file}。"
+                    )
                 self.record("构建界面")
                 self.run(
                     ["npm", "--prefix", str(PLATFORM / "apps/web"), "run", "build"]
@@ -287,6 +312,8 @@ class Supervisor:
                     say(
                         "模型网关尚未配置：管理界面可用，接入真实模型请填写配置中的 LiteLLM 地址与受限密钥。"
                     )
+                elif self.gateway is not None:
+                    say("模型请求将经过本地 LiteLLM Proxy，平台已使用受限调用密钥。")
                 elif env.get("PLATFORM_DEFAULT_MODEL"):
                     say(
                         "已从有效配置接入 OpenAI 兼容模型网关；根目录密钥仅在当前进程中使用。"
@@ -307,6 +334,8 @@ def main() -> int:
     parser.add_argument("--state-dir", type=Path, default=PLATFORM / ".data/local")
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", type=int, default=8000)
+    parser.add_argument("--gateway", choices=["managed", "external"], default="managed")
+    parser.add_argument("--gateway-port", type=int, default=4000)
     args = parser.parse_args()
     os.chdir(ROOT)
 
@@ -319,7 +348,11 @@ def main() -> int:
             setup_database()
         elif args.action == "start":
             Supervisor(args.state_dir.resolve()).start(
-                args.env_file.resolve(), args.host, args.port
+                args.env_file.resolve(),
+                args.host,
+                args.port,
+                args.gateway,
+                args.gateway_port,
             )
         else:
             state = managed_state(args.state_dir)
@@ -328,9 +361,11 @@ def main() -> int:
                 return 0
             if args.action == "status":
                 say(f"{state['phase']}：{state['url']}（PID {state['pid']}）")
+                if state.get("gateway_url"):
+                    say(f"LiteLLM 管理页：{state['gateway_url']}")
             else:
                 os.kill(state["pid"], signal.SIGTERM)
-                for _ in range(75):
+                for _ in range(300):
                     if not managed_state(args.state_dir):
                         say("Agent Platform 已停止，配置和数据已保留。")
                         return 0

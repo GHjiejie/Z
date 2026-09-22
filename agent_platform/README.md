@@ -30,7 +30,7 @@ Python 使用仓库根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`；没�
 
 ## 一键启动
 
-先安装 `uv`、Node.js / npm 和 `make`，然后在本目录执行：
+先安装 `uv`、Node.js / npm、`make`，并启动 Docker，然后在本目录执行：
 
 ```bash
 make start
@@ -38,9 +38,11 @@ make start
 
 直接执行 `make` 或 `make run` 也会启动。从仓库根目录可以使用 `make -C agent_platform start`。
 
-启动命令会依次同步根 Python 环境的全部依赖组和前端依赖、构建 React、执行数据库迁移、初始化管理员，再启动提供前端页面的 API 和 Worker。缺少 `.env` 时自动从模板创建，生成随机管理员密码，配置文件权限为 `0600`；已有配置、账号和数据不会被覆盖。
+启动命令会同步依赖，启动独立的 LiteLLM Proxy、PostgreSQL 和 Redis，生成或验证受限模型调用密钥，再构建 React、迁移平台数据库、初始化管理员并启动 API / Worker。平台继续使用原有本地数据库，LiteLLM 使用独立数据库；已有配置、账号和数据不会被覆盖。缺少 `.env` 时自动创建并生成随机平台管理员密码。
 
-启动时也会读取仓库根目录的 `.env`。当平台配置中的 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 为空时，会在当前进程中使用根目录的 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，并读取 `MODEL`。密钥不会被复制到子目录配置或打印到日志；平台专用配置和当前进程变量的优先级更高。
+默认启动方式中，根目录 `.env` 的 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `MODEL` 用于配置 LiteLLM 的上游模型，平台通过本机 LiteLLM 和独立受限密钥调用。上游密钥不会复制到平台配置或打印到日志，也不会传入平台 API / Worker。已有显式 `UPSTREAM_API_KEY` 时使用 `UPSTREAM_*` 上游配置。
+
+LiteLLM 官方管理台默认位于 [http://127.0.0.1:4000/ui](http://127.0.0.1:4000/ui)。平台管理员可从侧栏的「LiteLLM 网关」打开它。默认用户名为 `admin`，独立登录密码保存在 `.data/local/gateway/.env.control` 的 `UI_PASSWORD`，不会打印到日志。该文件也保存本地网关管理凭据，权限为 `0600`，不提交 Git；`.env.gateway` 仅保存平台使用的受限调用密钥。两个控制台使用各自的登录会话。
 
 `MODEL`（或显式 `PLATFORM_DEFAULT_MODEL`）会作为模型目录的默认模型，新建 Agent 时优先选择已启用的默认模型。已有模型不会被重启覆盖。首次自动添加时，需要在本目录 `.env` 同时设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 与 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token）；没有填写时，页面提示添加并预填模型名称，不会猜测供应商价格。若本地 IPv6 连接上游失败，可设置 `PLATFORM_GATEWAY_LOCAL_ADDRESS=0.0.0.0` 让模型调用使用 IPv4，仍然校验证书。
 
@@ -50,14 +52,15 @@ make start
 
 ```bash
 make start PORT=8010   # 8000 被占用时使用其他端口
+make start PORT=8010 LITELLM_PORT=4001  # 自定义 LiteLLM 端口
 make status           # 在另一终端查看本脚本管理的服务
 make stop             # 停止服务，保留配置和数据
 make help             # 查看所有命令
 ```
 
-启动在前台运行，按 `Ctrl+C` 也会停止关联服务。端口被其他程序占用时会明确报错；`stop` 只处理本启动脚本记录并核验过的进程，不会按端口终止其他项目。
+启动在前台运行，按 `Ctrl+C` 也会停止平台进程和该实例的三个网关容器，保留数据库卷。端口冲突会明确报错。每个 `STATE_DIR` 使用独立 Compose 项目，`stop` 不影响其他项目或完整 Docker 部署。重启复用管理密码和有效运行密钥，不会重复创建；运行密钥过期或权限不符时会提示显式处理。
 
-如果根目录没有 OpenAI 兼容配置，模型调用仍需在本目录 `.env` 填写 `PLATFORM_LITELLM_URL` 与受限的 `PLATFORM_LITELLM_KEY`，填写后重启；未配置时管理功能可用。现有 `install / migrate / init / dev / web / build` 分步命令和 Docker 命令继续保留。
+已有外部网关时使用 `make start GATEWAY=external`，此模式不管理 Docker，按 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 配置连接，空值时保留根 `OPENAI_*` 配置回退；管理页入口可通过 `PLATFORM_LITELLM_ADMIN_URL` 单独指定。现有分步命令和完整 Docker 部署命令继续保留。
 
 从空平台完成首次运行：
 

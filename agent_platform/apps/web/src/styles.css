@@ -549,6 +549,31 @@ svg {
   color: #a4a4b5;
   margin-top: 6px;
 }
+.gateway-details {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 20px;
+  padding: 4px 23px 25px;
+  font-size: 13px;
+  line-height: 1.8;
+  color: var(--muted);
+}
+.gateway-address {
+  max-width: 100%;
+  overflow-wrap: anywhere;
+  font-family: monospace;
+}
+.gateway-help {
+  font-size: 12px;
+}
+.gateway-note {
+  margin-top: 22px;
+  line-height: 1.8;
+}
+.gateway-note > svg {
+  flex-shrink: 0;
+}
 .info-banner {
   display: flex;
   align-items: center;

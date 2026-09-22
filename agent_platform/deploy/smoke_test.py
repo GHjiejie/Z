@@ -43,6 +43,7 @@ def command(args: list[str], **kwargs) -> str:
                     "GATEWAY_",
                     "POSTGRES_",
                     "COMPOSE_",
+                    "UI_",
                 )
             )
         }
@@ -263,6 +264,7 @@ def main() -> None:
                 "LITELLM_DB_PASSWORD",
                 "LITELLM_SALT_KEY",
                 "PLATFORM_ADMIN_PASSWORD",
+                "UI_PASSWORD",
             ]
         }
         env = {
@@ -273,6 +275,8 @@ def main() -> None:
             "UPSTREAM_API_KEY": "smoke-only",
             "LITELLM_MODEL_ALIAS": "platform-chat",
             "PLATFORM_HTTP_PORT": "0",
+            "LITELLM_HTTP_PORT": "0",
+            "GATEWAY_BOOTSTRAP_DIR": str(bootstrap),
             "PLATFORM_SECURE_COOKIES": "false",
         }
         env_file = root / ".env"
@@ -299,10 +303,6 @@ def main() -> None:
                             }
                         },
                         "postgres": {"ports": ["127.0.0.1::5432"]},
-                        "litellm": {
-                            "ports": ["127.0.0.1::4000"],
-                            "volumes": [f"{bootstrap}:/bootstrap"],
-                        },
                         "mock": {
                             "image": "python:3.13-slim-bookworm",
                             "command": ["python", "/mock.py"],
