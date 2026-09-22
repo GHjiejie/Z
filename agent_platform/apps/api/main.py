@@ -246,7 +246,14 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
 
     @app.get("/api/v1/models")
     def models(user=Depends(auth)):
-        return {"items": platform.list_resources(t.models, user)}
+        rows = platform.list_resources(t.models, user)
+        return {
+            "items": [
+                {**row, "is_default": row["alias"] == settings.default_model}
+                for row in rows
+            ],
+            "default_model": settings.default_model if user["role"] == "admin" else "",
+        }
 
     @app.post("/api/v1/models", status_code=201)
     def create_model(body: s.ModelCreate, user=Depends(admin)):

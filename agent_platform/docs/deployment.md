@@ -16,6 +16,10 @@ make -C agent_platform start
 
 一键启动读取根目录 `.env` 中的 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `MODEL`。当平台文件中的 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 为空时，前两项作为 OpenAI 兼容网关配置回退。该映射只存在于当前进程内，不会复制或输出密钥。生产部署仍应使用独立的 `PLATFORM_LITELLM_URL` 和受限密钥。
 
+默认模型通过 `PLATFORM_DEFAULT_MODEL` 配置，一键启动也会从根 `MODEL` 回退读取。模型目录显示默认标记，创建 Agent 时预选已启用的默认模型。首次注册默认模型时可设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 和 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token），启动时会为配置管理员所属组织创建模型；重启不覆盖已存在的模型。没有报价时仅在页面提示和预填，不自动生成收费价格。
+
+当本地默认网络路径无法与上游建立 TLS、但 IPv4 可用时，可设置 `PLATFORM_GATEWAY_LOCAL_ADDRESS=0.0.0.0`。该选项只影响模型调用的网络客户端，保留证书验证及零自动重试策略，客户端随调用结束关闭。
+
 ```bash
 make -C agent_platform start PORT=8010
 make -C agent_platform status

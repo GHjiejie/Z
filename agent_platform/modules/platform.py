@@ -85,6 +85,10 @@ class Platform:
         self.billing = BillingService(db, settings.redis_url)
 
     def bootstrap(self) -> None:
+        self._bootstrap_admin()
+        self._bootstrap_default_model()
+
+    def _bootstrap_admin(self) -> None:
         """Create the first tenant only with an explicit, non-default password."""
         with self.db.transaction("bootstrap") as connection:
             if connection.scalar(select(func.count()).select_from(t.users)):
@@ -118,6 +122,59 @@ class Platform:
             )
             audit(connection, user, "tenant.bootstrap", tenant_id)
         self.billing.wallet(tenant_id)
+
+    def _bootstrap_default_model(self) -> None:
+        """Register the configured model once, using only explicit platform prices."""
+        if not self.settings.default_model:
+            return
+        with self.db.read() as connection:
+            user = (
+                connection.execute(
+                    select(t.users).where(
+                        t.users.c.email == self.settings.admin_email.strip().lower(),
+                        t.users.c.role == "admin",
+                        t.users.c.active.is_(True),
+                    )
+                )
+                .mappings()
+                .first()
+            )
+        if user is None:
+            return
+        with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
+            existing = connection.scalar(
+                select(t.models.c.id).where(
+                    t.models.c.tenant_id == user["tenant_id"],
+                    t.models.c.alias == self.settings.default_model,
+                )
+            )
+            if existing:
+                return
+            if not (
+                self.settings.default_model_input_price
+                and self.settings.default_model_output_price
+            ):
+                return
+            from agent_platform.apps.api.schemas import ModelCreate
+
+            values = ModelCreate(
+                name=self.settings.default_model,
+                alias=self.settings.default_model,
+                input_price=self.settings.default_model_input_price,
+                output_price=self.settings.default_model_output_price,
+            ).model_dump()
+            self.require_current(connection, dict(user), admin=True)
+            model_id = uid()
+            connection.execute(
+                insert(t.models).values(
+                    **values,
+                    id=model_id,
+                    tenant_id=user["tenant_id"],
+                    created_at=now(),
+                    price_version=1,
+                )
+            )
+            audit(connection, dict(user), "model.bootstrap", model_id)
 
     def login(self, email: str, password: str, address: str) -> dict:
         email = email.strip().lower()

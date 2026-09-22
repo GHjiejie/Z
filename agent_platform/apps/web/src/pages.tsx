@@ -478,6 +478,9 @@ function AgentEditor({
   close: () => void;
   saved: () => Promise<void>;
 }) {
+  const [selectedModel, setSelectedModel] = useState<string | undefined>(
+    agent?.model_id,
+  );
   return (
     <Modal
       title={agent ? "编辑 Agent 草稿" : "创建 Agent"}
@@ -521,7 +524,12 @@ function AgentEditor({
             <select
               name="model_id"
               required
-              defaultValue={agent?.model_id ?? ""}
+              value={
+                selectedModel ??
+                models.find((model) => model.is_default && model.active)?.id ??
+                ""
+              }
+              onChange={(event) => setSelectedModel(event.target.value)}
             >
               <option value="" disabled>
                 选择可用模型
@@ -568,7 +576,7 @@ function AgentEditor({
               min={0}
               max={2}
               step={0.1}
-              defaultValue={agent?.temperature ?? 0.7}
+              defaultValue={agent?.temperature ?? 1}
               required
             />
           </Field>
@@ -631,10 +639,15 @@ function AgentEditor({
 }
 
 export function ModelsPage({ admin }: { admin: boolean }) {
-  const resource = useResource<Items<Model>>("/models");
+  const resource = useResource<Items<Model> & { default_model?: string }>(
+    "/models",
+  );
   const [editing, setEditing] = useState<Model | "new" | null>(null);
   const [search, setSearch] = useState("");
   const toast = useToast();
+  const defaultToAdd = resource.data?.items.some(
+    (model) => model.alias === resource.data?.default_model,
+  ) ? "" : resource.data?.default_model ?? "";
   const items =
     resource.data?.items.filter((model) =>
       `${model.name} ${model.alias}`
@@ -661,6 +674,12 @@ export function ModelsPage({ admin }: { admin: boolean }) {
         模型别名必须与 LiteLLM 网关配置一致。价格单位：USD / 百万
         Token；调整仅影响后续调用。
       </div>
+      {admin && defaultToAdd && (
+          <div className="inline-note">
+            已配置默认模型 {defaultToAdd}。添加模型并填写平台报价后即可使用，
+            名称和别名已预填。
+          </div>
+        )}
       <Panel>
         <div className="table-toolbar">
           <SearchBox
@@ -697,7 +716,9 @@ export function ModelsPage({ admin }: { admin: boolean }) {
                             <Boxes size={19} />
                           </div>
                           <div>
-                            <strong>{model.name}</strong>
+                            <strong>
+                              {model.name}{model.is_default ? "（默认）" : ""}
+                            </strong>
                             <small>{model.alias}</small>
                           </div>
                         </div>
@@ -769,7 +790,9 @@ export function ModelsPage({ admin }: { admin: boolean }) {
               <input
                 name="name"
                 required
-                defaultValue={editing === "new" ? "" : editing.name}
+                defaultValue={
+                  editing === "new" ? defaultToAdd : editing.name
+                }
                 placeholder="例如：团队通用模型"
               />
             </Field>
@@ -777,7 +800,9 @@ export function ModelsPage({ admin }: { admin: boolean }) {
               <input
                 name="alias"
                 required
-                defaultValue={editing === "new" ? "" : editing.alias}
+                defaultValue={
+                  editing === "new" ? defaultToAdd : editing.alias
+                }
                 placeholder="与网关 model_name 保持一致"
               />
             </Field>

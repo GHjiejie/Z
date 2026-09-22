@@ -2,6 +2,7 @@
 
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -71,6 +72,75 @@ class APIIntegrationTest(unittest.TestCase):
         )
         self.assertEqual(response.status_code, 200, response.text)
         return {**response.json(), "token": response.cookies[COOKIE]}
+
+    def test_default_model_is_visible_without_inventing_platform_prices(self):
+        settings = replace(self.settings, default_model="k3")
+        with TestClient(create_app(settings, gateway=self.gateway)) as client:
+            client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": settings.admin_email,
+                    "password": PASSWORD,
+                },
+            )
+            result = client.get("/api/v1/models")
+            self.assertEqual(result.status_code, 200)
+            self.assertEqual(result.json(), {"items": [], "default_model": "k3"})
+
+    def test_default_model_bootstrap_is_idempotent_and_preserves_catalog_edits(self):
+        settings = replace(
+            self.settings,
+            default_model="k3",
+            default_model_input_price="2",
+            default_model_output_price="5",
+        )
+        app = create_app(settings, gateway=self.gateway)
+        with TestClient(app) as client:
+            context = client.post(
+                "/api/v1/auth/login",
+                json={
+                    "email": settings.admin_email,
+                    "password": PASSWORD,
+                },
+            ).json()
+            catalog = client.get("/api/v1/models").json()
+            self.assertEqual(len(catalog["items"]), 1)
+            model = catalog["items"][0]
+            self.assertEqual(model["alias"], "k3")
+            self.assertTrue(model["is_default"])
+            self.assertEqual((model["input_price"], model["output_price"]), ("2", "5"))
+            changed = client.patch(
+                f"/api/v1/models/{model['id']}",
+                headers={"X-CSRF-Token": context["csrf_token"]},
+                json={"active": False, "input_price": "7"},
+            )
+            self.assertEqual(changed.status_code, 200)
+            app.state.platform.bootstrap()
+            after = client.get("/api/v1/models").json()["items"]
+            self.assertEqual(len(after), 1)
+            self.assertEqual(after[0]["id"], model["id"])
+            self.assertEqual(after[0]["input_price"], "7")
+            self.assertFalse(after[0]["active"])
+
+    def test_default_model_bootstrap_targets_only_configured_admin_tenant(self):
+        self.seed_second_tenant()
+        settings = replace(
+            self.settings,
+            default_model="k3",
+            default_model_input_price="2",
+            default_model_output_price="5",
+        )
+        with (
+            TestClient(create_app(settings, gateway=self.gateway)),
+            self.db.read() as connection,
+        ):
+            rows = (
+                connection.execute(select(t.models).where(t.models.c.alias == "k3"))
+                .mappings()
+                .all()
+            )
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["tenant_id"], self.admin["user"]["tenant_id"])
 
     def request(
         self, method, path, *, auth="admin", csrf=True, key=None, headers=None, **kwargs

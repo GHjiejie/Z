@@ -11,6 +11,10 @@ class Settings:
     redis_url: str | None = None
     litellm_url: str = ""
     litellm_key: str = ""
+    gateway_local_address: str | None = None
+    default_model: str = ""
+    default_model_input_price: str = ""
+    default_model_output_price: str = ""
     admin_email: str = "admin@example.com"
     admin_password: str = ""
     secure_cookies: bool = False
@@ -29,6 +33,14 @@ class Settings:
             redis_url=os.getenv("PLATFORM_REDIS_URL") or None,
             litellm_url=os.getenv("PLATFORM_LITELLM_URL", ""),
             litellm_key=os.getenv("PLATFORM_LITELLM_KEY", ""),
+            gateway_local_address=os.getenv("PLATFORM_GATEWAY_LOCAL_ADDRESS") or None,
+            default_model=os.getenv("PLATFORM_DEFAULT_MODEL", "").strip(),
+            default_model_input_price=os.getenv(
+                "PLATFORM_DEFAULT_MODEL_INPUT_PRICE", ""
+            ).strip(),
+            default_model_output_price=os.getenv(
+                "PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE", ""
+            ).strip(),
             admin_email=os.getenv("PLATFORM_ADMIN_EMAIL", "admin@example.com"),
             admin_password=os.getenv("PLATFORM_ADMIN_PASSWORD", ""),
             secure_cookies=os.getenv("PLATFORM_SECURE_COOKIES", "false").lower()

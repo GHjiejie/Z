@@ -10,6 +10,7 @@ export type Model = {
   id: string;
   name: string;
   alias: string;
+  is_default?: boolean;
   active: boolean;
   input_price: string;
   output_price: string;

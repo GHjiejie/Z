@@ -88,7 +88,7 @@ class AgentCreate(StrictModel):
         default="你是一位专业、可靠的助手。", min_length=1, max_length=20000
     )
     model_id: str = Field(min_length=1, max_length=64)
-    temperature: float = Field(default=0, ge=0, le=2)
+    temperature: float = Field(default=1, ge=0, le=2)
     max_steps: int = Field(default=8, ge=1, le=30)
     max_tokens: int = Field(default=1024, ge=1, le=128000)
     tools: list[Literal["calculator", "current_time"]] = Field(

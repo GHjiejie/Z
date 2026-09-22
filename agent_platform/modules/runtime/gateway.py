@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlsplit
 
+import httpx
 from langchain_core.messages import AIMessageChunk
 
 from chat_models.factory import create_gateway_chat_model
@@ -72,6 +73,7 @@ class Gateway:
         *,
         client_factory: Callable[..., Any] = create_gateway_chat_model,
         timeout: float = 90,
+        local_address: str | None = None,
     ) -> None:
         self.base_url = (
             base_url if base_url is not None else os.getenv("PLATFORM_LITELLM_URL", "")
@@ -81,6 +83,11 @@ class Gateway:
         ).strip()
         self._client_factory = client_factory
         self.timeout = timeout
+        self.local_address = (
+            local_address
+            if local_address is not None
+            else os.getenv("PLATFORM_GATEWAY_LOCAL_ADDRESS", "")
+        ).strip() or None
 
     @property
     def configured(self) -> bool:
@@ -116,20 +123,38 @@ class Gateway:
             raise GatewayError(
                 "invalid_model_config", "模型或输出上限无效。", request_sent=False
             )
-        client = self._client_factory(
-            model=model,
-            base_url=self.base_url,
-            api_key=self._api_key,
-            max_tokens=max_tokens,
-            temperature=temperature,
-            timeout=self.timeout,
-            use_responses_api=False,
-        )
-        runnable = client.bind_tools(tools) if tools else client
         aggregate: AIMessageChunk | None = None
         usage: dict | None = None
         finish_reason: str | None = None
+        transport: httpx.AsyncHTTPTransport | None = None
+        http_client: httpx.AsyncClient | None = None
+        request_sent = False
         try:
+            transport_options: dict[str, Any] = {}
+            if self.local_address:
+                # This request owns its client; never change shared SDK defaults.
+                transport = httpx.AsyncHTTPTransport(
+                    local_address=self.local_address, verify=True, retries=0
+                )
+                http_client = httpx.AsyncClient(
+                    transport=transport, timeout=self.timeout
+                )
+                transport_options = {
+                    "http_async_client": http_client,
+                    "http_socket_options": (),
+                }
+            client = self._client_factory(
+                model=model,
+                base_url=self.base_url,
+                api_key=self._api_key,
+                max_tokens=max_tokens,
+                temperature=temperature,
+                timeout=self.timeout,
+                use_responses_api=False,
+                **transport_options,
+            )
+            runnable = client.bind_tools(tools) if tools else client
+            request_sent = True
             async for chunk in runnable.astream(messages):
                 if not isinstance(chunk, AIMessageChunk):
                     raise GatewayError("invalid_gateway_response", "模型返回格式无效。")
@@ -150,8 +175,16 @@ class Gateway:
             # Provider exceptions can include credentials, URLs or prompt text.
             # Only a stable safe message crosses the platform boundary.
             raise GatewayError(
-                "gateway_failed", "模型网关调用失败或流中断，费用等待核实。"
+                "gateway_failed",
+                "模型网关调用失败或流中断，费用等待核实。",
+                request_sent=request_sent,
             ) from exc
+        finally:
+            if http_client is not None:
+                await http_client.aclose()
+            elif transport is not None:
+                # Client construction can fail after allocating its transport.
+                await transport.aclose()
         if usage is None or aggregate is None or finish_reason is None:
             raise UsageUnavailable()
         input_tokens = _count(usage, "prompt_tokens")

@@ -42,6 +42,10 @@ make start
 
 启动时也会读取仓库根目录的 `.env`。当平台配置中的 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY` 为空时，会在当前进程中使用根目录的 `OPENAI_BASE_URL` / `OPENAI_API_KEY`，并读取 `MODEL`。密钥不会被复制到子目录配置或打印到日志；平台专用配置和当前进程变量的优先级更高。
 
+`MODEL`（或显式 `PLATFORM_DEFAULT_MODEL`）会作为模型目录的默认模型，新建 Agent 时优先选择已启用的默认模型。已有模型不会被重启覆盖。首次自动添加时，需要在本目录 `.env` 同时设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 与 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token）；没有填写时，页面提示添加并预填模型名称，不会猜测供应商价格。若本地 IPv6 连接上游失败，可设置 `PLATFORM_GATEWAY_LOCAL_ADDRESS=0.0.0.0` 让模型调用使用 IPv4，仍然校验证书。
+
+新建 Agent 的 Temperature 默认值为 `1`。当前 `k3` 上游仅接受该值；已有 Agent 的参数保持原样，需要按模型要求自行调整。
+
 打开 [控制台](http://127.0.0.1:8000)。默认邮箱为 `admin@example.com`，初始密码位于本目录 `.env` 的 `PLATFORM_ADMIN_PASSWORD`；显式设置的环境变量优先于文件。首次初始化后更改引导密码不会重置已有账号。
 
 ```bash

@@ -61,6 +61,7 @@ class Worker:
             self.settings.litellm_url,
             self.settings.litellm_key,
             timeout=self.settings.model_timeout,
+            local_address=self.settings.gateway_local_address,
         )
         self.owner = uid()
         self.max_run_cost = Decimal(self.settings.max_run_cost)

@@ -218,6 +218,16 @@ def chunk(
     return value
 
 
+class ClosingTransport(httpx.MockTransport):
+    def __init__(self, handler):
+        super().__init__(handler)
+        self.close_count = 0
+
+    async def aclose(self):
+        self.close_count += 1
+        await super().aclose()
+
+
 class GatewayTests(unittest.IsolatedAsyncioTestCase):
     async def collect(
         self, chunks: list[dict], *, status: int = 200
@@ -239,6 +249,8 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
 
             def factory(**options):
+                self.assertNotIn("http_async_client", options)
+                self.assertNotIn("http_socket_options", options)
                 return create_gateway_chat_model(
                     **options, http_async_client=client, http_socket_options=()
                 )
@@ -253,6 +265,143 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
             ]
         return events, requests
+
+    async def test_bound_transport_uses_one_attempt_and_closes_after_stream(
+        self,
+    ) -> None:
+        for status in (200, 500):
+            with self.subTest(status=status):
+                requests = []
+                clients = []
+                chunks = [
+                    chunk({"content": "hello"}),
+                    chunk(finish="stop"),
+                    chunk(
+                        usage={
+                            "prompt_tokens": 1,
+                            "completion_tokens": 1,
+                            "total_tokens": 2,
+                        }
+                    ),
+                ]
+
+                def handler(request, requests=requests, status=status, chunks=chunks):
+                    requests.append(request)
+                    return httpx.Response(
+                        status,
+                        headers={"content-type": "text/event-stream"},
+                        text="".join(f"data: {json.dumps(item)}\n\n" for item in chunks)
+                        + "data: [DONE]\n\n",
+                    )
+
+                def factory(clients=clients, **options):
+                    clients.append(options["http_async_client"])
+                    self.assertEqual(options["http_socket_options"], ())
+                    return create_gateway_chat_model(**options)
+
+                transport = ClosingTransport(handler)
+                with patch(
+                    "agent_platform.modules.runtime.gateway.httpx.AsyncHTTPTransport",
+                    return_value=transport,
+                ) as transport_factory:
+                    gateway = Gateway(
+                        "https://litellm.test/v1",
+                        "test-key",
+                        client_factory=factory,
+                        local_address="0.0.0.0",
+                    )
+                    if status == 200:
+                        events = [
+                            event
+                            async for event in gateway.stream([], "test", 20, 0, [])
+                        ]
+                        self.assertEqual(events[-1].data.content, "hello")
+                    else:
+                        with self.assertRaises(GatewayError):
+                            _ = [
+                                event
+                                async for event in gateway.stream([], "test", 20, 0, [])
+                            ]
+                transport_factory.assert_called_once_with(
+                    local_address="0.0.0.0", verify=True, retries=0
+                )
+                self.assertEqual(len(requests), 1)
+                self.assertEqual(transport.close_count, 1)
+                self.assertTrue(clients[0].is_closed)
+
+    async def test_bound_transport_closes_when_request_is_cancelled(self) -> None:
+        started = asyncio.Event()
+        clients = []
+
+        async def handler(request):
+            started.set()
+            await asyncio.Event().wait()
+
+        def factory(**options):
+            clients.append(options["http_async_client"])
+            return create_gateway_chat_model(**options)
+
+        transport = ClosingTransport(handler)
+        with patch(
+            "agent_platform.modules.runtime.gateway.httpx.AsyncHTTPTransport",
+            return_value=transport,
+        ):
+            gateway = Gateway(
+                "https://litellm.test/v1",
+                "test-key",
+                client_factory=factory,
+                local_address="0.0.0.0",
+            )
+
+            async def consume():
+                return [event async for event in gateway.stream([], "test", 20, 0, [])]
+
+            task = asyncio.create_task(consume())
+            await asyncio.wait_for(started.wait(), timeout=2)
+            task.cancel()
+            with self.assertRaises(asyncio.CancelledError):
+                await task
+        self.assertEqual(transport.close_count, 1)
+        self.assertTrue(clients[0].is_closed)
+
+    async def test_bound_transport_closes_on_client_construction_failure(self) -> None:
+        for failure_stage in ("http", "model"):
+            with self.subTest(failure_stage=failure_stage):
+                clients = []
+                transport = ClosingTransport(
+                    lambda request: self.fail("construction failure sent a request")
+                )
+
+                def failing_factory(clients=clients, **options):
+                    clients.append(options["http_async_client"])
+                    raise ValueError("secret initialization details")
+
+                gateway = Gateway(
+                    "https://litellm.test/v1",
+                    "test-key",
+                    client_factory=failing_factory,
+                    local_address="0.0.0.0",
+                )
+                with (
+                    patch(
+                        "agent_platform.modules.runtime.gateway.httpx.AsyncHTTPTransport",
+                        return_value=transport,
+                    ),
+                    patch(
+                        "agent_platform.modules.runtime.gateway.httpx.AsyncClient",
+                        wraps=httpx.AsyncClient,
+                        side_effect=ValueError("secret initialization details")
+                        if failure_stage == "http"
+                        else None,
+                    ),
+                    self.assertRaises(GatewayError) as caught,
+                ):
+                    _ = [event async for event in gateway.stream([], "test", 20, 0, [])]
+                self.assertFalse(caught.exception.request_sent)
+                self.assertNotIn("secret initialization", str(caught.exception))
+                self.assertEqual(transport.close_count, 1)
+                if clients:
+                    self.assertTrue(clients[0].is_closed)
 
     async def test_real_sdk_sse_text_usage_and_request_options(self) -> None:
         events, requests = await self.collect(
