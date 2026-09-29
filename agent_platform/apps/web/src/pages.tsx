@@ -1,4 +1,4 @@
-import { useRef, useState } from "react";
+import { useState } from "react";
 import {
   Activity,
   ArrowDownLeft,
@@ -23,7 +23,7 @@ import {
   Wallet,
   Zap,
 } from "lucide-react";
-import { api, dateTime, money, number, write } from "./api";
+import { dateTime, money, number, write } from "./api";
 import type {
   Agent,
   Audit,
@@ -31,6 +31,7 @@ import type {
   GatewayAdmin,
   Ledger,
   Model,
+  Membership,
   Quota,
   Run,
   Usage,
@@ -54,7 +55,8 @@ import {
   useToast,
   statusLabel,
 } from "./components";
-import { BillingReconciliation } from "./BillingReconciliation";
+
+import { ModelPolicyPanel } from "./PlatformResources";
 
 type Items<T> = { items: T[] };
 
@@ -100,7 +102,7 @@ export function DashboardPage({
                   <strong>连接模型网关，开启第一次运行</strong>
                   <p>
                     LiteLLM
-                    网关尚未配置。请在服务端设置网关地址与密钥，再到模型目录配置模型。
+                    模型尚未就绪。请联系平台运营人员授予模型并完成连接配置。
                   </p>
                 </div>
                 <Button variant="secondary" onClick={() => navigate("models")}>
@@ -723,7 +725,7 @@ export function GatewayPage() {
   );
 }
 
-export function ModelsPage({ admin }: { admin: boolean }) {
+export function ModelsPage({ admin, canPolicy = false }: { admin: boolean; canPolicy?: boolean }) {
   const resource = useResource<Items<Model> & { default_model?: string }>(
     "/models",
   );
@@ -744,7 +746,7 @@ export function ModelsPage({ admin }: { admin: boolean }) {
       <PageTitle
         eyebrow="MODEL CATALOG"
         title="模型目录"
-        description="统一管理可用模型与平台报价，调用由 LiteLLM 网关转发。"
+        description="查看当前组织获授权的模型与调用价格，选择合适的模型运行 Agent。"
         action={
           admin && (
             <Button onClick={() => setEditing("new")}>
@@ -756,8 +758,7 @@ export function ModelsPage({ admin }: { admin: boolean }) {
       />
       <div className="inline-note">
         <ShieldCheck size={17} />
-        模型别名必须与 LiteLLM 网关配置一致。价格单位：USD / 百万
-        Token；调整仅影响后续调用。
+        模型由平台运营人员授权。价格单位：USD / 百万 Token；每次运行保存所用价格。
       </div>
       {admin && defaultToAdd && (
           <div className="inline-note">
@@ -765,12 +766,13 @@ export function ModelsPage({ admin }: { admin: boolean }) {
             名称和别名已预填。
           </div>
         )}
+      {canPolicy && <ModelPolicyPanel models={resource.data?.items ?? []} changed={resource.reload} />}
       <Panel>
         <div className="table-toolbar">
           <SearchBox
             value={search}
             onChange={setSearch}
-            placeholder="搜索模型或网关别名"
+            placeholder="搜索模型名称或别名"
           />
           <span>{items.length} 个模型</span>
         </div>
@@ -1167,7 +1169,6 @@ export function UsagePage() {
         "输入 tokens",
         "输出 tokens",
         "客户费用 USD",
-        "供应商成本 USD",
       ],
       ...items.map((call) => [
         call.created_at,
@@ -1178,7 +1179,6 @@ export function UsagePage() {
         call.input_tokens,
         call.output_tokens,
         call.cost,
-        call.provider_cost ?? "",
       ]),
     ];
     const csv =
@@ -1265,7 +1265,6 @@ export function UsagePage() {
                     <th>状态</th>
                     <th>输入 / 输出 Token</th>
                     <th>客户费用</th>
-                    <th>供应商成本</th>
                     <th>调用时间</th>
                   </tr>
                 </thead>
@@ -1286,9 +1285,6 @@ export function UsagePage() {
                         {number(call.output_tokens)}
                       </td>
                       <td className="numeric">{money(call.cost, 6)}</td>
-                      <td className="numeric muted">
-                        {money(call.provider_cost, 6)}
-                      </td>
                       <td className="nowrap muted">
                         {dateTime(call.created_at)}
                       </td>
@@ -1305,7 +1301,7 @@ export function UsagePage() {
           )}
         </ResourceState>
         <div className="table-footer">
-          显示当前返回的 {items.length} 条记录 · 未确认的供应商成本以 — 显示
+          显示当前返回的 {items.length} 条记录 · 费用按调用时的价格快照计算
         </div>
       </Panel>
     </>
@@ -1315,9 +1311,6 @@ export function UsagePage() {
 export function BillingPage({ admin }: { admin: boolean }) {
   const wallet = useResource<WalletData>("/billing/wallet");
   const ledger = useResource<Items<Ledger>>("/billing/ledger", admin);
-  const [credit, setCredit] = useState(false);
-  const creditKey = useRef("");
-  const toast = useToast();
   const ledgerLabels: Record<string, string> = {
     credit: "额度入账",
     debit: "调用消费",
@@ -1332,19 +1325,6 @@ export function BillingPage({ admin }: { admin: boolean }) {
         eyebrow="BILLING"
         title="费用中心"
         description="管理可用额度，查看预占金额与不可变账本记录。"
-        action={
-          admin && (
-            <Button
-              onClick={() => {
-                creditKey.current = crypto.randomUUID();
-                setCredit(true);
-              }}
-            >
-              <Plus size={17} />
-              人工入账
-            </Button>
-          )
-        }
       />
       <ResourceState
         loading={wallet.loading}
@@ -1392,20 +1372,12 @@ export function BillingPage({ admin }: { admin: boolean }) {
       <div className="inline-note">
         <Boxes size={17} />
         Token 用量来自模型网关；客户费用按调用时的平台价格快照计算。
-        “用量已结算”表示平台已记账，不表示供应商账单已完成对账；供应商成本仅供参考。
+        “用量已结算”表示本次平台费用已记账。
       </div>
       <div className="inline-note">
         <ShieldCheck size={17} />
-        超时或取消的调用可能仍产生费用，结果未确认时保留预占。人工入账仅记录额度，不会发起支付。
+        超时或取消的调用可能仍产生费用，结果未确认时保留预占。额度入账与费用核销由平台财务人员处理。
       </div>
-      {admin && (
-        <BillingReconciliation
-          wallet={wallet.data}
-          changed={async () => {
-            await Promise.all([wallet.reload(), ledger.reload()]);
-          }}
-        />
-      )}
       {admin ? (
         <Panel
           title="资金流水"
@@ -1482,7 +1454,7 @@ export function BillingPage({ admin }: { admin: boolean }) {
                 title="还没有资金流水"
                 description={
                   admin
-                    ? "首次使用前，请为工作空间显式入账。"
+                    ? "首次使用前，请联系平台运营人员为组织分配额度。"
                     : "请联系管理员为工作空间分配使用额度。"
                 }
               />
@@ -1497,62 +1469,14 @@ export function BillingPage({ admin }: { admin: boolean }) {
           />
         </Panel>
       )}
-      {credit && (
-        <Modal
-          title="人工额度入账"
-          description="将额度记入当前工作空间的钱包，每笔入账会留下审计记录。"
-          close={() => setCredit(false)}
-        >
-          <Form
-            close={() => setCredit(false)}
-            label="确认入账"
-            submit={async (form) => {
-              await api("/billing/credits", {
-                method: "POST",
-                body: JSON.stringify({
-                  amount: formValue(form, "amount"),
-                  description: formValue(form, "description"),
-                }),
-                headers: { "Idempotency-Key": creditKey.current },
-              });
-              setCredit(false);
-              toast("额度已入账");
-              await Promise.all([wallet.reload(), ledger.reload()]);
-            }}
-          >
-            <Field label="入账金额（USD）">
-              <input
-                name="amount"
-                type="number"
-                min="0.000001"
-                step="any"
-                placeholder="0.00"
-                required
-              />
-            </Field>
-            <Field label="入账说明 / 凭证号">
-              <textarea
-                name="description"
-                rows={3}
-                required
-                minLength={3}
-                maxLength={500}
-                placeholder="例如：团队研发额度，凭证号 FIN-2026-001"
-              />
-            </Field>
-            <div className="inline-note">
-              此操作会增加可用余额，请核对金额与说明。
-            </div>
-          </Form>
-        </Modal>
-      )}
+
     </>
   );
 }
 
 export function QuotasPage({ tenantId }: { tenantId: string }) {
   const resource = useResource<Items<Quota>>("/quotas");
-  const users = useResource<Items<User>>("/users");
+  const users = useResource<Items<Membership>>("/memberships");
   const models = useResource<Items<Model>>("/models");
   const [editing, setEditing] = useState<Quota | "new" | null>(null);
   const [scope, setScope] = useState("tenant");
@@ -1566,7 +1490,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
     quota.scope === "tenant"
       ? "整个工作空间"
       : quota.scope === "user"
-        ? (users.data?.items.find((user) => user.id === quota.subject_id)
+        ? (users.data?.items.find((user) => user.user_id === quota.subject_id)
             ?.email ?? quota.subject_id)
         : (models.data?.items.find((model) => model.id === quota.subject_id)
             ?.name ?? quota.subject_id);
@@ -1721,7 +1645,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                   </option>
                   {scope === "user"
                     ? users.data?.items.map((user) => (
-                        <option value={user.id} key={user.id}>
+                        <option value={user.user_id} key={user.id}>
                           {user.name} · {user.email}
                         </option>
                       ))

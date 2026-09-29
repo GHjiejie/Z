@@ -3,16 +3,34 @@
 import argparse
 import asyncio
 import logging
+import os
+import signal
 
 from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.modules.platform import Platform
 
 
+async def run_background(db, role, service):
+    from agent_platform.modules.health import run_service
+
+    stop = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    for signum in (signal.SIGTERM, signal.SIGINT):
+        try:
+            loop.add_signal_handler(signum, stop.set)
+        except NotImplementedError:
+            pass
+    await run_service(db, role, service.serve, stop)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Agent Platform")
     parser.add_argument(
-        "command", choices=["serve", "worker", "init"], nargs="?", default="serve"
+        "command",
+        choices=["serve", "worker", "gateway-sync", "maintenance", "init"],
+        nargs="?",
+        default="serve",
     )
     parser.add_argument("--host", default="127.0.0.1")
     parser.add_argument("--port", default=8000, type=int)
@@ -21,6 +39,25 @@ def main() -> None:
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
     settings = Settings.from_env()
+    if args.command in {"serve", "worker", "maintenance"} and any(
+        os.getenv(key)
+        for key in (
+            "PLATFORM_GATEWAY_CONTROL_KEY",
+            "LITELLM_MASTER_KEY",
+            "UPSTREAM_API_KEY",
+            "OPENAI_API_KEY",
+            "PLATFORM_MIGRATION_DB_PASSWORD",
+            "POSTGRES_PASSWORD",
+            "PLATFORM_DB_PASSWORD",
+            "PLATFORM_ADMIN_PASSWORD",
+            "LITELLM_DB_PASSWORD",
+            "LITELLM_SALT_KEY",
+            "UI_PASSWORD",
+        )
+    ):
+        raise RuntimeError(
+            "运行进程不应接收网关控制、上游或数据库迁移凭据；请使用隔离启动环境。"
+        )
     if args.command == "serve":
         import uvicorn
 
@@ -29,19 +66,31 @@ def main() -> None:
         uvicorn.run(create_app(settings), host=args.host, port=args.port)
     else:
         db = Database(settings.database_url)
-        db.create_schema()
-        platform = Platform(db, settings)
-        platform.bootstrap()
-        if args.command == "worker":
-            from agent_platform.apps.worker.main import Worker
+        try:
+            # Schema changes belong exclusively to Alembic. Explicit init is an
+            # operator action and may use the migration owner; runtime may not.
+            db.assert_schema(saas=settings.mode == "saas" and args.command != "init")
+            platform = Platform(db, settings)
+            if args.command == "init":
+                platform.bootstrap()
+                print("平台已初始化；新组织余额为零。")
+            else:
+                if args.command == "worker":
+                    from agent_platform.apps.worker.main import Worker
 
-            try:
-                asyncio.run(Worker(platform).serve(asyncio.Event()))
-            except KeyboardInterrupt:
-                pass
-        else:
-            print("平台已初始化；新组织余额为零。")
-        db.close()
+                    service = Worker(platform)
+                elif args.command == "gateway-sync":
+                    service = platform.gateway
+                else:
+                    from agent_platform.modules.operations import OperationsService
+
+                    service = OperationsService(platform)
+                try:
+                    asyncio.run(run_background(db, args.command, service))
+                except KeyboardInterrupt:
+                    pass
+        finally:
+            db.close()
 
 
 if __name__ == "__main__":

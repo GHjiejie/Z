@@ -5,7 +5,14 @@ from logging.config import fileConfig
 
 from alembic import context
 
-from agent_platform.infrastructure import tables  # noqa: F401
+from agent_platform.infrastructure import (  # noqa: F401
+    gateway_tables,
+    operations_tables,
+    runtime_tables,
+    support_tables,
+    tables,
+    tenancy_tables,
+)
 from agent_platform.infrastructure.db import Database, metadata
 from agent_platform.modules.billing import service
 

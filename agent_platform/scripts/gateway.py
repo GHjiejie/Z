@@ -27,7 +27,7 @@ CONTROL_SECRETS = (
 
 
 def platform_environment(env: dict[str, str]) -> dict[str, str]:
-    """API and Worker receive the runtime key, never gateway administration keys."""
+    """Allow only application settings and essential OS runtime configuration."""
     excluded = {
         *CONTROL_SECRETS,
         "OPENAI_API_KEY",
@@ -35,8 +35,45 @@ def platform_environment(env: dict[str, str]) -> dict[str, str]:
         "UPSTREAM_API_KEY",
         "UPSTREAM_API_BASE",
         "UPSTREAM_MODEL",
+        "PLATFORM_GATEWAY_CONTROL_KEY",
+        "PLATFORM_MIGRATION_DB_PASSWORD",
+        "PLATFORM_MIGRATION_DATABASE_URL",
+        "PLATFORM_ADMIN_PASSWORD",
     }
-    return {key: value for key, value in env.items() if key not in excluded}
+    operating_system = {
+        "PATH",
+        "HOME",
+        "USER",
+        "LOGNAME",
+        "SHELL",
+        "LANG",
+        "TZ",
+        "TMPDIR",
+        "TMP",
+        "TEMP",
+        "VIRTUAL_ENV",
+        "PYTHONPATH",
+        "PYTHONUNBUFFERED",
+        "PYTHONDONTWRITEBYTECODE",
+        "SSL_CERT_FILE",
+        "SSL_CERT_DIR",
+        "REQUESTS_CA_BUNDLE",
+        "CURL_CA_BUNDLE",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "ALL_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "all_proxy",
+        "no_proxy",
+    }
+    return {
+        key: value
+        for key, value in env.items()
+        if key not in excluded
+        and (key.startswith(("PLATFORM_", "LC_")) or key in operating_system)
+    }
 
 
 class LocalGateway:
@@ -134,6 +171,11 @@ class LocalGateway:
                 if explicit_upstream
                 else self.env.get("OPENAI_API_KEY", "")
             ),
+            # Local mode only starts infrastructure containers. These values
+            # satisfy Compose's full-file interpolation without exposing them to
+            # the API or Worker. Existing local PostgreSQL volumes are preserved.
+            "PLATFORM_MIGRATION_DB_PASSWORD": controls["PLATFORM_DB_PASSWORD"],
+            "PLATFORM_TOMBSTONE_VOLUME": f"{self.project}-tenant-tombstones",
         }
 
     def start(
@@ -186,6 +228,17 @@ class LocalGateway:
         # Only this deterministic Compose project is managed, including cleanup
         # after a partial start. Persistent database volumes are never removed.
         self.started = True
+        # Compose validates external volume declarations even for infrastructure
+        # selections. The local project owns its own durable, isolated name.
+        run(
+            [
+                "docker",
+                "volume",
+                "create",
+                self.compose_env["PLATFORM_TOMBSTONE_VOLUME"],
+            ],
+            self.compose_env,
+        )
         run(
             [
                 *self.command,
@@ -224,6 +277,14 @@ class LocalGateway:
             "PLATFORM_LITELLM_KEY": runtime_key,
             "PLATFORM_LITELLM_ADMIN_URL": self.url + "/ui",
             "PLATFORM_DEFAULT_MODEL": self.compose_env["LITELLM_MODEL_ALIAS"],
+        }
+
+    def synchronization_environment(self, runtime: dict[str, str]) -> dict[str, str]:
+        """Only this dedicated process receives the LiteLLM master credential."""
+        return {
+            **platform_environment(runtime),
+            "PLATFORM_GATEWAY_CONTROL_URL": self.url,
+            "PLATFORM_GATEWAY_CONTROL_KEY": self.compose_env["LITELLM_MASTER_KEY"],
         }
 
     def stop(self) -> None:

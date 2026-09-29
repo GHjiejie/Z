@@ -20,7 +20,9 @@ COPY chat_models/ ./chat_models/
 COPY agent_platform/ ./agent_platform/
 COPY --from=web /build/dist ./agent_platform/apps/web/dist
 RUN useradd --create-home --uid 10001 platform && \
-    mkdir -p /app/agent_platform/.data && chown -R platform:platform /app/agent_platform/.data
+    mkdir -p /app/agent_platform/.data/exports /app/agent_platform/.tombstones && \
+    chown -R platform:platform /app/agent_platform/.data /app/agent_platform/.tombstones && \
+    chmod 700 /app/agent_platform/.data /app/agent_platform/.tombstones
 USER platform
 EXPOSE 8000
 CMD ["python", "-m", "agent_platform", "serve", "--host", "0.0.0.0", "--port", "8000"]

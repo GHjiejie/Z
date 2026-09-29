@@ -1,5 +1,7 @@
 # Agent 平台架构图：当前实现
 
+> 本文为单组织版本架构记录；最新多租户组件和信任边界见[多租户实现说明](multi-tenant-implementation.md)。
+
 更新日期：2026-09-22。技术栈：React / TypeScript、Python / FastAPI、LangGraph、LiteLLM Proxy。
 
 本文按当前代码绘制，包含系统组件、两种部署拓扑、调用时序和计费状态。图中的业务模块是代码职责，不代表独立微服务。长期设计与扩展方向见[架构设计方案](architecture.md)，启动命令见[部署说明](deployment.md)。

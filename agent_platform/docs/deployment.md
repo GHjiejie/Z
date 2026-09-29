@@ -1,5 +1,7 @@
 # Agent 平台：运行、部署与迁移
 
+> 多租户版本的独立进程、数据库角色、凭据和切库操作以[多租户运行手册](multi-tenant-operations.md)为准；下文为旧版部署参考。
+
 本文对应第一版实现。完整目标见 [架构设计](architecture.md)，模块约定见 [实现契约](implementation-contract.md)。Python 统一使用仓库根目录的 `uv` 环境；前端依赖在 `agent_platform/apps/web` 内管理。
 
 部署前可对照[当前实现架构图](architecture-diagrams.md)中的本地启动与完整 Compose 拓扑，确认 API / Worker 的运行位置、数据存储和 LiteLLM 管理入口。

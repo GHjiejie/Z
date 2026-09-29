@@ -27,11 +27,13 @@ from sqlalchemy import (
     Table,
     Text,
     UniqueConstraint,
+    func,
     select,
 )
 from sqlalchemy.engine import Connection
 from sqlalchemy.types import TypeDecorator
 
+from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.db import Database, metadata
 from agent_platform.infrastructure.errors import PlatformError
 
@@ -118,6 +120,12 @@ Index(
     "ix_billing_reservations_tenant_created",
     reservations_table.c.tenant_id,
     reservations_table.c.created_at,
+)
+Index(
+    "ix_reservations_tenant_status",
+    reservations_table.c.tenant_id,
+    reservations_table.c.status,
+    reservations_table.c.updated_at,
 )
 ledger_transactions = Table(
     "billing_transactions",
@@ -358,7 +366,7 @@ class BillingService:
         )
 
     def wallet(self, tenant_id: str) -> dict:
-        with self.db.read() as conn:
+        with self.db.tenant_scope(tenant_id), self.db.read() as conn:
             return self._wallet_view(self._get_wallet(conn, tenant_id))
 
     def credit(
@@ -462,8 +470,35 @@ class BillingService:
         return rows
 
     def quotas(self, tenant_id: str) -> list[dict]:
-        with self.db.read() as conn:
+        with self.db.tenant_scope(tenant_id), self.db.read() as conn:
             return [_serialize(row) for row in self._quota_rows(conn, tenant_id)]
+
+    @staticmethod
+    def _entitlement_policy(conn, tenant_id: str) -> dict:
+        """Platform limits remain authoritative even when tenant quotas are NULL."""
+        row = (
+            conn.execute(
+                select(nt.entitlements).where(nt.entitlements.c.tenant_id == tenant_id)
+            )
+            .mappings()
+            .first()
+        )
+        if row is None:
+            raise PlatformError(
+                403, "entitlement_missing", "组织套餐尚未配置，不能发起新调用。"
+            )
+        return {
+            "id": f"entitlement:{tenant_id}",
+            "tenant_id": tenant_id,
+            "scope": "entitlement",
+            "subject_id": tenant_id,
+            "rpm": row["rpm"],
+            "tpm": row["tpm"],
+            "concurrent": row["max_concurrent_runs"],
+            "max_budget": _money(row["max_budget"], "max_budget")
+            if row["max_budget"] is not None
+            else None,
+        }
 
     def set_quota(
         self,
@@ -498,6 +533,19 @@ class BillingService:
         }
         with self.db.transaction(f"tenant:{tenant_id}") as conn:
             self._authorize(conn)
+            hard_limits = self._entitlement_policy(conn, tenant_id)
+            for name in ("rpm", "tpm", "concurrent", "max_budget"):
+                requested, ceiling = values[name], hard_limits[name]
+                if (
+                    requested is not None
+                    and ceiling is not None
+                    and requested > ceiling
+                ):
+                    raise PlatformError(
+                        422,
+                        "entitlement_exceeded",
+                        "组织内部配额不能超过平台套餐上限。",
+                    )
             row = (
                 conn.execute(
                     select(quota_policies).where(
@@ -523,7 +571,7 @@ class BillingService:
     @staticmethod
     def _matches(row: dict, quota: dict) -> bool:
         return (
-            quota["scope"] == "tenant"
+            quota["scope"] in ("tenant", "entitlement")
             or row[f"{quota['scope']}_id"] == quota["subject_id"]
         )
 
@@ -598,14 +646,7 @@ class BillingService:
                     raise PlatformError(
                         402, "insufficient_balance", "Available balance is insufficient"
                     )
-                rows = list(
-                    conn.execute(
-                        select(reservations_table).where(
-                            reservations_table.c.tenant_id == tenant_id
-                        )
-                    ).mappings()
-                )
-                policies = [
+                policies = [self._entitlement_policy(conn, tenant_id)] + [
                     quota
                     for quota in self._quota_rows(conn, tenant_id)
                     if quota["scope"] == "tenant"
@@ -615,17 +656,34 @@ class BillingService:
                 cutoff = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
                 token_count = input_tokens + max_output_tokens
                 for quota in policies:
-                    relevant = [row for row in rows if self._matches(row, quota)]
-                    active = [row for row in relevant if row["status"] in ACTIVE]
-                    recent = [
-                        row
-                        for row in relevant
-                        if row["created_at"] > cutoff and row["status"] != "released"
-                    ]
+                    filters = [reservations_table.c.tenant_id == tenant_id]
+                    if quota["scope"] in {"user", "model"}:
+                        filters.append(
+                            reservations_table.c[quota["scope"] + "_id"]
+                            == quota["subject_id"]
+                        )
+                    recent = conn.execute(
+                        select(
+                            func.count(),
+                            func.coalesce(
+                                func.sum(reservations_table.c.rate_tokens), 0
+                            ),
+                        ).where(
+                            *filters,
+                            reservations_table.c.created_at > cutoff,
+                            reservations_table.c.status != "released",
+                        )
+                    ).one()
+                    aggregate = func.exact_sum if self.db.sqlite else func.sum
+                    active = conn.execute(
+                        select(
+                            func.count(), aggregate(reservations_table.c.amount)
+                        ).where(*filters, reservations_table.c.status.in_(ACTIVE))
+                    ).one()
                     counters = {
-                        "rpm": len(recent) + 1,
-                        "tpm": sum(row["rate_tokens"] for row in recent) + token_count,
-                        "concurrent": len(active) + 1,
+                        "rpm": recent[0] + 1,
+                        "tpm": recent[1] + token_count,
+                        "concurrent": active[0] + 1,
                     }
                     for name, count in counters.items():
                         limit = quota[name]
@@ -635,9 +693,20 @@ class BillingService:
                                 f"{name}_limit",
                                 f"{quota['scope']} {name} limit exceeded",
                             )
-                    committed = sum((row["cost"] for row in relevant), ZERO)
-                    reserved = sum((row["amount"] for row in active), ZERO)
                     budget = quota["max_budget"]
+                    committed = ZERO
+                    if budget is not None:
+                        committed = Decimal(
+                            str(
+                                conn.scalar(
+                                    select(aggregate(reservations_table.c.cost)).where(
+                                        *filters
+                                    )
+                                )
+                                or 0
+                            )
+                        )
+                    reserved = Decimal(str(active[1] or 0))
                     if budget is not None and (
                         budget == ZERO or committed + reserved + amount > budget
                     ):
@@ -1089,7 +1158,7 @@ class BillingService:
                     )
                 ).mappings()
             )
-            if any(row["status"] == "unresolved" for row in rows):
+            if any(row["status"] in ACTIVE for row in rows):
                 raise PlatformError(
                     409,
                     "unresolved_billing",
@@ -1121,7 +1190,7 @@ class BillingService:
             return self._wallet_view(wallet)
 
     def ledger(self, tenant_id: str) -> list[dict]:
-        with self.db.read() as conn:
+        with self.db.tenant_scope(tenant_id), self.db.read() as conn:
             return [
                 _serialize(row)
                 for row in conn.execute(
@@ -1134,7 +1203,7 @@ class BillingService:
             ]
 
     def reservations(self, tenant_id: str) -> list[dict]:
-        with self.db.read() as conn:
+        with self.db.tenant_scope(tenant_id), self.db.read() as conn:
             return [
                 _serialize(row)
                 for row in conn.execute(

@@ -12,7 +12,7 @@ LOCAL := uv run --no-sync python -m agent_platform.scripts.local
 
 .DEFAULT_GOAL := start
 
-.PHONY: start run stop status help install migrate init dev worker web build test infra gateway-key up down
+.PHONY: start run stop status help install migrate init dev worker gateway-sync maintenance web build test infra gateway-key up down
 
 # Dependencies are prepared sequentially by the supervisor, including under -j.
 start:
@@ -46,10 +46,16 @@ init: migrate
 	cd "$(ROOT)" && uv run --env-file "$(ENV_PATH)" python -m agent_platform init
 
 dev:
-	cd "$(ROOT)" && uv run --env-file "$(ENV_PATH)" python -m agent_platform serve --host "$(HOST)" --port "$(PORT)"
+	cd "$(ROOT)" && uv run --no-sync python -m agent_platform.scripts.runtime serve --env-file "$(ENV_PATH)" --host "$(HOST)" --port "$(PORT)"
 
 worker:
-	cd "$(ROOT)" && uv run --env-file "$(ENV_PATH)" python -m agent_platform worker
+	cd "$(ROOT)" && uv run --no-sync python -m agent_platform.scripts.runtime worker --env-file "$(ENV_PATH)"
+
+gateway-sync:
+	cd "$(ROOT)" && uv run --no-sync python -m agent_platform.scripts.runtime gateway-sync --env-file "$(ENV_PATH)"
+
+maintenance:
+	cd "$(ROOT)" && uv run --no-sync python -m agent_platform.scripts.runtime maintenance --env-file "$(ENV_PATH)"
 
 web:
 	PLATFORM_API_PROXY="http://$(HOST):$(PORT)" npm --prefix "$(ROOT)/agent_platform/apps/web" run dev

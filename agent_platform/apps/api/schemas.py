@@ -64,6 +64,10 @@ class ModelCreate(StrictModel):
         return str(number)
 
 
+class PlatformModelCreate(ModelCreate):
+    deployment_id: str = Field(min_length=1, max_length=64)
+
+
 class ModelPatch(StrictModel):
     name: str | None = Field(default=None, min_length=1, max_length=120)
     alias: str | None = Field(
@@ -142,3 +146,102 @@ class Reconcile(StrictModel):
 
 class Unblock(StrictModel):
     reason: str = Field(min_length=5, max_length=500)
+
+
+class TenantCreate(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    name: str = Field(min_length=1, max_length=120)
+    owner_email: str = Field(
+        min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+    )
+    owner_name: str | None = Field(default=None, min_length=1, max_length=120)
+    owner_password: str | None = Field(default=None, min_length=12, max_length=512)
+
+
+class StatusChange(StrictModel):
+    reason: str = Field(min_length=5, max_length=500)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class PlatformUserCreate(StrictModel):
+    model_config = ConfigDict(extra="forbid", str_strip_whitespace=False)
+    email: str = Field(
+        min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+    )
+    name: str = Field(min_length=1, max_length=120)
+    password: str = Field(min_length=12, max_length=512)
+
+
+class SupportGrantCreate(StrictModel):
+    staff_email: str = Field(
+        min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+    )
+    reason: str = Field(min_length=5, max_length=500)
+    minutes: int = Field(default=15, ge=1, le=60)
+    allow_content: bool = False
+
+
+class PlatformRoleChange(StrictModel):
+    role: Literal["platform_admin", "platform_finance", "platform_support"]
+    active: bool
+    reason: str = Field(min_length=5, max_length=500)
+
+
+class InvitationCreate(StrictModel):
+    email: str = Field(
+        min_length=3, max_length=254, pattern=r"^[^\s@]+@[^\s@]+\.[^\s@]+$"
+    )
+    role: Literal["tenant_admin", "member", "finance_viewer"] = "member"
+    expires_hours: int = Field(default=72, ge=1, le=168)
+
+
+class InvitationAccept(StrictModel):
+    token: str = Field(min_length=20, max_length=512)
+
+
+class MembershipPatch(StrictModel):
+    role: Literal["tenant_admin", "member", "finance_viewer"] | None = None
+    status: Literal["active", "revoked"] | None = None
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class OwnershipTransfer(StrictModel):
+    membership_id: str = Field(min_length=1, max_length=64)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class EntitlementPatch(StrictModel):
+    max_members: int | None = Field(default=None, ge=1, le=100000)
+    max_agents: int | None = Field(default=None, ge=0, le=100000)
+    max_queued_runs: int | None = Field(default=None, ge=0, le=100000)
+    max_running_runs: int | None = Field(default=None, ge=0, le=10000)
+    max_concurrent_runs: int | None = Field(default=None, ge=0, le=10000)
+    concurrent: int | None = Field(default=None, ge=0, le=10000)
+    max_sse_connections: int | None = Field(default=None, ge=0, le=100000)
+    max_export_jobs: int | None = Field(default=None, ge=0, le=1000)
+    rpm: int | None = Field(default=None, ge=0, le=1000000)
+    tpm: int | None = Field(default=None, ge=0, le=1000000000)
+    max_budget: str | None = None
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class ModelGrant(StrictModel):
+    source_model_id: str = Field(min_length=1, max_length=64)
+
+
+class ModelPolicy(StrictModel):
+    default_model_id: str | None = Field(default=None, max_length=64)
+    ordered_model_ids: list[str] | None = Field(default=None, max_length=200)
+    expected_version: int | None = Field(default=None, ge=1)
+
+
+class DeploymentCreate(StrictModel):
+    name: str = Field(min_length=1, max_length=120)
+    internal_route: str = Field(
+        min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9_.:/-]+$"
+    )
+    base_url: str = Field(min_length=1, max_length=500)
+    gateway_id: Literal["primary"] = "primary"
+    capabilities: list[Literal["chat", "tools"]] = Field(
+        default_factory=lambda: ["chat"], max_length=2
+    )

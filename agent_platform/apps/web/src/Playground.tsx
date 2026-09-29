@@ -16,7 +16,7 @@ import {
   UserRound,
   Wrench,
 } from "lucide-react";
-import { API_ROOT, api, dateTime, terminal, write } from "./api";
+import { api, apiUrl, dateTime, getScopeRevision, getTenantId, scopeIsCurrent, tenantLink, terminal, write } from "./api";
 import { Badge, Button, PageTitle, useResource, useToast } from "./components";
 import type { Agent, Model, Run, RunEvent, Session, SessionDetail } from "./types";
 
@@ -42,6 +42,8 @@ const eventNames = [
   "model.completed",
 ];
 export function Playground() {
+  const tenantScope = useRef(getTenantId()).current;
+  const scopeRevision = useRef(getScopeRevision()).current;
   const agents = useResource<{ items: Agent[] }>("/agents");
   const models = useResource<{ items: Model[] }>("/models");
   const [modelId, setModelId] = useState("");
@@ -104,7 +106,7 @@ export function Playground() {
     setLoading(true);
     setError("");
     try {
-      const result = await api<SessionDetail>(`/sessions/${id}`);
+      const result = await api<SessionDetail>(`/sessions/${id}`, {}, tenantScope);
       if (current !== selection.current) return;
       setDetail(result);
       setAgentId(result.agent_id);
@@ -155,7 +157,7 @@ export function Playground() {
     let pollBusy = false;
     setConnection("connecting");
     const source = new EventSource(
-      `${API_ROOT}/runs/${runId}/events?after=${lastSequence.current}`,
+      apiUrl(`/runs/${runId}/events?after=${lastSequence.current}`, tenantScope),
       { withCredentials: true },
     );
     const finish = async (status: string, message?: string) => {
@@ -164,7 +166,7 @@ export function Playground() {
       source.close();
       setConnection("closed");
       try {
-        const result = await api<SessionDetail>(`/sessions/${runSession}`);
+        const result = await api<SessionDetail>(`/sessions/${runSession}`, {}, tenantScope);
         if (!disposed) {
           setDetail(result);
           setLiveText("");
@@ -179,8 +181,10 @@ export function Playground() {
         void sessions.reload();
       }
     };
+    const stopForScope = () => { disposed = true; source.close(); };
+    window.addEventListener("tenant-scope-changed", stopForScope);
     const receive = (message: MessageEvent<string>) => {
-      if (disposed) return;
+      if (disposed || !scopeIsCurrent(scopeRevision)) return;
       let event: RunEvent;
       try {
         event = JSON.parse(message.data) as RunEvent;
@@ -232,7 +236,7 @@ export function Playground() {
     const poll = setInterval(() => {
       if (pollBusy || disposed || finishing) return;
       pollBusy = true;
-      void api<Run>(`/runs/${runId}`)
+      void api<Run>(`/runs/${runId}`, {}, tenantScope)
         .then((run) => {
           if (!disposed && terminal(run.status))
             void finish(run.status, run.error);
@@ -248,6 +252,7 @@ export function Playground() {
       disposed = true;
       source.close();
       clearInterval(poll);
+      window.removeEventListener("tenant-scope-changed", stopForScope);
     };
     // Only a different run or explicit reconnect should rebuild the stream.
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -255,7 +260,7 @@ export function Playground() {
   async function send(event: FormEvent) {
     event.preventDefault();
     const message = draft.trim();
-    if (!message || activeRun || busy || loading || !agentId) return;
+    if (!scopeIsCurrent(scopeRevision) || !message || activeRun || busy || loading || !agentId) return;
     setBusy(true);
     setError("");
     try {
@@ -265,10 +270,12 @@ export function Playground() {
           agent_id: agentId,
           title: message.slice(0, 60),
         });
+        if (!scopeIsCurrent(scopeRevision)) return;
         id = session.id;
         setSessionId(id);
-        location.hash = `playground?session=${id}`;
+        location.hash = tenantLink(`playground?session=${id}`, tenantScope);
         await sessions.reload();
+        if (!scopeIsCurrent(scopeRevision)) return;
       }
       if (
         !sendKey.current ||
@@ -287,9 +294,11 @@ export function Playground() {
         body: JSON.stringify({ message, model_id: modelId || null }),
         headers: { "Idempotency-Key": sendKey.current.key },
       });
+      if (!scopeIsCurrent(scopeRevision)) return;
       setDraft("");
       sendKey.current = null;
       await loadSession(id, false);
+      if (!scopeIsCurrent(scopeRevision)) return;
       setActiveRun(run);
       setLiveText("");
       setEvents([]);
@@ -325,14 +334,14 @@ export function Playground() {
     setError("");
     setDraft("");
     setCanceling(false);
-    location.hash = `playground${agentId ? `?agent=${agentId}` : ""}`;
+    location.hash = tenantLink(`playground${agentId ? `?agent=${agentId}` : ""}`, tenantScope);
   }
   function chooseSession(session: Session) {
     setSessionId(session.id);
     setModelId("");
     setDraft("");
     setCanceling(false);
-    location.hash = `playground?session=${session.id}`;
+    location.hash = tenantLink(`playground?session=${session.id}`, tenantScope);
   }
   const effectiveError = error || agents.error || models.error;
   return (
@@ -502,7 +511,7 @@ export function Playground() {
             )}
             {!models.loading && models.data &&
               !models.data.items.some((model) => model.active) && (
-                <a href="#models">请先添加可用模型</a>
+                <a href={tenantLink("models", tenantScope)}>请联系管理员授予可用模型</a>
               )}
           </div>
           <div

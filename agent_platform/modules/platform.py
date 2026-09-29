@@ -1,5 +1,6 @@
 """Tenant-scoped application services for users, agents and durable runs."""
 
+import base64
 import hashlib
 import json
 import secrets
@@ -10,15 +11,30 @@ from uuid import uuid4
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
-from sqlalchemy import and_, delete, func, insert, select, update
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy import (
+    DateTime,
+    Numeric,
+    case,
+    cast,
+    delete,
+    func,
+    insert,
+    select,
+    update,
+)
 
+from agent_platform.infrastructure import gateway_tables as gt
+from agent_platform.infrastructure import runtime_tables as rt
 from agent_platform.infrastructure import tables as t
+from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.infrastructure.errors import PlatformError
+from agent_platform.modules.authorization import capabilities, require_capability
 from agent_platform.modules.billing.service import BillingService, reservations_table
 from agent_platform.modules.builtin_agents import BUILTIN_AGENTS, COMMON_INSTRUCTIONS
+from agent_platform.modules.gateway_control import GatewayService
+from agent_platform.modules.identity import IdentityService
 
 ACTIVE_STATUSES = ("queued", "running", "cancelling")
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "expired")
@@ -70,6 +86,9 @@ def append_event(connection, run_id: str, kind: str, data: dict) -> dict:
     ) + 1
     event = {
         "run_id": run_id,
+        "tenant_id": connection.scalar(
+            select(t.runs.c.tenant_id).where(t.runs.c.id == run_id)
+        ),
         "sequence": sequence,
         "type": kind,
         "data": data,
@@ -84,11 +103,15 @@ class Platform:
         self.db = db
         self.settings = settings
         self.billing = BillingService(db, settings.redis_url)
+        self.identity = IdentityService(db, settings)
+        self.gateway = GatewayService(db, settings)
 
     def bootstrap(self) -> None:
         self._bootstrap_admin()
+        self.identity.bootstrap()
         self._bootstrap_default_model()
         self._bootstrap_builtin_agents()
+        self.gateway.bootstrap_legacy_catalog()
 
     def _bootstrap_builtin_agents(self) -> None:
         """Install once per tenant, even without a model; preserve later edits."""
@@ -96,7 +119,21 @@ class Platform:
             owners = list(
                 connection.execute(
                     select(t.users)
-                    .where(t.users.c.role == "admin", t.users.c.active.is_(True))
+                    .join(
+                        nt.memberships,
+                        (nt.memberships.c.user_id == t.users.c.id)
+                        & (nt.memberships.c.tenant_id == t.users.c.tenant_id),
+                    )
+                    .join(
+                        nt.tenant_settings,
+                        nt.tenant_settings.c.tenant_id == nt.memberships.c.tenant_id,
+                    )
+                    .where(
+                        nt.memberships.c.role.in_(("owner", "tenant_admin")),
+                        nt.memberships.c.status == "active",
+                        nt.tenant_settings.c.status == "active",
+                        t.users.c.active.is_(True),
+                    )
                     .order_by(t.users.c.created_at, t.users.c.id)
                 ).mappings()
             )
@@ -157,6 +194,7 @@ class Platform:
                     "首次启动请设置至少 12 位的 PLATFORM_ADMIN_PASSWORD。",
                 )
             tenant_id, user_id = uid(), uid()
+            self.db.set_tenant(connection, tenant_id)
             stamp = now()
             connection.execute(
                 insert(t.tenants).values(
@@ -232,6 +270,14 @@ class Platform:
                 )
             )
             audit(connection, dict(user), "model.bootstrap", model_id)
+            connection.execute(
+                update(nt.tenant_settings)
+                .where(
+                    nt.tenant_settings.c.tenant_id == user["tenant_id"],
+                    nt.tenant_settings.c.default_model_id.is_(None),
+                )
+                .values(default_model_id=model_id)
+            )
 
     def login(self, email: str, password: str, address: str) -> dict:
         email = email.strip().lower()
@@ -274,10 +320,15 @@ class Platform:
             )
         except (VerificationError, InvalidHashError):
             valid = False
-        if not valid or not row or not row["active"]:
+        if (
+            not valid
+            or not row
+            or not row["active"]
+            or row["global_status"] != "active"
+        ):
             raise PlatformError(401, "invalid_credentials", "邮箱或密码不正确。")
         token, csrf = secrets.token_urlsafe(48), secrets.token_urlsafe(32)
-        with self.db.transaction(f"tenant:{row['tenant_id']}") as connection:
+        with self.db.transaction(f"identity:{row['id']}") as connection:
             current = (
                 connection.execute(select(t.users).where(t.users.c.id == row["id"]))
                 .mappings()
@@ -285,6 +336,7 @@ class Platform:
             )
             if (
                 not current["active"]
+                or current["global_status"] != "active"
                 or current["password_hash"] != row["password_hash"]
             ):
                 raise PlatformError(
@@ -298,8 +350,12 @@ class Platform:
                     expires_at=time.time() + self.settings.session_hours * 3600,
                 )
             )
-            audit(connection, current, "auth.login", current["id"])
-        return {"user": public_user(current), "csrf_token": csrf, "token": token}
+            self.identity._audit(connection, current["id"], "auth.login", current["id"])
+        return {
+            "user": self.identity.principal(current["id"]),
+            "csrf_token": csrf,
+            "token": token,
+        }
 
     def authenticate(self, token: str | None) -> dict:
         if not token:
@@ -313,6 +369,7 @@ class Platform:
                         t.auth_sessions.c.token_hash == digest(token),
                         t.auth_sessions.c.expires_at > time.time(),
                         t.users.c.active.is_(True),
+                        t.users.c.global_status == "active",
                     )
                 )
                 .mappings()
@@ -320,32 +377,58 @@ class Platform:
             )
         if not row:
             raise PlatformError(401, "session_expired", "登录已失效，请重新登录。")
-        return {"user": public_user(row), "csrf_token": row["csrf_token"]}
+        return {
+            "user": self.identity.principal(row["id"]),
+            "csrf_token": row["csrf_token"],
+        }
 
     def require_current(self, connection, user: dict, admin: bool = False) -> dict:
-        row = (
-            connection.execute(
-                select(t.users).where(
-                    t.users.c.id == user["id"],
-                    t.users.c.tenant_id == user["tenant_id"],
-                    t.users.c.active.is_(True),
-                )
-            )
-            .mappings()
-            .first()
-        )
-        if not row or row["role"] != user["role"]:
-            raise PlatformError(403, "access_revoked", "账号权限已变化，请重新登录。")
-        if admin and row["role"] != "admin":
+        row = self.identity.assert_current(connection, user)
+        if admin and row["tenant_role"] not in {"owner", "tenant_admin"}:
             raise PlatformError(403, "admin_required", "此操作需要管理员权限。")
         return dict(row)
 
+    def require_platform(self, connection, user: dict, capability: str) -> None:
+        active = connection.scalar(
+            select(t.users.c.id)
+            .where(
+                t.users.c.id == user["id"],
+                t.users.c.active.is_(True),
+                t.users.c.global_status == "active",
+            )
+            .with_for_update()
+        )
+        roles = connection.scalars(
+            select(nt.platform_roles.c.role)
+            .where(
+                nt.platform_roles.c.user_id == user["id"],
+                nt.platform_roles.c.revoked_at.is_(None),
+            )
+            .with_for_update()
+        ).all()
+        if not active or capability not in capabilities(None, roles):
+            raise PlatformError(
+                403, "platform_role_required", "此操作需要平台运营权限。"
+            )
+
     def list_resources(
-        self, table, user: dict, own: bool = False, limit: int = 200
+        self,
+        table,
+        user: dict,
+        own: bool = False,
+        limit: int = 200,
+        cursor: str | None = None,
     ) -> list[dict]:
         query = select(table).where(table.c.tenant_id == user["tenant_id"])
-        if own and user["role"] != "admin":
+        if own:
+            require_capability(user, "runs.read_own")
             query = query.where(table.c.user_id == user["id"])
+        if cursor:
+            created, identifier = self.decode_cursor(cursor)
+            query = query.where(
+                (table.c.created_at < created)
+                | ((table.c.created_at == created) & (table.c.id < identifier))
+            )
         with self.db.read() as connection:
             return [
                 dict(row)
@@ -362,67 +445,103 @@ class Platform:
         query = select(table).where(
             table.c.id == resource_id, table.c.tenant_id == user["tenant_id"]
         )
-        if own and user["role"] != "admin":
+        if own:
+            require_capability(user, "runs.read_own")
             query = query.where(table.c.user_id == user["id"])
         row = connection.execute(query).mappings().first()
         if not row:
             raise PlatformError(404, "not_found", "资源不存在或无权访问。")
         return dict(row)
 
-    def create_user(self, user: dict, values: dict) -> dict:
-        values["email"] = values["email"].strip().lower()
-        password_hash = hasher.hash(values.pop("password"))
-        result = dict(
-            values, id=uid(), tenant_id=user["tenant_id"], active=True, created_at=now()
-        )
-        try:
-            with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-                self.require_current(connection, user, admin=True)
-                connection.execute(
-                    insert(t.users).values(**result, password_hash=password_hash)
-                )
-                audit(connection, user, "user.create", result["id"])
-        except IntegrityError:
-            raise PlatformError(409, "email_exists", "该邮箱已被使用。") from None
-        return result
+    @staticmethod
+    def encode_cursor(row: dict) -> str:
+        return base64.urlsafe_b64encode(
+            json.dumps([row["created_at"], row["id"]]).encode()
+        ).decode()
 
-    def update_user(self, user: dict, user_id: str, values: dict) -> dict:
-        with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-            self.require_current(connection, user, admin=True)
-            current = self.owned(connection, t.users, user, user_id)
-            revised = {**current, **values}
+    @staticmethod
+    def decode_cursor(cursor: str) -> tuple[str, str]:
+        try:
+            if len(cursor) > 300:
+                raise ValueError
+            values = json.loads(base64.urlsafe_b64decode(cursor).decode())
             if (
-                current["role"] == "admin"
-                and current["active"]
-                and (revised["role"] != "admin" or not revised["active"])
+                not isinstance(values, list)
+                or len(values) != 2
+                or not all(isinstance(x, str) for x in values)
             ):
-                remaining = connection.scalar(
-                    select(func.count())
-                    .select_from(t.users)
-                    .where(
-                        t.users.c.tenant_id == user["tenant_id"],
-                        t.users.c.active.is_(True),
-                        t.users.c.role == "admin",
-                        t.users.c.id != user_id,
-                    )
-                )
-                if not remaining:
-                    raise PlatformError(
-                        409, "last_admin", "必须保留至少一名启用的管理员。"
-                    )
+                raise ValueError
+            datetime.fromisoformat(values[0])
+            if not 1 <= len(values[1]) <= 64:
+                raise ValueError
+            return tuple(values)
+        except (ValueError, TypeError, UnicodeError):
+            raise PlatformError(400, "invalid_cursor", "分页游标无效。") from None
+
+    def acquire_stream(self, user, run_id):
+        with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
+            self.identity.assert_current(connection, user, "runs.read_own")
+            self.owned(connection, t.runs, user, run_id, own=True)
             connection.execute(
-                update(t.users).where(t.users.c.id == user_id).values(**values)
-            )
-            if "active" in values or "role" in values:
-                connection.execute(
-                    delete(t.auth_sessions).where(t.auth_sessions.c.user_id == user_id)
+                delete(rt.stream_leases).where(
+                    rt.stream_leases.c.tenant_id == user["tenant_id"],
+                    rt.stream_leases.c.expires_at < time.time(),
                 )
-            audit(connection, user, "user.update", user_id)
-        return public_user(revised)
+            )
+            count = connection.scalar(
+                select(func.count())
+                .select_from(rt.stream_leases)
+                .where(rt.stream_leases.c.tenant_id == user["tenant_id"])
+            )
+            maximum = connection.scalar(
+                select(nt.entitlements.c.max_sse_connections).where(
+                    nt.entitlements.c.tenant_id == user["tenant_id"]
+                )
+            )
+            if maximum is None or count >= maximum:
+                raise PlatformError(429, "stream_limit", "组织实时连接数量已达到上限。")
+            identifier = uid()
+            connection.execute(
+                insert(rt.stream_leases).values(
+                    id=identifier,
+                    tenant_id=user["tenant_id"],
+                    user_id=user["id"],
+                    run_id=run_id,
+                    expires_at=time.time() + 30,
+                )
+            )
+            return identifier
+
+    def update_stream(self, user, identifier, *, release=False):
+        with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
+            query = (
+                delete(rt.stream_leases)
+                if release
+                else update(rt.stream_leases).values(expires_at=time.time() + 30)
+            )
+            connection.execute(
+                query.where(
+                    rt.stream_leases.c.id == identifier,
+                    rt.stream_leases.c.tenant_id == user["tenant_id"],
+                    rt.stream_leases.c.user_id == user["id"],
+                )
+            )
 
     def change_password(self, user: dict, old: str, new: str) -> None:
-        with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-            current = self.require_current(connection, user)
+        with self.db.transaction(f"identity:{user['id']}") as connection:
+            current = (
+                connection.execute(
+                    select(t.users).where(
+                        t.users.c.id == user["id"],
+                        t.users.c.active.is_(True),
+                        t.users.c.global_status == "active",
+                    )
+                )
+                .mappings()
+                .first()
+            )
+            if not current:
+                raise PlatformError(401, "access_revoked", "账号已停用。")
             try:
                 hasher.verify(current["password_hash"], old)
             except VerificationError:
@@ -432,59 +551,42 @@ class Platform:
             connection.execute(
                 update(t.users)
                 .where(t.users.c.id == user["id"])
-                .values(password_hash=hasher.hash(new))
+                .values(
+                    password_hash=hasher.hash(new),
+                    auth_version=t.users.c.auth_version + 1,
+                )
             )
             connection.execute(
                 delete(t.auth_sessions).where(t.auth_sessions.c.user_id == user["id"])
             )
-            audit(connection, user, "auth.password_changed", user["id"])
-
-    def save_model(self, user: dict, values: dict, model_id: str | None = None) -> dict:
-        try:
-            with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-                self.require_current(connection, user, admin=True)
-                current = (
-                    self.owned(connection, t.models, user, model_id)
-                    if model_id
-                    else {
-                        "id": uid(),
-                        "tenant_id": user["tenant_id"],
-                        "created_at": now(),
-                        "price_version": 0,
-                    }
+            connection.execute(
+                insert(nt.operation_audits).values(
+                    id=uid(),
+                    actor_user_id=user["id"],
+                    action="auth.password_changed",
+                    target=user["id"],
+                    created_at=now(),
                 )
-                result = {
-                    **current,
-                    **values,
-                    "price_version": current["price_version"] + 1,
-                }
-                if result["max_output_tokens"] > result["context_window"]:
-                    raise PlatformError(
-                        400, "invalid_model_limits", "最大输出不能超过上下文窗口。"
-                    )
-                if model_id:
-                    connection.execute(
-                        update(t.models)
-                        .where(t.models.c.id == model_id)
-                        .values(**result)
-                    )
-                else:
-                    connection.execute(insert(t.models).values(**result))
-                audit(
-                    connection,
-                    user,
-                    "model.update" if model_id else "model.create",
-                    result["id"],
-                )
-        except IntegrityError:
-            raise PlatformError(
-                409, "model_alias_exists", "当前组织中已存在该模型别名。"
-            ) from None
-        return result
+            )
 
     def save_agent(self, user: dict, values: dict, agent_id: str | None = None) -> dict:
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
             self.require_current(connection, user, admin=True)
+            if not agent_id:
+                maximum = connection.scalar(
+                    select(nt.entitlements.c.max_agents).where(
+                        nt.entitlements.c.tenant_id == user["tenant_id"]
+                    )
+                )
+                count = connection.scalar(
+                    select(func.count())
+                    .select_from(t.agents)
+                    .where(t.agents.c.tenant_id == user["tenant_id"])
+                )
+                if maximum is not None and count >= maximum:
+                    raise PlatformError(
+                        429, "agent_limit", "组织 Agent 数量已达到套餐上限。"
+                    )
             current = (
                 self.owned(connection, t.agents, user, agent_id)
                 if agent_id
@@ -546,7 +648,7 @@ class Platform:
 
     def create_session(self, user: dict, agent_id: str, title: str | None) -> dict:
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-            self.require_current(connection, user)
+            self.identity.assert_current(connection, user, "runs.execute")
             agent = self.owned(connection, t.agents, user, agent_id)
             if not agent["published_version"]:
                 raise PlatformError(400, "agent_not_published", "请先发布 Agent。")
@@ -595,9 +697,8 @@ class Platform:
             request["model_id"] = model_id
         fingerprint = digest(json.dumps(request, sort_keys=True))
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-            self.require_current(connection, user)
+            self.identity.assert_current(connection, user, "runs.execute")
             session = self.owned(connection, t.sessions, user, session_id, own=True)
-            # Admin can inspect other members' sessions, but cannot impersonate them.
             if session["user_id"] != user["id"]:
                 raise PlatformError(
                     403, "session_owner_required", "只能在自己的会话中发起运行。"
@@ -630,16 +731,17 @@ class Platform:
                 raise PlatformError(
                     409, "session_busy", "会话中已有运行，请等待完成或取消。"
                 )
-            if (
-                connection.scalar(
-                    select(func.count())
-                    .select_from(t.runs)
-                    .where(
-                        t.runs.c.tenant_id == user["tenant_id"],
-                        t.runs.c.status.in_(ACTIVE_STATUSES),
-                    )
+            if connection.scalar(
+                select(func.count())
+                .select_from(t.runs)
+                .where(
+                    t.runs.c.tenant_id == user["tenant_id"],
+                    t.runs.c.status == "queued",
                 )
-                >= 32
+            ) >= connection.scalar(
+                select(nt.entitlements.c.max_queued_runs).where(
+                    nt.entitlements.c.tenant_id == user["tenant_id"]
+                )
             ):
                 raise PlatformError(429, "queue_full", "组织运行队列已满，请稍后再试。")
             agent = self.owned(connection, t.agents, user, session["agent_id"])
@@ -656,33 +758,82 @@ class Platform:
             if not version:
                 raise PlatformError(400, "agent_not_published", "Agent 尚未发布。")
             spec = dict(version["spec"], version=version["version"])
+            spec["snapshot_schema_version"] = 2
+            policy = (
+                connection.execute(
+                    select(nt.tenant_settings).where(
+                        nt.tenant_settings.c.tenant_id == user["tenant_id"]
+                    )
+                )
+                .mappings()
+                .one()
+            )
+
+            def eligible_route(candidate):
+                resolved = self.gateway.resolve(
+                    user["tenant_id"], candidate, connection=connection
+                )
+                declared = (
+                    connection.scalar(
+                        select(gt.deployments.c.capabilities).where(
+                            gt.deployments.c.id == resolved["deployment_id"]
+                        )
+                    )
+                    or {}
+                )
+                if not declared.get("text") or (
+                    spec.get("tools") and not declared.get("tools")
+                ):
+                    raise PlatformError(
+                        400,
+                        "model_capability_required",
+                        "该模型部署不具备 Agent 所需的文本或工具能力。",
+                    )
+                return resolved
+
             preferred = model_id or spec.get("model_id")
             if preferred:
                 model = self.owned(connection, t.models, user, preferred)
+                routing = eligible_route(model)
             else:
-                row = (
+                rows = (
                     connection.execute(
                         select(t.models)
                         .where(
                             t.models.c.tenant_id == user["tenant_id"],
                             t.models.c.active.is_(True),
                         )
-                        .order_by(
-                            (t.models.c.alias == self.settings.default_model).desc(),
-                            t.models.c.created_at,
-                            t.models.c.id,
-                        )
+                        .order_by(t.models.c.created_at, t.models.c.id)
                     )
                     .mappings()
-                    .first()
+                    .all()
                 )
-                if row is None:
-                    raise PlatformError(
-                        400,
-                        "no_available_model",
-                        "暂无可用模型，请在模型目录添加并启用模型。",
+                catalog = {row["id"]: dict(row) for row in rows}
+                candidates = list(
+                    dict.fromkeys(
+                        [
+                            policy["default_model_id"],
+                            *policy["ordered_model_ids"],
+                            *catalog,
+                        ]
                     )
-                model = dict(row)
+                )
+                failure = None
+                model = None
+                for candidate in candidates:
+                    if candidate not in catalog:
+                        continue
+                    try:
+                        candidate_route = eligible_route(catalog[candidate])
+                    except PlatformError as exc:
+                        failure = exc
+                        continue
+                    model, routing = catalog[candidate], candidate_route
+                    break
+                if model is None:
+                    raise failure or PlatformError(
+                        400, "no_available_model", "暂无已授权且网关就绪的模型。"
+                    )
             if not model["active"]:
                 raise PlatformError(400, "model_disabled", "该模型已停用。")
             # Freeze model identity and rate card for every call of this run.
@@ -690,6 +841,11 @@ class Platform:
                 spec["max_tokens"] = min(spec["max_tokens"], model["max_output_tokens"])
             spec["model_id"] = model["id"]
             spec["model"] = model
+            spec["deployment_id"] = routing["deployment_id"]
+            spec["route"] = routing["route"]
+            spec["price_version_id"] = routing["price_version_id"]
+            spec["config_version"] = routing["config_version"]
+            spec["membership_id"] = user.get("membership_id")
             result = {
                 "id": uid(),
                 "tenant_id": user["tenant_id"],
@@ -758,15 +914,26 @@ class Platform:
         return result
 
     def call_records(
-        self, user: dict, *, run_id: str | None = None, limit: int | None = 200
+        self,
+        user: dict,
+        *,
+        run_id: str | None = None,
+        limit: int | None = 200,
+        cursor: str | None = None,
     ) -> list[dict]:
         """Financial facts override a possibly stale worker display projection."""
         query = select(t.calls).where(t.calls.c.tenant_id == user["tenant_id"])
-        if user["role"] != "admin":
+        if "usage.read_all" not in user.get("capabilities", ()):
             query = query.where(t.calls.c.user_id == user["id"])
         if run_id:
             query = query.where(t.calls.c.run_id == run_id)
-        query = query.order_by(t.calls.c.created_at.desc())
+        if cursor:
+            stamp, identifier = self.decode_cursor(cursor)
+            query = query.where(
+                (t.calls.c.created_at < stamp)
+                | ((t.calls.c.created_at == stamp) & (t.calls.c.id < identifier))
+            )
+        query = query.order_by(t.calls.c.created_at.desc(), t.calls.c.id.desc())
         if limit:
             query = query.limit(limit)
         with self.db.read() as connection:
@@ -798,6 +965,8 @@ class Platform:
                         )
                     row["usage_source"] = "litellm_gateway"
                     row.pop("raw_usage", None)
+                    if "platform.costs.read" not in user.get("capabilities", ()):
+                        row.pop("provider_cost", None)
         return rows
 
     def cancel_run(self, user: dict, run_id: str) -> dict:
@@ -837,54 +1006,104 @@ class Platform:
             ]
 
     def dashboard(self, user: dict) -> dict:
-        rows = self.call_records(user, limit=None)
+        """Aggregate in storage, preserving exact money even for local SQLite."""
+        receipt = reservations_table
+        joined = t.calls.outerjoin(
+            receipt,
+            (receipt.c.tenant_id == t.calls.c.tenant_id)
+            & (receipt.c.call_id == t.calls.c.id),
+        )
+        filters = [t.calls.c.tenant_id == user["tenant_id"]]
+        all_usage = "usage.read_all" in user.get("capabilities", ())
+        if not all_usage:
+            filters.append(t.calls.c.user_id == user["id"])
+        cost = func.coalesce(receipt.c.cost, t.calls.c.cost)
+        cost_sum = (
+            func.exact_sum(cost)
+            if self.db.sqlite
+            else func.sum(cast(cost, Numeric(30, 12)))
+        )
+        tokens = func.coalesce(
+            receipt.c.input_tokens, t.calls.c.input_tokens, 0
+        ) + func.coalesce(receipt.c.output_tokens, t.calls.c.output_tokens, 0)
+        confirmed = case(
+            (receipt.c.status == "settled", 1),
+            ((receipt.c.id.is_(None)) & (t.calls.c.status == "confirmed"), 1),
+            else_=0,
+        )
+        day = (
+            func.strftime("%Y-%m-%d", t.calls.c.created_at, "+8 hours")
+            if self.db.sqlite
+            else func.to_char(
+                func.timezone(
+                    "Asia/Shanghai", cast(t.calls.c.created_at, DateTime(timezone=True))
+                ),
+                "YYYY-MM-DD",
+            )
+        )
+        columns = [
+            func.count().label("requests"),
+            func.coalesce(func.sum(tokens), 0).label("tokens"),
+            cost_sum.label("cost"),
+        ]
         with self.db.read() as connection:
+            totals = dict(
+                connection.execute(
+                    select(*columns, func.sum(confirmed).label("succeeded"))
+                    .select_from(joined)
+                    .where(*filters)
+                )
+                .mappings()
+                .one()
+            )
+            daily = [
+                dict(row)
+                for row in connection.execute(
+                    select(day.label("date"), *columns)
+                    .select_from(joined)
+                    .where(*filters)
+                    .group_by(day)
+                    .order_by(day.desc())
+                    .limit(30)
+                ).mappings()
+            ]
+            models = [
+                dict(row)
+                for row in connection.execute(
+                    select(t.calls.c.model.label("model"), *columns)
+                    .select_from(joined)
+                    .where(*filters)
+                    .group_by(t.calls.c.model)
+                    .order_by(func.count().desc())
+                    .limit(100)
+                ).mappings()
+            ]
             active_filter = [
                 t.runs.c.tenant_id == user["tenant_id"],
                 t.runs.c.status.in_(ACTIVE_STATUSES),
             ]
-            if user["role"] != "admin":
+            if not all_usage:
                 active_filter.append(t.runs.c.user_id == user["id"])
             active = connection.scalar(
-                select(func.count()).select_from(t.runs).where(and_(*active_filter))
+                select(func.count()).select_from(t.runs).where(*active_filter)
             )
-        daily, model_stats = {}, {}
-        for row in rows:
-            # Stored UTC; reporting day is explicitly Asia/Shanghai (UTC+08:00).
-            from datetime import timedelta, timezone
-
-            day = (
-                datetime.fromisoformat(row["created_at"])
-                .astimezone(timezone(timedelta(hours=8)))
-                .date()
-                .isoformat()
-            )
-            for target, key, field in (
-                (daily, day, "date"),
-                (model_stats, row["model"], "model"),
-            ):
-                value = target.setdefault(
-                    key, {field: key, "requests": 0, "tokens": 0, "cost": Decimal(0)}
-                )
-                value["requests"] += 1
-                value["tokens"] += row["input_tokens"] + row["output_tokens"]
-                value["cost"] += Decimal(row["cost"])
-        for value in [*daily.values(), *model_stats.values()]:
-            value["cost"] = str(value["cost"])
-        return {
-            **self.billing.wallet(user["tenant_id"]),
-            "requests": len(rows),
-            "tokens": sum(x["input_tokens"] + x["output_tokens"] for x in rows),
-            "cost": str(sum((Decimal(x["cost"]) for x in rows), Decimal(0))),
+        for row in [totals, *daily, *models]:
+            row["cost"] = str(row["cost"] or 0)
+        result = {
+            "requests": totals["requests"],
+            "tokens": totals["tokens"],
+            "cost": totals["cost"],
             "success_rate": round(
-                sum(x["status"] == "confirmed" for x in rows) / len(rows) * 100, 1
+                (totals["succeeded"] or 0) / totals["requests"] * 100, 1
             )
-            if rows
+            if totals["requests"]
             else 0,
             "active_runs": active,
-            "daily": sorted(daily.values(), key=lambda x: x["date"])[-30:],
-            "models": list(model_stats.values()),
-            "gateway_configured": bool(
-                self.settings.litellm_url and self.settings.litellm_key
-            ),
+            "daily": list(reversed(daily)),
+            "models": models,
+            "gateway_configured": self.gateway.status(user["tenant_id"]).get("status")
+            in {"ready", "legacy"},
         }
+        if "billing.read" in user.get("capabilities", ()):
+            result.update(self.billing.wallet(user["tenant_id"]))
+        return result

@@ -1,5 +1,7 @@
 # 第一版实现契约
 
+> 历史基线文档：下述单组织 API、角色及财务权限描述属于第一版。当前多租户契约见 [multi-tenant-implementation.md](multi-tenant-implementation.md)，部署步骤见 [multi-tenant-operations.md](multi-tenant-operations.md)。
+
 本文是 `architecture.md` 的第一版可运行实现契约。正式设计保留在架构文档，实际完成范围与验证记录写入 README。
 
 ## 开发约定

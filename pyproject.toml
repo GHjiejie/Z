@@ -5,6 +5,7 @@ description = "Add your description here"
 readme = "README.md"
 requires-python = ">=3.13"
 dependencies = [
+    "cryptography>=44",
     "alembic>=1.14,<2",
     "argon2-cffi>=23,<26",
     "deepagents>=0.7.11",

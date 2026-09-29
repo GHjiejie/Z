@@ -42,12 +42,14 @@ type Reservation = {
 export function BillingReconciliation({
   wallet,
   changed,
+  basePath,
 }: {
   wallet: Wallet | null;
+  basePath: string;
   changed: () => Promise<void>;
 }) {
   const resource = useResource<{ items: Reservation[] }>(
-    "/billing/reservations",
+    `${basePath}/billing/reservations`,
   );
   const [all, setAll] = useState(false);
   const [editing, setEditing] = useState<Reservation | null>(null);
@@ -189,7 +191,7 @@ export function BillingReconciliation({
             }
             submit={async (form) => {
               if (!action) throw new Error("请选择明确的处理方式。");
-              await api(`/billing/reservations/${editing.call_id}/resolve`, {
+              await api(`${basePath}/billing/reservations/${editing.call_id}/resolve`, {
                 method: "POST",
                 body: JSON.stringify({
                   action,
@@ -291,7 +293,7 @@ export function BillingReconciliation({
             close={() => setUnblock(false)}
             label="解除暂停"
             submit={async (form) => {
-              await write("/billing/unblock", {
+              await write(`${basePath}/billing/unblock`, {
                 reason: formValue(form, "reason"),
               });
               setUnblock(false);

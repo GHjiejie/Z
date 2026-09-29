@@ -4,10 +4,12 @@
 | --- | --- |
 | 文档版本 | v1.0 |
 | 日期 | 2026-09-30 |
-| 状态 | 设计提案；本次交付文档，尚未实施下述改造 |
+| 状态 | 设计基线；实现进展与验收界限见 [多租户实现说明](multi-tenant-implementation.md) |
 | 适用对象 | 在一套部署中服务多个企业或团队的 Agent SaaS；同时保留单组织自部署能力 |
 | 代码基线 | 当前工作区 `agent_platform/`，含 `0002` 模型解耦迁移与 8 个内置 Agent；不以 Git HEAD 代表全部已落地功能 |
 | 关联文档 | [当前架构图](architecture-diagrams.md)、[原始目标架构](architecture.md)、[现有 API 契约](implementation-contract.md)、[部署说明](deployment.md) |
+
+> 本文的“现状”保留设计时的 0002 基线，不代表当前代码。最新功能、迁移与尚未执行的验收以实现说明为准。
 
 ## 阅读导航
 

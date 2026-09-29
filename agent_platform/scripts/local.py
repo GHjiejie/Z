@@ -92,13 +92,52 @@ def load_runtime_environment(
         **values(platform_env_file),
         **process_environment,
     }
-    if not env.get("PLATFORM_LITELLM_URL", "").strip():
-        env["PLATFORM_LITELLM_URL"] = env.get("OPENAI_BASE_URL", "").strip()
-    if not env.get("PLATFORM_LITELLM_KEY", "").strip():
-        env["PLATFORM_LITELLM_KEY"] = env.get("OPENAI_API_KEY", "").strip()
+    # Root upstream credentials are available to the managed gateway only.
+    # External mode must explicitly configure an inference-only LiteLLM key.
     if not env.get("PLATFORM_DEFAULT_MODEL", "").strip():
         env["PLATFORM_DEFAULT_MODEL"] = env.get("MODEL", "").strip()
     return env
+
+
+def ensure_encryption_key(path: Path, env: dict[str, str]) -> dict[str, str]:
+    """Create one persistent local encryption key without logging its value."""
+    import re
+    import tempfile
+
+    from cryptography.fernet import Fernet
+
+    value = env.get("PLATFORM_SECRET_ENCRYPTION_KEY", "").strip()
+    if value:
+        try:
+            Fernet(value.encode())
+        except (ValueError, TypeError):
+            raise RuntimeError(
+                "PLATFORM_SECRET_ENCRYPTION_KEY 格式无效；不会替换已有加密密钥。"
+            ) from None
+        path.chmod(0o600)
+        return env
+    value = Fernet.generate_key().decode()
+    contents = path.read_text()
+    line = f"PLATFORM_SECRET_ENCRYPTION_KEY={value}\n"
+    pattern = r"(?m)^PLATFORM_SECRET_ENCRYPTION_KEY=.*(?:\n|$)"
+    contents = (
+        re.sub(pattern, line, contents)
+        if re.search(pattern, contents)
+        else contents.rstrip("\n") + "\n" + line
+    )
+    temporary = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            "w", dir=path.parent, prefix=".env.", delete=False
+        ) as target:
+            temporary = Path(target.name)
+            os.fchmod(target.fileno(), 0o600)
+            target.write(contents)
+        temporary.replace(path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
+    return {**env, "PLATFORM_SECRET_ENCRYPTION_KEY": value}
 
 
 def check_port(host: str, port: int) -> None:
@@ -123,7 +162,13 @@ def setup_database() -> None:
     from alembic.script import ScriptDirectory
     from sqlalchemy import inspect
 
-    from agent_platform.infrastructure import tables  # noqa: F401
+    from agent_platform.infrastructure import (  # noqa: F401
+        gateway_tables,
+        operations_tables,
+        runtime_tables,
+        tables,
+        tenancy_tables,
+    )
     from agent_platform.infrastructure.config import Settings
     from agent_platform.infrastructure.db import Database, metadata
     from agent_platform.modules.billing import service  # noqa: F401
@@ -249,7 +294,18 @@ class Supervisor:
                     say(
                         f"已创建 {env_file}（仅当前用户可读写），初始管理员密码在 PLATFORM_ADMIN_PASSWORD 中。"
                     )
-                env = load_runtime_environment(env_file)
+                configured = ensure_encryption_key(
+                    env_file, load_runtime_environment(env_file)
+                )
+                if configured.get("PLATFORM_MODE", "local") != "local":
+                    raise RuntimeError(
+                        "make start 仅管理本地模式；SaaS 请使用独立迁移与部署流程。"
+                    )
+                from agent_platform.scripts.gateway import platform_environment
+
+                # Preserve the bootstrap password only for the explicit init job.
+                bootstrap_password = configured.get("PLATFORM_ADMIN_PASSWORD", "")
+                env = configured
                 if gateway_mode == "managed":
                     from agent_platform.scripts.gateway import LocalGateway
 
@@ -261,13 +317,37 @@ class Supervisor:
                     say(
                         f"LiteLLM 管理页：{self.gateway.url}/ui；登录账号和密码保存在 {self.gateway.control_file}。"
                     )
+                env = {
+                    **platform_environment(env),
+                    "PLATFORM_MODE": "local",
+                    "PLATFORM_EMBEDDED_WORKER": "false",
+                }
+                sync_env = (
+                    self.gateway.synchronization_environment(env)
+                    if self.gateway
+                    else {
+                        **env,
+                        "PLATFORM_GATEWAY_CONTROL_URL": configured.get(
+                            "PLATFORM_GATEWAY_CONTROL_URL", ""
+                        ),
+                        "PLATFORM_GATEWAY_CONTROL_KEY": configured.get(
+                            "PLATFORM_GATEWAY_CONTROL_KEY", ""
+                        ),
+                    }
+                )
                 self.record("构建界面")
                 self.run(
                     ["npm", "--prefix", str(PLATFORM / "apps/web"), "run", "build"]
                 )
                 self.record("初始化数据库")
                 self.run([sys.executable, "-m", MODULE, "setup-db"], env)
-                self.run([sys.executable, "-m", "agent_platform", "init"], env)
+                self.run(
+                    [sys.executable, "-m", "agent_platform", "init"],
+                    {
+                        **env,
+                        "PLATFORM_ADMIN_PASSWORD": bootstrap_password,
+                    },
+                )
                 self.record("等待服务就绪")
                 api = self.spawn(
                     [
@@ -282,8 +362,17 @@ class Supervisor:
                     ],
                     env,
                 )
-                if env.get("PLATFORM_EMBEDDED_WORKER", "true").lower() != "true":
-                    self.spawn([sys.executable, "-m", "agent_platform", "worker"], env)
+                self.spawn([sys.executable, "-m", "agent_platform", "worker"], env)
+                self.spawn(
+                    [sys.executable, "-m", "agent_platform", "gateway-sync"], sync_env
+                )
+                self.spawn([sys.executable, "-m", "agent_platform", "maintenance"], env)
+                self.state["services"] = [
+                    "api",
+                    "worker",
+                    "gateway-sync",
+                    "maintenance",
+                ]
                 deadline = time.monotonic() + 45
                 probe_host = "127.0.0.1" if host == "0.0.0.0" else host
                 while time.monotonic() < deadline:
@@ -291,9 +380,9 @@ class Supervisor:
                         raise RuntimeError("服务启动失败，相关进程已退出。")
                     try:
                         with urllib.request.urlopen(
-                            f"http://{probe_host}:{port}/api/v1/health", timeout=1
+                            f"http://{probe_host}:{port}/api/v1/ready", timeout=1
                         ) as response:
-                            if json.load(response).get("status") == "ok":
+                            if json.load(response).get("status") == "ready":
                                 break
                     except (OSError, ValueError, urllib.error.URLError):
                         pass
@@ -313,9 +402,7 @@ class Supervisor:
                 elif self.gateway is not None:
                     say("模型请求将经过本地 LiteLLM Proxy，平台已使用受限调用密钥。")
                 elif env.get("PLATFORM_DEFAULT_MODEL"):
-                    say(
-                        "已从有效配置接入 OpenAI 兼容模型网关；根目录密钥仅在当前进程中使用。"
-                    )
+                    say("已接入配置的兼容网关；运行进程使用受限调用凭据。")
                 while api.poll() is None:
                     if any(child.poll() is not None for child in self.children):
                         raise RuntimeError("服务进程意外退出，正在停止其他关联进程。")

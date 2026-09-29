@@ -2,7 +2,12 @@ export type User = {
   id: string;
   email: string;
   name: string;
-  role: "admin" | "member";
+  role: "admin" | "member" | "finance_viewer";
+  tenant_role?: TenantRole;
+  membership_version?: number;
+  tenant_status?: string;
+  capabilities?: string[];
+  platform_roles?: string[];
   tenant_id: string;
   active: boolean;
 };
@@ -107,6 +112,7 @@ export type Quota = {
   tpm: number | null;
   concurrent: number | null;
   max_budget: string | null;
+  version?: number;
 };
 export type Audit = {
   id: string;
@@ -114,4 +120,24 @@ export type Audit = {
   action: string;
   target: string;
   created_at: string;
+};
+
+export type TenantRole = "owner" | "tenant_admin" | "member" | "finance_viewer";
+export type Membership = {
+  id: string; user_id: string; tenant_id: string; tenant_name?: string;
+  name?: string; email?: string; role: TenantRole; status: string;
+  tenant_status?: string; version?: number; authz_version?: number;
+};
+export type IdentityUser = {
+  id: string; email: string; name: string; active: boolean;
+  platform_roles: string[]; capabilities: string[]; memberships: Membership[];
+};
+export type Tenant = { id: string; name: string; status: string; version?: number; authz_version?: number; created_at?: string; };
+export type Invitation = { id: string; email: string; role: TenantRole; status?: string; expires_at?: string | number; accepted_at?: string | null; revoked_at?: string | null; token?: string; accept_url?: string; };
+export type Entitlements = {
+  rpm: number | null; tpm: number | null; concurrent: number | null;
+  max_queued_runs: number; max_running_runs?: number; max_concurrent_runs?: number;
+  max_members: number; max_agents: number; max_sse_connections: number; max_export_jobs: number;
+  max_budget: string | null;
+  version?: number;
 };

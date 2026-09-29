@@ -41,6 +41,15 @@ users = Table(
     Column("password_hash", Text, nullable=False),
     Column("role", String(20), nullable=False),
     Column("active", Boolean, nullable=False, default=True),
+    Column(
+        "global_status",
+        String(20),
+        nullable=False,
+        default="active",
+        server_default="active",
+    ),
+    Column("auth_version", Integer, nullable=False, default=1, server_default="1"),
+    Column("email_verified_at", String(40)),
     UniqueConstraint("tenant_id", "id"),
 )
 auth_sessions = Table(
@@ -115,7 +124,9 @@ sessions = Table(
     Column("title", String(160), nullable=False),
     UniqueConstraint("tenant_id", "id"),
     ForeignKeyConstraint(
-        ["tenant_id", "user_id"], ["platform_users.tenant_id", "platform_users.id"]
+        ["tenant_id", "user_id"],
+        ["platform_memberships.tenant_id", "platform_memberships.user_id"],
+        name="fk_sessions_membership",
     ),
     ForeignKeyConstraint(
         ["tenant_id", "agent_id"], ["platform_agents.tenant_id", "platform_agents.id"]
@@ -141,6 +152,7 @@ runs = Table(
     Column("fence", Integer, nullable=False, default=0),
     Column("finished_at", String(40)),
     UniqueConstraint("tenant_id", "user_id", "idempotency_key"),
+    UniqueConstraint("tenant_id", "id", name="uq_runs_tenant_id"),
     ForeignKeyConstraint(
         ["tenant_id", "session_id"],
         ["platform_sessions.tenant_id", "platform_sessions.id"],
@@ -155,15 +167,31 @@ messages = Table(
     Column("role", String(20), nullable=False),
     Column("content", Text, nullable=False),
     UniqueConstraint("run_id", "role"),
+    ForeignKeyConstraint(
+        ["tenant_id", "session_id"],
+        ["platform_sessions.tenant_id", "platform_sessions.id"],
+        name="fk_messages_session",
+    ),
+    ForeignKeyConstraint(
+        ["tenant_id", "run_id"],
+        ["platform_runs.tenant_id", "platform_runs.id"],
+        name="fk_messages_run",
+    ),
 )
 run_events = Table(
     "platform_run_events",
     metadata,
     Column("run_id", String(64), primary_key=True),
+    Column("tenant_id", String(64), nullable=False),
     Column("sequence", Integer, primary_key=True),
     Column("type", String(64), nullable=False),
     Column("data", JSON, nullable=False),
     Column("created_at", String(40), nullable=False),
+    ForeignKeyConstraint(
+        ["tenant_id", "run_id"],
+        ["platform_runs.tenant_id", "platform_runs.id"],
+        name="fk_events_tenant_run",
+    ),
 )
 calls = Table(
     "platform_calls",
@@ -184,6 +212,16 @@ calls = Table(
     Column("raw_usage", JSON),
     Column("error", Text, nullable=False, default=""),
     Column("finished_at", String(40)),
+    ForeignKeyConstraint(
+        ["tenant_id", "run_id"],
+        ["platform_runs.tenant_id", "platform_runs.id"],
+        name="fk_calls_run",
+    ),
+    ForeignKeyConstraint(
+        ["tenant_id", "model_id"],
+        ["platform_models.tenant_id", "platform_models.id"],
+        name="fk_calls_model",
+    ),
 )
 audits = Table(
     "platform_audits",
@@ -196,3 +234,16 @@ audits = Table(
 )
 Index("platform_calls_tenant_date", calls.c.tenant_id, calls.c.created_at)
 Index("platform_runs_tenant_date", runs.c.tenant_id, runs.c.created_at)
+Index(
+    "ix_events_tenant_run_sequence",
+    run_events.c.tenant_id,
+    run_events.c.run_id,
+    run_events.c.sequence,
+)
+Index(
+    "ix_runs_tenant_status_created",
+    runs.c.tenant_id,
+    runs.c.status,
+    runs.c.created_at,
+    runs.c.id,
+)

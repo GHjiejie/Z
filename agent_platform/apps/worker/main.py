@@ -8,9 +8,12 @@ from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
-from sqlalchemy import func, insert, select, update
+from sqlalchemy import and_, func, insert, or_, select, update
 
+from agent_platform.infrastructure import gateway_tables as gt
+from agent_platform.infrastructure import runtime_tables as rt
 from agent_platform.infrastructure import tables as t
+from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.modules.billing.service import BillingService, reservations_table
 from agent_platform.modules.platform import Platform, append_event, now, uid
@@ -57,58 +60,136 @@ class Worker:
         self.platform = platform
         self.db = platform.db
         self.settings = platform.settings
-        self.gateway = gateway or Gateway(
-            self.settings.litellm_url,
-            self.settings.litellm_key,
-            timeout=self.settings.model_timeout,
-            local_address=self.settings.gateway_local_address,
-        )
+        # An explicitly injected adapter is only for offline execution fixtures.
+        # Production resolves fresh tenant credentials for every external call.
+        self.gateway = gateway
         self.owner = uid()
+        self._claim_cursor = ""
+        self._recover_cursor = ""
         self.max_run_cost = Decimal(self.settings.max_run_cost)
         if not self.max_run_cost.is_finite() or self.max_run_cost <= 0:
             raise ValueError("PLATFORM_MAX_RUN_COST must be a finite positive amount")
 
     def claim(self) -> dict | None:
-        with self.db.transaction("scheduler") as connection:
-            candidates = list(
-                connection.execute(
-                    select(t.runs)
-                    .where(t.runs.c.status == "queued")
-                    .order_by(t.runs.c.created_at)
-                    .limit(128)
-                ).mappings()
+        for tenant_id in self._tenant_page(self._claim_cursor, active=True, limit=128):
+            self._claim_cursor = tenant_id
+            with (
+                self.db.tenant_scope(tenant_id),
+                self.db.transaction(f"tenant:{tenant_id}") as connection,
+            ):
+                status = connection.scalar(
+                    select(nt.tenant_settings.c.status).where(
+                        nt.tenant_settings.c.tenant_id == tenant_id
+                    )
+                )
+                ceiling = connection.scalar(
+                    select(nt.entitlements.c.max_concurrent_runs).where(
+                        nt.entitlements.c.tenant_id == tenant_id
+                    )
+                )
+                if status != "active" or ceiling is None or ceiling <= 0:
+                    continue
+                active = connection.scalar(
+                    select(func.count())
+                    .select_from(t.runs)
+                    .where(
+                        t.runs.c.tenant_id == tenant_id,
+                        t.runs.c.status.in_(("running", "cancelling")),
+                    )
+                )
+                if active >= ceiling:
+                    continue
+                row = (
+                    connection.execute(
+                        select(t.runs)
+                        .where(
+                            t.runs.c.tenant_id == tenant_id, t.runs.c.status == "queued"
+                        )
+                        .order_by(t.runs.c.created_at, t.runs.c.id)
+                        .limit(1)
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not row:
+                    continue
+                try:
+                    self._authorize_identity(connection, dict(row))
+                except PlatformError:
+                    connection.execute(
+                        update(t.runs)
+                        .where(
+                            t.runs.c.id == row["id"], t.runs.c.tenant_id == tenant_id
+                        )
+                        .values(
+                            status="cancelled", cancel_requested=True, finished_at=now()
+                        )
+                    )
+                    append_event(
+                        connection,
+                        row["id"],
+                        "run.cancelled",
+                        {"status": "cancelled", "error": "运行授权已失效。"},
+                    )
+                    continue
+                changes = {
+                    "status": "running",
+                    "owner": self.owner,
+                    "fence": row["fence"] + 1,
+                    "lease_until": time.time() + 20,
+                    "deadline": time.time() + self.settings.run_timeout,
+                }
+                result = connection.execute(
+                    update(t.runs)
+                    .where(
+                        t.runs.c.id == row["id"],
+                        t.runs.c.tenant_id == tenant_id,
+                        t.runs.c.status == "queued",
+                    )
+                    .values(**changes)
+                )
+                if result.rowcount:
+                    return {**dict(row), **changes}
+        return None
+
+    def _tenant_page(self, cursor: str, *, active=False, limit=32) -> list[str]:
+        """Global identity metadata only; tenant content is never scanned unscoped."""
+        base = select(nt.tenant_settings.c.tenant_id)
+        if active:
+            base = base.where(nt.tenant_settings.c.status == "active")
+        with self.db.read() as connection:
+            identifiers = list(
+                connection.scalars(
+                    base.where(nt.tenant_settings.c.tenant_id > cursor)
+                    .order_by(nt.tenant_settings.c.tenant_id)
+                    .limit(limit)
+                )
             )
-            active = dict(
-                connection.execute(
-                    select(t.runs.c.tenant_id, func.count())
-                    .where(t.runs.c.status.in_(["running", "cancelling"]))
-                    .group_by(t.runs.c.tenant_id)
-                ).all()
-            )
-            if not candidates:
-                return None
-            # Prefer tenants with fewer running jobs, then oldest queued request.
-            row = min(
-                candidates,
-                key=lambda r: (active.get(r["tenant_id"], 0), r["created_at"]),
-            )
-            changes = {
-                "status": "running",
-                "owner": self.owner,
-                "fence": row["fence"] + 1,
-                "lease_until": time.time() + 20,
-                "deadline": time.time() + self.settings.run_timeout,
-            }
-            result = connection.execute(
-                update(t.runs)
-                .where(t.runs.c.id == row["id"], t.runs.c.status == "queued")
-                .values(**changes)
-            )
-            return {**dict(row), **changes} if result.rowcount else None
+            if len(identifiers) < limit and cursor:
+                identifiers.extend(
+                    connection.scalars(
+                        base.where(nt.tenant_settings.c.tenant_id <= cursor)
+                        .order_by(nt.tenant_settings.c.tenant_id)
+                        .limit(limit - len(identifiers))
+                    )
+                )
+        return identifiers
+
+    def _authorize_identity(self, connection, run: dict) -> dict:
+        identity = {"id": run["user_id"], "tenant_id": run["tenant_id"]}
+        if run["spec"].get("membership_id"):
+            identity["membership_id"] = run["spec"]["membership_id"]
+        return self.platform.identity.assert_current(
+            connection, identity, "runs.execute"
+        )
 
     def _assert_lease(self, connection, run: dict):
         current = (
-            connection.execute(select(t.runs).where(t.runs.c.id == run["id"]))
+            connection.execute(
+                select(t.runs).where(
+                    t.runs.c.id == run["id"], t.runs.c.tenant_id == run["tenant_id"]
+                )
+            )
             .mappings()
             .one()
         )
@@ -127,15 +208,21 @@ class Worker:
             append_event(connection, run["id"], kind, data)
 
     def is_cancelled(self, run: dict) -> bool:
-        with self.db.read() as connection:
+        with self.db.tenant_scope(run["tenant_id"]), self.db.read() as connection:
             current = (
-                connection.execute(select(t.runs).where(t.runs.c.id == run["id"]))
+                connection.execute(
+                    select(t.runs).where(
+                        t.runs.c.id == run["id"], t.runs.c.tenant_id == run["tenant_id"]
+                    )
+                )
                 .mappings()
                 .one()
             )
-            active = connection.scalar(
-                select(t.users.c.active).where(t.users.c.id == run["user_id"])
-            )
+            try:
+                self._authorize_identity(connection, run)
+                active = True
+            except PlatformError:
+                active = False
         return bool(
             not active
             or current["cancel_requested"]
@@ -163,16 +250,7 @@ class Worker:
         self, connection, run: dict, input_tokens: int, amount: Decimal
     ) -> None:
         current = self._assert_lease(connection, run)
-        user = (
-            connection.execute(
-                select(t.users).where(
-                    t.users.c.id == run["user_id"],
-                    t.users.c.tenant_id == run["tenant_id"],
-                )
-            )
-            .mappings()
-            .one()
-        )
+        self._authorize_identity(connection, run)
         model = (
             connection.execute(
                 select(t.models).where(
@@ -181,14 +259,19 @@ class Worker:
                 )
             )
             .mappings()
-            .one()
+            .first()
         )
-        if not user["active"] or current["cancel_requested"]:
+        if current["cancel_requested"]:
             raise PlatformError(403, "access_revoked", "账号已停用或运行已取消。")
-        if not model["active"] or model["alias"] != run["spec"]["model"]["alias"]:
+        if (
+            not model
+            or not model["active"]
+            or model["alias"] != run["spec"]["model"]["alias"]
+        ):
             raise PlatformError(
                 403, "model_disabled", "模型已停用或其部署发生变化，请重新运行。"
             )
+        self._validate_route(connection, run)
         max_output = run["spec"]["max_tokens"]
         if (
             max_output > model["max_output_tokens"]
@@ -226,6 +309,149 @@ class Worker:
                 f"本次运行达到 {self.max_run_cost} USD 的费用上限。",
             )
 
+    def _validate_route(self, connection, run: dict) -> None:
+        if self.gateway is not None and not run["spec"].get("deployment_id"):
+            return  # Offline fixtures have no external deployment or credentials.
+        row = (
+            connection.execute(
+                select(
+                    gt.model_bindings.c.enabled,
+                    gt.deployments.c.id,
+                    gt.deployments.c.internal_route,
+                    gt.deployments.c.status,
+                    gt.deployments.c.config_version,
+                    gt.deployments.c.owner_scope,
+                    gt.deployments.c.owner_tenant_id,
+                )
+                .join(
+                    gt.deployments,
+                    gt.model_bindings.c.deployment_id == gt.deployments.c.id,
+                )
+                .where(
+                    gt.model_bindings.c.tenant_id == run["tenant_id"],
+                    gt.model_bindings.c.model_id == run["spec"]["model_id"],
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if (
+            not row
+            or not row["enabled"]
+            or row["status"] != "active"
+            or (
+                row["owner_scope"] == "tenant"
+                and row["owner_tenant_id"] != run["tenant_id"]
+            )
+            or row["id"] != run["spec"].get("deployment_id")
+            or (row["internal_route"] != run["spec"].get("route"))
+            or (
+                run["spec"].get("config_version") is not None
+                and row["config_version"] != run["spec"]["config_version"]
+            )
+        ):
+            raise PlatformError(
+                403, "model_grant_revoked", "模型授权或部署配置已变化，请重新发起运行。"
+            )
+
+    def _resolve_inference(self, run: dict) -> tuple[object, dict]:
+        with self.db.tenant_scope(run["tenant_id"]):
+            if self.gateway is not None:
+                return self.gateway, {
+                    "deployment_id": run["spec"].get("deployment_id"),
+                    "route": run["spec"].get("route", run["spec"]["model"]["alias"]),
+                    "credential_version_id": None,
+                    "price_version_id": run["spec"].get("price_version_id"),
+                    "config_version": run["spec"].get("config_version", 1),
+                }
+            routing = self.platform.gateway.resolve(
+                run["tenant_id"],
+                {
+                    **run["spec"]["model"],
+                    "deployment_id": run["spec"].get("deployment_id"),
+                },
+            )
+            if routing["deployment_id"] != run["spec"].get("deployment_id") or (
+                routing["route"] != run["spec"].get("route")
+            ):
+                raise PlatformError(
+                    403, "deployment_changed", "模型部署已变化，请重新发起运行。"
+                )
+            gateway = Gateway(
+                routing["base_url"],
+                routing["api_key"],
+                timeout=self.settings.model_timeout,
+                local_address=self.settings.gateway_local_address,
+            )
+            # Credentials remain solely in the transient inference adapter.
+            return gateway, {
+                key: routing.get(key)
+                for key in (
+                    "deployment_id",
+                    "route",
+                    "credential_version_id",
+                    "price_version_id",
+                    "config_version",
+                )
+            }
+
+    def _record_attempt(self, run: dict, call_id: str, routing: dict) -> None:
+        with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
+            current = self._assert_lease(connection, run)
+            identity = self._authorize_identity(connection, run)
+            if current["cancel_requested"]:
+                raise RunCancelled()
+            self._validate_route(connection, run)
+            if routing["credential_version_id"]:
+                binding = (
+                    connection.execute(
+                        select(gt.bindings).where(
+                            gt.bindings.c.tenant_id == run["tenant_id"],
+                            gt.bindings.c.active_credential_version_id
+                            == routing["credential_version_id"],
+                            gt.bindings.c.status == "ready",
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                credential = (
+                    connection.execute(
+                        select(gt.credentials).where(
+                            gt.credentials.c.tenant_id == run["tenant_id"],
+                            gt.credentials.c.id == routing["credential_version_id"],
+                            gt.credentials.c.status == "active",
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if not binding or not credential:
+                    raise PlatformError(
+                        403,
+                        "gateway_credential_changed",
+                        "调用凭据已变化，请重新发起运行。",
+                    )
+            if routing["deployment_id"] is None and self.gateway is not None:
+                return
+            connection.execute(
+                insert(rt.call_attempts).values(
+                    id=call_id,
+                    tenant_id=run["tenant_id"],
+                    run_id=run["id"],
+                    membership_id=identity["membership_id"],
+                    deployment_id=routing["deployment_id"],
+                    credential_version_id=routing["credential_version_id"],
+                    price_version_id=run["spec"].get("price_version_id")
+                    or routing["price_version_id"],
+                    config_version=run["spec"].get(
+                        "config_version", routing["config_version"]
+                    ),
+                    route=routing["route"],
+                    created_at=now(),
+                )
+            )
+
     def register_call(self, run: dict, call_id: str) -> None:
         model = run["spec"]["model"]
         with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
@@ -259,6 +485,12 @@ class Worker:
             )
 
     async def invoke(
+        self, run: dict, messages: list[dict], tools: list[dict]
+    ) -> ModelReply:
+        with self.db.tenant_scope(run["tenant_id"]):
+            return await self._invoke(run, messages, tools)
+
+    async def _invoke(
         self, run: dict, messages: list[dict], tools: list[dict]
     ) -> ModelReply:
         call_id = uid()
@@ -318,6 +550,8 @@ class Worker:
                 raise
             if await asyncio.to_thread(self.is_cancelled, run):
                 raise RunCancelled()
+            inference, routing = await asyncio.to_thread(self._resolve_inference, run)
+            await asyncio.to_thread(self._record_attempt, run, call_id, routing)
             await asyncio.to_thread(sync_call_receipt, self.platform, receipt)
             await asyncio.to_thread(
                 self.event,
@@ -328,8 +562,12 @@ class Worker:
             sent = True
             buffer = ""
             flushed_at = time.monotonic()
-            async for event in self.gateway.stream(
-                messages, model["alias"], max_tokens, run["spec"]["temperature"], tools
+            async for event in inference.stream(
+                messages,
+                routing["route"],
+                max_tokens,
+                run["spec"]["temperature"],
+                tools,
             ):
                 if event.type == "text":
                     buffer += event.data["text"]
@@ -464,6 +702,10 @@ class Worker:
             )
 
     async def execute(self, run: dict) -> None:
+        with self.db.tenant_scope(run["tenant_id"]):
+            await self._execute(run)
+
+    async def _execute(self, run: dict) -> None:
         pulse = asyncio.create_task(self.heartbeat(run))
         try:
             with self.db.read() as connection:
@@ -471,7 +713,10 @@ class Worker:
                     {"role": row["role"], "content": row["content"]}
                     for row in connection.execute(
                         select(t.messages)
-                        .where(t.messages.c.session_id == run["session_id"])
+                        .where(
+                            t.messages.c.session_id == run["session_id"],
+                            t.messages.c.tenant_id == run["tenant_id"],
+                        )
                         .order_by(t.messages.c.created_at)
                     ).mappings()
                 ]
@@ -534,109 +779,152 @@ class Worker:
                 await pulse
 
     def recover(self) -> None:
-        """Never replay an external request after losing its worker lease."""
+        """Bounded tenant batches repair evidence without replaying requests."""
+        for tenant_id in self._tenant_page(self._recover_cursor, limit=32):
+            self._recover_cursor = tenant_id
+            with self.db.tenant_scope(tenant_id):
+                self._recover_tenant(tenant_id)
+
+    def _recover_tenant(self, tenant_id: str) -> None:
         cutoff = (
             datetime.now(UTC) - timedelta(seconds=self.settings.run_timeout)
         ).isoformat()
-        with self.db.read() as connection:
-            queued = [
-                dict(row)
-                for row in connection.execute(
-                    select(t.runs).where(
-                        t.runs.c.status == "queued", t.runs.c.created_at < cutoff
-                    )
-                ).mappings()
-            ]
-            stale = [
-                dict(row)
-                for row in connection.execute(
-                    select(t.runs).where(
-                        t.runs.c.status.in_(["running", "cancelling"]),
-                        t.runs.c.lease_until < time.time(),
-                    )
-                ).mappings()
-            ]
-        for run in queued:
-            with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
-                result = connection.execute(
-                    update(t.runs)
+        terminal = ("failed", "cancelled", "expired", "succeeded")
+        with self.db.transaction(f"tenant:{tenant_id}") as connection:
+            due = list(
+                connection.execute(
+                    select(t.runs)
                     .where(
-                        t.runs.c.id == run["id"],
-                        t.runs.c.status == "queued",
-                        t.runs.c.created_at < cutoff,
+                        t.runs.c.tenant_id == tenant_id,
+                        or_(
+                            and_(
+                                t.runs.c.status == "queued",
+                                t.runs.c.created_at < cutoff,
+                            ),
+                            and_(
+                                t.runs.c.status.in_(("running", "cancelling")),
+                                or_(
+                                    t.runs.c.lease_until < time.time(),
+                                    t.runs.c.lease_until.is_(None),
+                                ),
+                            ),
+                        ),
                     )
-                    .values(
-                        status="expired",
-                        error="排队超时，请稍后重新发起。",
-                        finished_at=now(),
-                    )
+                    .order_by(t.runs.c.created_at, t.runs.c.id)
+                    .limit(64)
+                ).mappings()
+            )
+            for run in due:
+                queued = run["status"] == "queued"
+                state = "expired" if queued else "failed"
+                message = (
+                    "排队超时，未调用模型。" if queued else "执行进程失联，未自动重放。"
                 )
-                if result.rowcount:
-                    append_event(
-                        connection,
-                        run["id"],
-                        "run.expired",
-                        {"status": "expired", "error": "排队超时，未调用模型。"},
-                    )
-        for run in stale:
-            with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
-                result = connection.execute(
+                connection.execute(
                     update(t.runs)
-                    .where(
-                        t.runs.c.id == run["id"],
-                        t.runs.c.lease_until < time.time(),
-                        t.runs.c.status.in_(["running", "cancelling"]),
-                    )
+                    .where(t.runs.c.tenant_id == tenant_id, t.runs.c.id == run["id"])
                     .values(
-                        status="failed",
+                        status=state,
                         fence=run["fence"] + 1,
-                        error="执行进程失联，请核实费用后重新发起。",
+                        error=message,
+                        lease_until=None,
                         finished_at=now(),
                     )
                 )
-                if result.rowcount:
-                    append_event(
-                        connection,
-                        run["id"],
-                        "run.failed",
-                        {"status": "failed", "error": "执行进程失联，未自动重放。"},
-                    )
-        # Billing evidence is authoritative; rebuilding this projection repairs
-        # a crash between financial commit and reporting update.
+                append_event(
+                    connection,
+                    run["id"],
+                    f"run.{state}",
+                    {"status": state, "error": message},
+                )
+
+        mismatches = [
+            and_(reservations_table.c.status == stored, t.calls.c.status != projected)
+            for stored, projected in (
+                ("settled", "confirmed"),
+                ("released", "released"),
+                ("written_off", "written_off"),
+                ("unresolved", "unresolved"),
+                ("reserved", "running"),
+            )
+        ]
         with self.db.read() as connection:
-            receipts = list(connection.execute(select(reservations_table)).mappings())
-            run_status = dict(
-                connection.execute(select(t.runs.c.id, t.runs.c.status)).all()
+            receipts = list(
+                connection.execute(
+                    select(reservations_table, t.runs.c.status.label("run_status"))
+                    .join(
+                        t.runs,
+                        and_(
+                            t.runs.c.id == reservations_table.c.run_id,
+                            t.runs.c.tenant_id == reservations_table.c.tenant_id,
+                        ),
+                    )
+                    .outerjoin(
+                        t.calls,
+                        and_(
+                            t.calls.c.id == reservations_table.c.call_id,
+                            t.calls.c.tenant_id == reservations_table.c.tenant_id,
+                        ),
+                    )
+                    .where(
+                        reservations_table.c.tenant_id == tenant_id,
+                        or_(
+                            and_(
+                                reservations_table.c.status == "reserved",
+                                t.runs.c.status.in_(terminal),
+                            ),
+                            *mismatches,
+                        ),
+                    )
+                    .order_by(reservations_table.c.updated_at, reservations_table.c.id)
+                    .limit(64)
+                ).mappings()
             )
         for row in receipts:
-            if row["status"] == "reserved" and run_status.get(row["run_id"]) in (
-                "failed",
-                "cancelled",
-                "expired",
-                "succeeded",
-            ):
+            if row["status"] == "reserved" and row["run_status"] in terminal:
                 receipt = self.platform.billing.unresolved(
-                    row["tenant_id"], row["call_id"], "执行结束但缺少结算证据。"
+                    tenant_id, row["call_id"], "执行结束但缺少结算证据。"
                 )
             else:
                 from agent_platform.modules.billing.service import _serialize
 
                 receipt = _serialize(dict(row))
             sync_call_receipt(self.platform, receipt)
-        with self.db.transaction("orphan-calls") as connection:
-            known = [row["call_id"] for row in receipts]
-            dead_runs = [
-                key
-                for key, value in run_status.items()
-                if value in ("failed", "cancelled", "expired", "succeeded")
-            ]
-            if dead_runs:
+        with self.db.transaction(f"tenant:{tenant_id}") as connection:
+            orphan_ids = list(
+                connection.scalars(
+                    select(t.calls.c.id)
+                    .join(
+                        t.runs,
+                        and_(
+                            t.runs.c.id == t.calls.c.run_id,
+                            t.runs.c.tenant_id == t.calls.c.tenant_id,
+                        ),
+                    )
+                    .outerjoin(
+                        reservations_table,
+                        and_(
+                            reservations_table.c.call_id == t.calls.c.id,
+                            reservations_table.c.tenant_id == t.calls.c.tenant_id,
+                        ),
+                    )
+                    .where(
+                        t.calls.c.tenant_id == tenant_id,
+                        t.calls.c.status == "admitting",
+                        t.runs.c.status.in_(terminal),
+                        reservations_table.c.id.is_(None),
+                    )
+                    .order_by(t.calls.c.created_at, t.calls.c.id)
+                    .limit(64)
+                )
+            )
+            if orphan_ids:
                 connection.execute(
                     update(t.calls)
                     .where(
-                        t.calls.c.run_id.in_(dead_runs),
+                        t.calls.c.tenant_id == tenant_id,
+                        t.calls.c.id.in_(orphan_ids),
                         t.calls.c.status == "admitting",
-                        t.calls.c.id.not_in(known),
                     )
                     .values(
                         status="rejected",
@@ -654,7 +942,7 @@ class Worker:
                     if time.monotonic() - recovered_at > 10:
                         await asyncio.to_thread(self.recover)
                         recovered_at = time.monotonic()
-                    while len(tasks) < 4:
+                    while len(tasks) < self.settings.worker_concurrency:
                         run = await asyncio.to_thread(self.claim)
                         if not run:
                             break

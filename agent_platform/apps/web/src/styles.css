@@ -3232,3 +3232,27 @@ td small,
 .story-copy h1 span {
   color: #9274b3;
 }
+
+/* Organization context and platform operations. */
+.tenant-switch { align-items: flex-start; gap: 10px; }
+.tenant-switch label { display: flex; min-width: 0; flex: 1; flex-direction: column; gap: 5px; }
+.tenant-switch label > span { font-size: 11px; color: var(--text-muted, #8d8c9f); }
+.tenant-switch select { width: 100%; min-width: 0; padding: 5px 22px 5px 0; border: 0; background: transparent; color: var(--text, #29283e); font-weight: 650; font-size: 13px; text-overflow: ellipsis; }
+.tenant-switch small { color: var(--text-muted, #8d8c9f); font-size: 11px; }
+.tenant-detail-summary { display: flex; gap: 20px; align-items: center; justify-content: space-between; flex-wrap: wrap; padding: 22px 24px; }
+.row-actions { display: flex; align-items: center; justify-content: flex-end; gap: 8px; flex-wrap: wrap; }
+.tenant-limits-grid { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 12px; padding: 0 24px 24px; }
+.tenant-limits-grid > div { padding: 16px; border: 1px solid var(--border, #ebeaf2); border-radius: 12px; background: var(--background, #fafaff); }
+.tenant-limits-grid span { display: block; color: var(--text-muted, #8d8c9f); font-size: 11px; margin-bottom: 8px; }
+.tenant-limits-grid strong { font-size: 19px; font-weight: 650; overflow-wrap: anywhere; }
+.selected-row { background: #f7f5ff; }
+.panel > .toolbar { padding: 18px 24px; }
+.page-content > .panel + .panel { margin-top: 24px; }
+@media (max-width: 1100px) { .tenant-limits-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 600px) { .tenant-limits-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 16px 16px; } .tenant-detail-summary { padding: 16px; } .tenant-detail-summary .row-actions { justify-content: flex-start; } }
+.model-priority-list { list-style: decimal; padding-left: 25px; margin: 15px 0; }
+.model-priority-list li { padding: 8px 10px; border-bottom: 1px solid var(--border, #ebeaf2); }
+.model-priority-list li > span { display: inline-block; max-width: 65%; vertical-align: middle; }
+.model-priority-list .row-actions { display: inline-flex; float: right; }
+.support-message { padding: 16px 0; border-bottom: 1px solid var(--border, #ebeaf2); }
+.support-message pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }

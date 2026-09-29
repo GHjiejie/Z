@@ -20,13 +20,14 @@ import {
   Search,
   X,
 } from "lucide-react";
-import { api } from "./api";
+import { api, getTenantId } from "./api";
 
 export function useResource<T>(path: string, enabled = true) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
   const [loading, setLoading] = useState(true);
   const revision = useRef(0);
+  const scope = useRef(getTenantId()).current;
   const reload = useCallback(async () => {
     if (!enabled) {
       setLoading(false);
@@ -36,7 +37,7 @@ export function useResource<T>(path: string, enabled = true) {
     setError("");
     setLoading(true);
     try {
-      const value = await api<T>(path);
+      const value = await api<T>(path, {}, scope);
       if (current === revision.current) setData(value);
     } catch (err) {
       if (current === revision.current)
@@ -44,7 +45,7 @@ export function useResource<T>(path: string, enabled = true) {
     } finally {
       if (current === revision.current) setLoading(false);
     }
-  }, [path, enabled]);
+  }, [path, enabled, scope]);
   useEffect(() => {
     setData(null);
     void reload();
