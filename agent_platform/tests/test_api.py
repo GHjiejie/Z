@@ -89,6 +89,175 @@ class APIIntegrationTest(unittest.TestCase):
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.json(), {"items": [], "default_model": "k3"})
 
+    def test_builtins_are_published_without_models_and_bootstrap_preserves_edits(self):
+        from agent_platform.modules.builtin_agents import BUILTIN_AGENTS
+
+        agents = self.request("GET", "/agents").json()["items"]
+        self.assertEqual(len(agents), len(BUILTIN_AGENTS))
+        self.assertTrue(
+            all(a["model_id"] is None and a["published_version"] == 1 for a in agents)
+        )
+        self.assertTrue(all(a["starter_prompts"] and not a["tools"] for a in agents))
+        first = agents[0]
+        self.request(
+            "PATCH", f"/agents/{first['id']}", json={"system_prompt": "Edited draft"}
+        )
+        self.platform.bootstrap()
+        after = self.request("GET", "/agents").json()["items"]
+        self.assertEqual({a["id"] for a in after}, {a["id"] for a in agents})
+        self.assertEqual(
+            next(a for a in after if a["id"] == first["id"])["system_prompt"],
+            "Edited draft",
+        )
+        member = self.create_user()
+        visible = self.request(
+            "GET", "/agents", auth=self.login(member["email"])
+        ).json()["items"]
+        self.assertEqual(
+            next(a for a in visible if a["id"] == first["id"])["system_prompt"],
+            first["system_prompt"],
+        )
+        session = self.request(
+            "POST", "/sessions", json={"agent_id": first["id"]}
+        ).json()
+        rejected = self.enqueue(session)
+        self.assertEqual(rejected.json()["error"]["code"], "no_available_model")
+        self.assertEqual(
+            self.request("GET", f"/sessions/{session['id']}").json()["messages"], []
+        )
+
+    def test_automatic_agent_resolves_new_models_each_run_and_freezes_snapshot(self):
+        builtin = self.request("GET", "/agents").json()["items"][0]
+        model, _, _ = self.create_resources()
+        preferred = self.request(
+            "POST",
+            "/models",
+            json={
+                "name": "Preferred model",
+                "alias": "preferred-model",
+                "max_output_tokens": 128,
+                "input_price": "4",
+                "output_price": "5",
+            },
+        ).json()
+        self.platform.settings = replace(self.settings, default_model="preferred-model")
+        session = self.request(
+            "POST", "/sessions", json={"agent_id": builtin["id"]}
+        ).json()
+        first = self.enqueue(session).json()
+        self.assertEqual(first["model_id"], preferred["id"])
+        self.request("POST", f"/runs/{first['id']}/cancel")
+        self.request(
+            "PATCH",
+            f"/models/{preferred['id']}",
+            json={"active": False, "input_price": "9"},
+        )
+        second = self.enqueue(session, key="next-auto").json()
+        self.assertEqual(second["model_id"], model["id"])
+        with self.db.read() as conn:
+            frozen = conn.scalar(
+                select(t.runs.c.spec).where(t.runs.c.id == first["id"])
+            )
+            self.assertEqual(frozen["max_tokens"], 128)
+            self.assertEqual(frozen["model"]["input_price"], "4")
+            version = conn.scalar(
+                select(t.agent_versions.c.spec).where(
+                    t.agent_versions.c.agent_id == builtin["id"]
+                )
+            )
+            self.assertIsNone(version["model_id"])
+
+    def test_run_model_override_enforces_tenant_active_status_and_idempotency(self):
+        model, agent, session = self.create_resources()
+        foreign = self.seed_second_tenant()
+        other = self.request(
+            "POST",
+            "/models",
+            json={"name": "Alternate", "alias": "alternate", "max_output_tokens": 64},
+        ).json()
+        path = f"/sessions/{session['id']}/runs"
+        for selected, expected in (
+            (foreign["model"]["id"], 404),
+            ("unknown-model", 404),
+        ):
+            result = self.request(
+                "POST", path, key=uid(), json={"message": "hello", "model_id": selected}
+            )
+            self.assertEqual(result.status_code, expected)
+        self.request("PATCH", f"/models/{other['id']}", json={"active": False})
+        rejected = self.request(
+            "POST", path, key=uid(), json={"message": "hello", "model_id": other["id"]}
+        )
+        self.assertEqual(rejected.json()["error"]["code"], "model_disabled")
+        self.request("PATCH", f"/models/{other['id']}", json={"active": True})
+        payload = {"message": "hello", "model_id": other["id"]}
+        first = self.request("POST", path, key="override", json=payload)
+        self.assertEqual(first.status_code, 202, first.text)
+        self.assertEqual(first.json()["model_alias"], "alternate")
+        self.assertEqual(
+            self.request("POST", path, key="override", json=payload).json()["id"],
+            first.json()["id"],
+        )
+        conflict = self.request(
+            "POST", path, key="override", json={**payload, "model_id": model["id"]}
+        )
+        self.assertEqual(conflict.json()["error"]["code"], "idempotency_conflict")
+        with self.db.read() as conn:
+            spec = conn.scalar(
+                select(t.runs.c.spec).where(t.runs.c.id == first.json()["id"])
+            )
+            self.assertEqual(spec["max_tokens"], 64)
+            self.assertEqual(
+                conn.scalar(
+                    select(t.agents.c.model_id).where(t.agents.c.id == agent["id"])
+                ),
+                model["id"],
+            )
+
+    def test_model_preference_can_be_cleared_and_auto_agent_can_publish_without_model(
+        self,
+    ):
+        agent = self.request("POST", "/agents", json={"name": "Portable assistant"})
+        self.assertEqual(agent.status_code, 201, agent.text)
+        self.assertEqual(
+            self.request("POST", f"/agents/{agent.json()['id']}/publish").status_code,
+            200,
+        )
+        model, pinned, _ = self.create_resources()
+        omitted = self.request(
+            "PATCH", f"/agents/{pinned['id']}", json={"name": "Renamed"}
+        ).json()
+        self.assertEqual(omitted["model_id"], model["id"])
+        cleared = self.request(
+            "PATCH", f"/agents/{pinned['id']}", json={"model_id": None}
+        )
+        self.assertEqual(cleared.status_code, 200, cleared.text)
+        self.assertIsNone(cleared.json()["model_id"])
+
+    def test_builtin_bootstrap_is_tenant_scoped(self):
+        foreign = self.seed_second_tenant()
+        self.platform.bootstrap()
+        local = self.request("GET", "/agents").json()["items"]
+        self.assertTrue(
+            all(a["tenant_id"] == self.admin["user"]["tenant_id"] for a in local)
+        )
+        with self.db.read() as conn:
+            foreign_ids = list(
+                conn.scalars(
+                    select(t.agents.c.id).where(
+                        t.agents.c.tenant_id == foreign["user"]["tenant_id"],
+                        t.agents.c.builtin_key.is_not(None),
+                    )
+                )
+            )
+        self.assertEqual(len(foreign_ids), 8)
+        self.assertEqual(
+            self.request(
+                "POST", "/sessions", json={"agent_id": foreign_ids[0]}
+            ).status_code,
+            404,
+        )
+
     def test_gateway_admin_entry_is_admin_only_and_does_not_expose_secrets(self):
         result = self.request("GET", "/gateway")
         self.assertEqual(result.status_code, 200)

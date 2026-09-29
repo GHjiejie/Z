@@ -8,6 +8,7 @@ Python 使用仓库根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`；没�
 
 - [当前实现架构图](docs/architecture-diagrams.md)：系统组件、本地/容器部署拓扑、Agent 调用时序与计费状态。
 - [架构设计方案](docs/architecture.md)：长期架构与责任边界。
+- [多租户迭代设计方案](docs/multi-tenant-iteration-design.md)：身份与权限、数据隔离、租户模型与凭据、计费边界、分阶段交付、迁移回滚及验收计划。
 - [第一版实现契约](docs/implementation-contract.md)：API、运行协议与模块接口。
 - [实际完成范围](docs/implementation-status.md)：当前功能、设计差异和验证记录。
 - [运行与部署](docs/deployment.md)：本地启动、Compose、网关受限密钥、迁移与测试。
@@ -39,13 +40,27 @@ make start
 
 直接执行 `make` 或 `make run` 也会启动。从仓库根目录可以使用 `make -C agent_platform start`。
 
+## 内置 Agent 与模型选择
+
+启动后，每个组织会自动获得 8 个已发布的助手：写作润色、翻译与本地化、长文总结、会议纪要、任务规划、代码排错、数据解读、客服回复。进入「我的 Agent」可按内置/自建筛选，点击「运行」即可使用；对话页提供每个角色的示例问题。
+
+内置角色定义集中在 `modules/builtin_agents.py`，只包含任务指令、描述和示例，不包含模型名称、供应商或密钥。默认仅使用文本对话，不要求联网、文件访问或函数调用能力。管理员可编辑、保存并发布新版本；重复启动不会覆盖编辑或重复创建 Agent。
+
+Agent 的 `model_id` 可为空，表示自动模式。每次运行在当前组织已启用的模型中优先选择 `PLATFORM_DEFAULT_MODEL`，否则选择最早添加的模型。对话页的「本次使用模型」可以覆盖 Agent 的模型偏好，因此同一个 Agent 或会话可以使用不同模型。运行创建后，模型、报价和有效输出上限固定为快照；正在执行的任务不会在中途换模型。自动选择和手动覆盖会将输出上限限制到模型允许的范围。
+
+尚无模型时可以浏览、编辑和发布 Agent，发送消息时会明确提示添加可用模型。运行仍需已配置的网关与充足的钱包额度，按所选模型报价计费。启用额外工具时，所选模型需要支持对应的工具调用协议。
+
+已有数据库需先运行迁移（`make start` 自动执行 `0002` 迁移）。迁移保留已有 Agent 的模型偏好、发布版本和会话记录。
+
+## 启动配置
+
 启动命令会同步依赖，启动独立的 LiteLLM Proxy、PostgreSQL 和 Redis，生成或验证受限模型调用密钥，再构建 React、迁移平台数据库、初始化管理员并启动 API / Worker。平台继续使用原有本地数据库，LiteLLM 使用独立数据库；已有配置、账号和数据不会被覆盖。缺少 `.env` 时自动创建并生成随机平台管理员密码。
 
 默认启动方式中，根目录 `.env` 的 `OPENAI_BASE_URL` / `OPENAI_API_KEY` / `MODEL` 用于配置 LiteLLM 的上游模型，平台通过本机 LiteLLM 和独立受限密钥调用。上游密钥不会复制到平台配置或打印到日志，也不会传入平台 API / Worker。已有显式 `UPSTREAM_API_KEY` 时使用 `UPSTREAM_*` 上游配置。
 
 LiteLLM 官方管理台默认位于 [http://127.0.0.1:4000/ui](http://127.0.0.1:4000/ui)。平台管理员可从侧栏的「LiteLLM 网关」打开它。默认用户名为 `admin`，独立登录密码保存在 `.data/local/gateway/.env.control` 的 `UI_PASSWORD`，不会打印到日志。该文件也保存本地网关管理凭据，权限为 `0600`，不提交 Git；`.env.gateway` 仅保存平台使用的受限调用密钥。两个控制台使用各自的登录会话。
 
-`MODEL`（或显式 `PLATFORM_DEFAULT_MODEL`）会作为模型目录的默认模型，新建 Agent 时优先选择已启用的默认模型。已有模型不会被重启覆盖。首次自动添加时，需要在本目录 `.env` 同时设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 与 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token）；没有填写时，页面提示添加并预填模型名称，不会猜测供应商价格。若本地 IPv6 连接上游失败，可设置 `PLATFORM_GATEWAY_LOCAL_ADDRESS=0.0.0.0` 让模型调用使用 IPv4，仍然校验证书。
+`MODEL`（或显式 `PLATFORM_DEFAULT_MODEL`）会作为模型目录的默认模型，自动模式的 Agent 在运行时优先选择已启用的默认模型。已有模型不会被重启覆盖。首次自动添加时，需要在本目录 `.env` 同时设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 与 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token）；没有填写时，页面提示添加并预填模型名称，不会猜测供应商价格。若本地 IPv6 连接上游失败，可设置 `PLATFORM_GATEWAY_LOCAL_ADDRESS=0.0.0.0` 让模型调用使用 IPv4，仍然校验证书。
 
 新建 Agent 的 Temperature 默认值为 `1`。当前 `k3` 上游仅接受该值；已有 Agent 的参数保持原样，需要按模型要求自行调整。
 

@@ -314,12 +314,15 @@ export function AgentsPage({
   const agents = useResource<Items<Agent>>("/agents");
   const models = useResource<Items<Model>>("/models");
   const [search, setSearch] = useState("");
+  const [source, setSource] = useState("all");
   const [editing, setEditing] = useState<Agent | "new" | null>(null);
   const [publishing, setPublishing] = useState<string | null>(null);
   const toast = useToast();
   const items =
     agents.data?.items.filter((agent) =>
-      `${agent.name} ${agent.description}`
+      (source === "all" ||
+        (source === "builtin" ? Boolean(agent.builtin_key) : !agent.builtin_key)) &&
+      `${agent.name} ${agent.description} ${agent.category ?? ""}`
         .toLowerCase()
         .includes(search.toLowerCase()),
     ) ?? [];
@@ -342,7 +345,7 @@ export function AgentsPage({
       <PageTitle
         eyebrow="AGENTS"
         title="我的 Agent"
-        description="将模型、指令与工具组合成专属智能助手。"
+        description="内置实用助手，选择任务即可开始。模型可随时切换，角色与工作方式保持独立。"
         action={
           admin && (
             <Button onClick={() => setEditing("new")}>
@@ -358,6 +361,16 @@ export function AgentsPage({
           onChange={setSearch}
           placeholder="搜索 Agent 名称或描述"
         />
+        <select
+          className="agent-source-filter"
+          aria-label="筛选 Agent 来源"
+          value={source}
+          onChange={(event) => setSource(event.target.value)}
+        >
+          <option value="all">全部 Agent</option>
+          <option value="builtin">内置 Agent</option>
+          <option value="custom">自建 Agent</option>
+        </select>
         <span>{items.length} 个 Agent</span>
         <Button
           variant="ghost"
@@ -389,12 +402,17 @@ export function AgentsPage({
                   )}
                 </div>
                 <h2>{agent.name}</h2>
+                {agent.builtin_key && (
+                  <span className="agent-origin">内置 · {agent.category}</span>
+                )}
                 <p>{agent.description || "还没有填写 Agent 描述。"}</p>
                 <div className="agent-model">
                   <Boxes size={14} />
-                  {models.data?.items.find(
-                    (model) => model.id === agent.model_id,
-                  )?.name ?? agent.model_id}
+                  {!agent.model_id
+                    ? "自动选择可用模型"
+                    : models.data?.items.find(
+                        (model) => model.id === agent.model_id,
+                      )?.name ?? agent.model_id}
                 </div>
                 <div className="agent-tags">
                   <span>
@@ -479,8 +497,8 @@ function AgentEditor({
   close: () => void;
   saved: () => Promise<void>;
 }) {
-  const [selectedModel, setSelectedModel] = useState<string | undefined>(
-    agent?.model_id,
+  const [selectedModel, setSelectedModel] = useState<string>(
+    agent?.model_id ?? "",
   );
   return (
     <Modal
@@ -497,7 +515,7 @@ function AgentEditor({
             name: formValue(form, "name"),
             description: formValue(form, "description"),
             system_prompt: formValue(form, "system_prompt"),
-            model_id: formValue(form, "model_id"),
+            model_id: formValue(form, "model_id") || null,
             temperature: Number(formValue(form, "temperature")),
             max_steps: Number(formValue(form, "max_steps")),
             max_tokens: Number(formValue(form, "max_tokens")),
@@ -521,19 +539,17 @@ function AgentEditor({
               placeholder="例如：研究助手"
             />
           </Field>
-          <Field label="使用模型">
+          <Field
+            label="使用模型"
+            hint="自动模式优先使用默认模型，也可在对话中指定其他已启用模型。"
+          >
             <select
               name="model_id"
-              required
-              value={
-                selectedModel ??
-                models.find((model) => model.is_default && model.active)?.id ??
-                ""
-              }
+              value={selectedModel}
               onChange={(event) => setSelectedModel(event.target.value)}
             >
-              <option value="" disabled>
-                选择可用模型
+              <option value="">
+                自动选择可用模型
               </option>
               {models
                 .filter((model) => model.active || model.id === agent?.model_id)
@@ -631,7 +647,7 @@ function AgentEditor({
         </div>
         {!models.some((model) => model.active) && (
           <div className="inline-note">
-            还没有可用模型，请先在模型目录添加并启用模型。
+            可以先保存并发布 Agent；运行前请在模型目录添加并启用模型。
           </div>
         )}
       </Form>

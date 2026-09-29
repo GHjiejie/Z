@@ -18,6 +18,7 @@ from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.modules.billing.service import BillingService, reservations_table
+from agent_platform.modules.builtin_agents import BUILTIN_AGENTS, COMMON_INSTRUCTIONS
 
 ACTIVE_STATUSES = ("queued", "running", "cancelling")
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "expired")
@@ -87,6 +88,62 @@ class Platform:
     def bootstrap(self) -> None:
         self._bootstrap_admin()
         self._bootstrap_default_model()
+        self._bootstrap_builtin_agents()
+
+    def _bootstrap_builtin_agents(self) -> None:
+        """Install once per tenant, even without a model; preserve later edits."""
+        with self.db.read() as connection:
+            owners = list(
+                connection.execute(
+                    select(t.users)
+                    .where(t.users.c.role == "admin", t.users.c.active.is_(True))
+                    .order_by(t.users.c.created_at, t.users.c.id)
+                ).mappings()
+            )
+        seen = set()
+        for owner in owners:
+            tenant_id = owner["tenant_id"]
+            if tenant_id in seen:
+                continue
+            seen.add(tenant_id)
+            with self.db.transaction(f"tenant:{tenant_id}") as connection:
+                self.require_current(connection, dict(owner), admin=True)
+                installed = set(
+                    connection.scalars(
+                        select(t.agents.c.builtin_key).where(
+                            t.agents.c.tenant_id == tenant_id
+                        )
+                    )
+                )
+                for template in BUILTIN_AGENTS:
+                    if template.key in installed:
+                        continue
+                    agent = {
+                        "id": uid(),
+                        "tenant_id": tenant_id,
+                        "created_at": now(),
+                        "name": template.name,
+                        "description": template.description,
+                        "system_prompt": COMMON_INSTRUCTIONS + template.instructions,
+                        "model_id": None,
+                        "builtin_key": template.key,
+                        "temperature": 1,
+                        "max_steps": 6,
+                        "max_tokens": 1024,
+                        "tools": [],
+                        "published_version": 1,
+                    }
+                    connection.execute(insert(t.agents).values(**agent))
+                    connection.execute(
+                        insert(t.agent_versions).values(
+                            agent_id=agent["id"],
+                            version=1,
+                            tenant_id=tenant_id,
+                            spec=agent,
+                            created_at=agent["created_at"],
+                        )
+                    )
+                    audit(connection, dict(owner), "agent.bootstrap", agent["id"])
 
     def _bootstrap_admin(self) -> None:
         """Create the first tenant only with an explicit, non-default password."""
@@ -439,11 +496,12 @@ class Platform:
                 }
             )
             result = {**current, **values}
-            model = self.owned(connection, t.models, user, result["model_id"])
-            if result["max_tokens"] > model["max_output_tokens"]:
-                raise PlatformError(
-                    400, "output_limit_exceeded", "Agent 输出上限超过模型配置。"
-                )
+            if result.get("model_id"):
+                model = self.owned(connection, t.models, user, result["model_id"])
+                if result["max_tokens"] > model["max_output_tokens"]:
+                    raise PlatformError(
+                        400, "output_limit_exceeded", "Agent 输出上限超过模型配置。"
+                    )
             if agent_id:
                 connection.execute(
                     update(t.agents).where(t.agents.c.id == agent_id).values(**result)
@@ -462,11 +520,12 @@ class Platform:
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
             self.require_current(connection, user, admin=True)
             agent = self.owned(connection, t.agents, user, agent_id)
-            model = self.owned(connection, t.models, user, agent["model_id"])
-            if not model["active"]:
-                raise PlatformError(
-                    400, "model_disabled", "请先启用 Agent 使用的模型。"
-                )
+            if agent.get("model_id"):
+                model = self.owned(connection, t.models, user, agent["model_id"])
+                if not model["active"]:
+                    raise PlatformError(
+                        400, "model_disabled", "请先启用 Agent 使用的模型。"
+                    )
             version = agent["published_version"] + 1
             connection.execute(
                 insert(t.agent_versions).values(
@@ -524,11 +583,17 @@ class Platform:
         return result
 
     def enqueue(
-        self, user: dict, session_id: str, message: str, idempotency_key: str
+        self,
+        user: dict,
+        session_id: str,
+        message: str,
+        idempotency_key: str,
+        model_id: str | None = None,
     ) -> dict:
-        fingerprint = digest(
-            json.dumps({"session_id": session_id, "message": message}, sort_keys=True)
-        )
+        request = {"session_id": session_id, "message": message}
+        if model_id is not None:
+            request["model_id"] = model_id
+        fingerprint = digest(json.dumps(request, sort_keys=True))
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
             self.require_current(connection, user)
             session = self.owned(connection, t.sessions, user, session_id, own=True)
@@ -591,10 +656,39 @@ class Platform:
             if not version:
                 raise PlatformError(400, "agent_not_published", "Agent 尚未发布。")
             spec = dict(version["spec"], version=version["version"])
-            model = self.owned(connection, t.models, user, spec["model_id"])
+            preferred = model_id or spec.get("model_id")
+            if preferred:
+                model = self.owned(connection, t.models, user, preferred)
+            else:
+                row = (
+                    connection.execute(
+                        select(t.models)
+                        .where(
+                            t.models.c.tenant_id == user["tenant_id"],
+                            t.models.c.active.is_(True),
+                        )
+                        .order_by(
+                            (t.models.c.alias == self.settings.default_model).desc(),
+                            t.models.c.created_at,
+                            t.models.c.id,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+                if row is None:
+                    raise PlatformError(
+                        400,
+                        "no_available_model",
+                        "暂无可用模型，请在模型目录添加并启用模型。",
+                    )
+                model = dict(row)
             if not model["active"]:
                 raise PlatformError(400, "model_disabled", "该模型已停用。")
             # Freeze model identity and rate card for every call of this run.
+            if model_id or not spec.get("model_id"):
+                spec["max_tokens"] = min(spec["max_tokens"], model["max_output_tokens"])
+            spec["model_id"] = model["id"]
             spec["model"] = model
             result = {
                 "id": uid(),
@@ -636,18 +730,22 @@ class Platform:
     @staticmethod
     def public_run(row: dict) -> dict:
         return {
-            key: row.get(key)
-            for key in (
-                "id",
-                "tenant_id",
-                "session_id",
-                "user_id",
-                "agent_name",
-                "created_at",
-                "status",
-                "error",
-                "finished_at",
-            )
+            **{
+                key: row.get(key)
+                for key in (
+                    "id",
+                    "tenant_id",
+                    "session_id",
+                    "user_id",
+                    "agent_name",
+                    "created_at",
+                    "status",
+                    "error",
+                    "finished_at",
+                )
+            },
+            "model_id": row.get("spec", {}).get("model_id"),
+            "model_alias": row.get("spec", {}).get("model", {}).get("alias"),
         }
 
     def get_run(self, user: dict, run_id: str) -> dict:

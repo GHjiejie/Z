@@ -80,13 +80,16 @@ agents = Table(
     Column("name", String(120), nullable=False),
     Column("description", Text, nullable=False),
     Column("system_prompt", Text, nullable=False),
-    Column("model_id", String(64), nullable=False),
+    # NULL selects a model at run creation, independent of the published role.
+    Column("model_id", String(64)),
+    Column("builtin_key", String(64)),
     Column("temperature", Float, nullable=False),
     Column("max_steps", Integer, nullable=False),
     Column("max_tokens", Integer, nullable=False),
     Column("tools", JSON, nullable=False),
     Column("published_version", Integer, nullable=False, default=0),
     UniqueConstraint("tenant_id", "id"),
+    UniqueConstraint("tenant_id", "builtin_key", name="uq_agent_builtin_tenant"),
     ForeignKeyConstraint(
         ["tenant_id", "model_id"], ["platform_models.tenant_id", "platform_models.id"]
     ),

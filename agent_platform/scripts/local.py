@@ -148,16 +148,14 @@ def setup_database() -> None:
                     ),
                     metadata,
                 )
-                if (
-                    differences
-                    or not keys_match
-                    or ScriptDirectory.from_config(config).get_current_head() != "0001"
-                ):
+                if differences or not keys_match:
                     raise RuntimeError(
                         "发现未版本化且结构不匹配的旧数据库。请先备份并处理迁移差异；启动已停止，未补表或覆盖数据。"
                     )
-                say("旧数据库与当前初版结构一致，建立迁移基线。")
-                command.stamp(config, "0001")
+                say("未版本化数据库与当前结构一致，建立迁移基线。")
+                command.stamp(
+                    config, ScriptDirectory.from_config(config).get_current_head()
+                )
         command.upgrade(config, "head")
     finally:
         db.close()

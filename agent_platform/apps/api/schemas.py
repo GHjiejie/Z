@@ -87,7 +87,7 @@ class AgentCreate(StrictModel):
     system_prompt: str = Field(
         default="你是一位专业、可靠的助手。", min_length=1, max_length=20000
     )
-    model_id: str = Field(min_length=1, max_length=64)
+    model_id: str | None = Field(default=None, min_length=1, max_length=64)
     temperature: float = Field(default=1, ge=0, le=2)
     max_steps: int = Field(default=8, ge=1, le=30)
     max_tokens: int = Field(default=1024, ge=1, le=128000)
@@ -116,6 +116,7 @@ class SessionCreate(StrictModel):
 
 class RunCreate(StrictModel):
     message: str = Field(min_length=1, max_length=32000)
+    model_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
 class Credit(StrictModel):

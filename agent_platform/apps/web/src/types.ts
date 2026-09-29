@@ -26,7 +26,10 @@ export type Agent = {
   name: string;
   description: string;
   system_prompt: string;
-  model_id: string;
+  model_id: string | null;
+  builtin_key?: string | null;
+  category?: string;
+  starter_prompts?: string[];
   temperature: number;
   max_steps: number;
   max_tokens: number;
@@ -48,6 +51,8 @@ export type Run = {
   created_at: string;
   error?: string;
   cost?: string;
+  model_id?: string;
+  model_alias?: string;
 };
 export type Message = { role: string; content: string; created_at?: string };
 export type SessionDetail = Session & { messages: Message[]; runs: Run[] };

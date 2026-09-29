@@ -18,7 +18,7 @@ import {
 } from "lucide-react";
 import { API_ROOT, api, dateTime, terminal, write } from "./api";
 import { Badge, Button, PageTitle, useResource, useToast } from "./components";
-import type { Agent, Run, RunEvent, Session, SessionDetail } from "./types";
+import type { Agent, Model, Run, RunEvent, Session, SessionDetail } from "./types";
 
 const query = () => new URLSearchParams(location.hash.split("?")[1] ?? "");
 const eventNames = [
@@ -43,6 +43,8 @@ const eventNames = [
 ];
 export function Playground() {
   const agents = useResource<{ items: Agent[] }>("/agents");
+  const models = useResource<{ items: Model[] }>("/models");
+  const [modelId, setModelId] = useState("");
   const sessions = useResource<{ items: Session[] }>("/sessions");
   const [agentId, setAgentId] = useState(query().get("agent") ?? "");
   const [sessionId, setSessionId] = useState<string | null>(
@@ -68,6 +70,7 @@ export function Playground() {
   const sendKey = useRef<{
     message: string;
     session: string;
+    model: string;
     key: string;
   } | null>(null);
   const selection = useRef(0);
@@ -89,6 +92,7 @@ export function Playground() {
       if (next.has("session")) setSessionId(next.get("session"));
       if (next.has("agent")) {
         setAgentId(next.get("agent")!);
+        setModelId("");
         setSessionId(null);
       }
     };
@@ -269,12 +273,18 @@ export function Playground() {
       if (
         !sendKey.current ||
         sendKey.current.message !== message ||
-        sendKey.current.session !== id
+        sendKey.current.session !== id ||
+        sendKey.current.model !== modelId
       )
-        sendKey.current = { message, session: id, key: crypto.randomUUID() };
+        sendKey.current = {
+          message,
+          session: id,
+          model: modelId,
+          key: crypto.randomUUID(),
+        };
       const run = await api<Run>(`/sessions/${id}/runs`, {
         method: "POST",
-        body: JSON.stringify({ message }),
+        body: JSON.stringify({ message, model_id: modelId || null }),
         headers: { "Idempotency-Key": sendKey.current.key },
       });
       setDraft("");
@@ -319,11 +329,12 @@ export function Playground() {
   }
   function chooseSession(session: Session) {
     setSessionId(session.id);
+    setModelId("");
     setDraft("");
     setCanceling(false);
     location.hash = `playground?session=${session.id}`;
   }
-  const effectiveError = error || agents.error;
+  const effectiveError = error || agents.error || models.error;
   return (
     <>
       <PageTitle
@@ -417,7 +428,10 @@ export function Playground() {
                   id="active-agent"
                   value={detail?.agent_id ?? agentId}
                   disabled={Boolean(sessionId) || busy || Boolean(activeRun)}
-                  onChange={(event) => setAgentId(event.target.value)}
+                  onChange={(event) => {
+                    setAgentId(event.target.value);
+                    setModelId("");
+                  }}
                 >
                   <option value="" disabled>
                     选择已发布的 Agent
@@ -458,6 +472,39 @@ export function Playground() {
               )}
             </div>
           </div>
+          <div className="chat-model-bar">
+            <label htmlFor="run-model">本次使用模型</label>
+            <select
+              id="run-model"
+              value={modelId}
+              disabled={busy || Boolean(activeRun)}
+              onChange={(event) => setModelId(event.target.value)}
+            >
+              <option value="">
+                {selectedAgent?.model_id ? "跟随 Agent 设置" : "自动选择（优先默认模型）"}
+              </option>
+              {models.data?.items.filter((model) => model.active).map((model) => (
+                <option key={model.id} value={model.id}>
+                  {model.name}{model.is_default ? " · 默认" : ""}
+                </option>
+              ))}
+            </select>
+            <button
+              type="button"
+              className="icon-button"
+              aria-label="刷新可用模型"
+              onClick={() => void models.reload()}
+            >
+              <RefreshCw size={14} />
+            </button>
+            {(activeRun?.model_alias || latestRun?.model_alias) && (
+              <small>最近运行：{activeRun?.model_alias || latestRun?.model_alias}</small>
+            )}
+            {!models.loading && models.data &&
+              !models.data.items.some((model) => model.active) && (
+                <a href="#models">请先添加可用模型</a>
+              )}
+          </div>
           <div
             className="chat-messages"
             aria-live="polite"
@@ -487,14 +534,16 @@ export function Playground() {
                 </p>
                 {published.length === 0 && !agents.loading ? (
                   <div className="inline-note">
-                    还没有已发布的 Agent。请先配置模型，创建并发布 Agent。
+                    还没有已发布的 Agent。请先创建并发布 Agent。
                   </div>
                 ) : (
                   <div className="prompt-suggestions">
-                    {[
-                      "请介绍你可以帮助我完成哪些工作",
-                      "帮我把一个想法拆解成可执行的计划",
-                    ].map((prompt) => (
+                    {(selectedAgent?.starter_prompts?.length
+                      ? selectedAgent.starter_prompts
+                      : [
+                          "请介绍你可以帮助我完成哪些工作",
+                          "帮我把一个想法拆解成可执行的计划",
+                        ]).map((prompt) => (
                       <button
                         key={prompt}
                         onClick={() => setDraft(prompt)}

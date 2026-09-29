@@ -22,7 +22,9 @@ make -C agent_platform start
 
 本地容器归属于由 `STATE_DIR` 派生的独立 Compose 项目，平台仍使用现有 SQLite 数据。`make stop` / Ctrl+C 停止该实例的网关容器并保留卷；不会停止其他 Compose 项目。`LITELLM_PORT` 控制本机管理页与调用端口。Docker 不可用时不会偷偷回退直连上游；已有外部服务可显式使用 `GATEWAY=external`，此时读取 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY`，空值回退根 `OPENAI_*`，并可通过 `PLATFORM_LITELLM_ADMIN_URL` 指定外部管理页。
 
-默认模型通过 `PLATFORM_DEFAULT_MODEL` 配置，一键启动也会从根 `MODEL` 回退读取。模型目录显示默认标记，创建 Agent 时预选已启用的默认模型。首次注册默认模型时可设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 和 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token），启动时会为配置管理员所属组织创建模型；重启不覆盖已存在的模型。没有报价时仅在页面提示和预填，不自动生成收费价格。
+默认模型通过 `PLATFORM_DEFAULT_MODEL` 配置，一键启动也会从根 `MODEL` 回退读取。模型目录显示默认标记，自动模式的 Agent 在每次运行时优先选择已启用的默认模型。首次注册默认模型时可设置 `PLATFORM_DEFAULT_MODEL_INPUT_PRICE` 和 `PLATFORM_DEFAULT_MODEL_OUTPUT_PRICE`（平台报价，USD / 百万 Token），启动时会为配置管理员所属组织创建模型；重启不覆盖已存在的模型。没有报价时仅在页面提示和预填，不自动生成收费价格。
+
+启动自动为各组织安装 8 个模型无关的内置 Agent，首次安装即发布，后续启动保留修改。`0002` 迁移允许 Agent 不指定固定模型，并保留已有版本和会话；SQLite 迁移在重建表后检查外键完整性。若要降回 `0001`，需先为所有自动模式 Agent 指定模型，降级不会自动删除助手。
 
 当本地默认网络路径无法与上游建立 TLS、但 IPv4 可用时，可设置 `PLATFORM_GATEWAY_LOCAL_ADDRESS=0.0.0.0`。该选项只影响模型调用的网络客户端，保留证书验证及零自动重试策略，客户端随调用结束关闭。
 

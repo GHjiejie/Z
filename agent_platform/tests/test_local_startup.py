@@ -132,7 +132,7 @@ class LocalStartupTests(unittest.TestCase):
                 self.assertIn("platform_users", inspect(connection).get_table_names())
                 self.assertEqual(
                     connection.scalar(text("SELECT version_num FROM alembic_version")),
-                    "0001",
+                    "0002",
                 )
         finally:
             db.close()
@@ -158,7 +158,7 @@ class LocalStartupTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     connection.scalar(text("SELECT version_num FROM alembic_version")),
-                    "0001",
+                    "0002",
                 )
         finally:
             db.close()

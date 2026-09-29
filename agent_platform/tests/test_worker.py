@@ -180,6 +180,33 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         await worker.execute(run)
         return worker, run
 
+    async def test_all_builtin_roles_run_with_text_only_model_and_settle(self):
+        self.credit()
+        with self.db.read() as connection:
+            builtins = list(
+                connection.execute(
+                    select(t.agents).where(
+                        t.agents.c.tenant_id == self.tenant,
+                        t.agents.c.builtin_key.is_not(None),
+                    )
+                ).mappings()
+            )
+        self.assertEqual(len(builtins), 8)
+        for agent in builtins:
+            with self.subTest(agent=agent["builtin_key"]):
+                session = self.platform.create_session(self.user, agent["id"], None)
+                queued = self.enqueue("A short task", session=session)
+                gateway = FakeGateway()
+                await self.execute(gateway)
+                finished = self.platform.get_run(self.user, queued["id"])
+                self.assertEqual(finished["status"], "succeeded", finished)
+                call = gateway.calls[0]
+                self.assertEqual(call["model"], self.model["alias"])
+                self.assertEqual(call["tools"], [])
+                self.assertEqual(call["max_tokens"], self.model["max_output_tokens"])
+                self.assertEqual(call["messages"][0]["content"], agent["system_prompt"])
+                self.assertEqual(self.receipts(queued["id"])[0]["status"], "settled")
+
     async def test_success_settles_once_records_events_and_preserves_history(
         self,
     ) -> None:

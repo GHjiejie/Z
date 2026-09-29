@@ -23,6 +23,7 @@ from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.modules.billing.service import BillingService
+from agent_platform.modules.builtin_agents import builtin_metadata
 from agent_platform.modules.platform import (
     TERMINAL_STATUSES,
     Platform,
@@ -293,7 +294,11 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                             {**version["spec"], "published_version": version["version"]}
                         )
             rows = published
-        return {"items": rows}
+        return {
+            "items": [
+                {**row, **builtin_metadata(row.get("builtin_key"))} for row in rows
+            ]
+        }
 
     @app.post("/api/v1/agents", status_code=201)
     def create_agent(body: s.AgentCreate, user=Depends(admin)):
@@ -301,7 +306,11 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
 
     @app.patch("/api/v1/agents/{agent_id}")
     def patch_agent(agent_id: str, body: s.AgentPatch, user=Depends(admin)):
-        return platform.save_agent(user, body.model_dump(exclude_none=True), agent_id)
+        # Explicit null clears the model preference; omitted fields keep the draft.
+        values = body.model_dump(exclude_none=True)
+        if "model_id" in body.model_fields_set:
+            values["model_id"] = body.model_id
+        return platform.save_agent(user, values, agent_id)
 
     @app.post("/api/v1/agents/{agent_id}/publish")
     def publish(agent_id: str, user=Depends(admin)):
@@ -336,7 +345,7 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                 503, "gateway_not_configured", "请先配置 LiteLLM 地址和受限密钥。"
             )
         return platform.enqueue(
-            user, session_id, body.message, idempotency(idempotency_key)
+            user, session_id, body.message, idempotency(idempotency_key), body.model_id
         )
 
     @app.get("/api/v1/runs")

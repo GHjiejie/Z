@@ -36,12 +36,27 @@ if context.is_offline_mode():
 else:
     db = Database(url)
     with db.engine.connect() as connection:
+        if db.sqlite:
+            # SQLite batch ALTER rebuilds a referenced table. Disable FK checking
+            # outside a transaction, then verify every reference before committing.
+            connection.exec_driver_sql("PRAGMA foreign_keys=OFF")
+            connection.commit()
         context.configure(
             connection=connection,
             target_metadata=metadata,
             render_as_batch=db.sqlite,
             render_item=render_item,
         )
-        with context.begin_transaction():
-            context.run_migrations()
+        try:
+            with context.begin_transaction():
+                context.run_migrations()
+                if (
+                    db.sqlite
+                    and connection.exec_driver_sql("PRAGMA foreign_key_check").first()
+                ):
+                    raise RuntimeError("Migration left invalid foreign key references.")
+        finally:
+            if db.sqlite:
+                connection.rollback()
+                connection.exec_driver_sql("PRAGMA foreign_keys=ON")
     db.close()

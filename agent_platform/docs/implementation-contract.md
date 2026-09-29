@@ -27,14 +27,14 @@
 | `GET /models` | `{items:[{id,name,alias,active,input_price,output_price,context_window,max_output_tokens}...]}`；价格每百万 token |
 | `POST /models` | 同上字段，id 自动生成；仅管理员 |
 | `PATCH /models/{id}` | 更新模型字段与价格；仅管理员 |
-| `GET /agents` | `{items:[{id,name,description,system_prompt,model_id,temperature,max_steps,max_tokens,tools,published_version,created_at}...]}` |
-| `POST /agents` | Agent 配置（tools 为 `calculator` / `current_time` 的列表） |
+| `GET /agents` | `{items:[{id,name,description,system_prompt,model_id,builtin_key,category,starter_prompts,temperature,max_steps,max_tokens,tools,published_version,created_at}...]}`；`model_id=null` 为运行时自动选择，`builtin_key` 标记内置角色 |
+| `POST /agents` | Agent 配置；`model_id` 可空（自动选择），tools 为 `calculator` / `current_time` 的列表 |
 | `PATCH /agents/{id}` | 更新草稿 |
 | `POST /agents/{id}/publish` | `{version:1}` |
 | `GET /sessions` | `{items:[{id,title,agent_id,created_at}...]}` |
 | `POST /sessions` | `{agent_id,title?}` → session |
 | `GET /sessions/{id}` | `{...session,messages:[{role,content,created_at}],runs:[...]}` |
-| `POST /sessions/{id}/runs` | `{message}` + `Idempotency-Key` → `{id,status,session_id}` |
+| `POST /sessions/{id}/runs` | `{message,model_id?}` + `Idempotency-Key` → `{id,status,session_id,model_id,model_alias}`；模型覆盖参与幂等校验，只可选择本组织已启用模型 |
 | `GET /runs` | `{items:[{id,session_id,agent_name,status,created_at,error,cost}...]}` |
 | `GET /runs/{id}` | Run 详情 |
 | `GET /runs/{id}/events` | SSE，支持 Last-Event-ID 或 `?after=sequence`；data=`{sequence,type,data}` |

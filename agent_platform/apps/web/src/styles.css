@@ -1100,6 +1100,35 @@ td .button {
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 20px;
 }
+.agent-source-filter {
+  width: auto;
+  min-width: 130px;
+}
+.agent-origin {
+  display: inline-block;
+  color: #7461a9;
+  font-size: 11px;
+  margin-bottom: 8px;
+}
+.chat-model-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 20px;
+  border-bottom: 1px solid #eee8f5;
+  background: #fcfaff;
+  font-size: 12px;
+}
+.chat-model-bar select {
+  width: auto;
+  max-width: 100%;
+  flex: 1 1 180px;
+  min-width: 0;
+  font-size: 12px;
+}
+.chat-model-bar small { color: #716580; }
+.chat-model-bar a { color: #7259b4; }
 .agent-card {
   border: 1px solid var(--border);
   background: #fff;
