@@ -421,6 +421,11 @@ def main() -> int:
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--gateway", choices=["managed", "external"], default="managed")
     parser.add_argument("--gateway-port", type=int, default=4000)
+    parser.add_argument(
+        "--after-kubernetes-restore",
+        action="store_true",
+        help="仅在已停止 Kubernetes 并恢复最新数据后允许启动旧 supervisor",
+    )
     args = parser.parse_args()
     os.chdir(ROOT)
 
@@ -432,6 +437,13 @@ def main() -> int:
         if args.action == "setup-db":
             setup_database()
         elif args.action == "start":
+            if (
+                PLATFORM / ".data/kubernetes/deployment.json"
+            ).exists() and not args.after_kubernetes_restore:
+                raise RuntimeError(
+                    "数据已迁入 Kubernetes。请使用 make start；回退需先恢复最新数据，"
+                    "然后显式传入 --after-kubernetes-restore。"
+                )
             Supervisor(args.state_dir.resolve()).start(
                 args.env_file.resolve(),
                 args.host,

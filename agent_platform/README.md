@@ -6,6 +6,7 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 
 - [多租户实现说明](docs/multi-tenant-implementation.md)：当前架构、权限、数据库、网关、账务和交付状态。
 - [多租户运行手册](docs/multi-tenant-operations.md)：部署、密钥、切库、备份、关闭与恢复。
+- [Kubernetes 本地部署](docs/kubernetes-local.md)：OrbStack 集群、数据迁移、更新、停启及恢复。
 - [迭代设计方案](docs/multi-tenant-iteration-design.md)：设计依据和正式验收矩阵。
 - [历史第一版记录](docs/implementation-status.md)：旧版本验证记录，不作为多租户上线依据。
 
@@ -29,21 +30,23 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 
 未配置可用模型、组织凭据或额度时会明确拒绝调用，不生成模拟答案。
 
-## 本地启动
+## 本地 Kubernetes 部署
 
-前置依赖：`uv`、Node.js/npm、`make`、Docker。Python 共用根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`。
+前置依赖：`uv`、`make`、Docker、`kubectl`，默认使用已有的 `orbstack` 集群。Python 共用根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`；前端在容器构建阶段编译。
 
 ```bash
-make -C agent_platform start PORT=8010
+make -C agent_platform start
 make -C agent_platform status
 make -C agent_platform stop
 ```
 
-启动器依次准备依赖和网关、构建前端、执行数据库迁移、显式初始化，然后启动 API、Worker、gateway-sync 和 maintenance。保持已有本地数据库及网关持久卷。启动在前台运行，Ctrl+C 或 `make stop` 停止本实例。
+当前实例已迁入 `agent-platform` 命名空间：5 个 Deployment（API、Worker、gateway-sync、maintenance、LiteLLM）和 2 个 StatefulSet（PostgreSQL、Redis）。`make start` 构建镜像，关闭新请求入口并等待运行结束，通过独立 Job 迁移 schema，再恢复服务。命令退出后服务由 Kubernetes 持续管理；`make stop` 将工作负载缩容为零，保留 PVC 和 Secret。
+
+首次从旧 supervisor 导入使用 `make -C agent_platform k8s-import`；当前环境已完成，无需重复导入。备份和迁移步骤见 [Kubernetes 本地部署](docs/kubernetes-local.md)。SQLite 当前仍为单节点持久卷，各应用角色固定单副本。
 
 访问 [本地控制台](http://127.0.0.1:8010)。本地默认账号为 `admin@example.com`，密码在 `agent_platform/.env` 的 `PLATFORM_ADMIN_PASSWORD`。初始密码只用于开户，修改配置不会重置已存在账号。
 
-首次配置时：
+旧实例首次初始化时：
 
 ```dotenv
 PLATFORM_OPERATOR_EMAILS=admin@example.com
@@ -51,20 +54,20 @@ PLATFORM_OPERATOR_EMAILS=admin@example.com
 
 显式初始化会为该邮箱引导平台管理和财务角色；普通组织管理员不会自动取得平台角色。已撤销的角色也不会被重启恢复。新增用户由平台开通全局账号，再由组织发出邀请；接受邀请需要登录相同邮箱。
 
-`PLATFORM_SECRET_ENCRYPTION_KEY` 缺失时，启动器生成并持久化到被 Git 忽略的 `.env`，权限 `0600`。必须另行保管此密钥，不能随重启重新生成。
+迁移保留原来的 `PLATFORM_SECRET_ENCRYPTION_KEY`，运行时由 Kubernetes Secret 注入。后续部署不会重新生成或覆盖集群内已有凭据。
 
 ### 模型与 LiteLLM
 
-默认 managed 启动方式使用根 `.env` 的 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `MODEL` 配置 LiteLLM 上游。平台运行进程不会收到上游密钥。已有 `UPSTREAM_API_KEY` 时使用显式 `UPSTREAM_*` 配置。
+首次导入使用旧 managed 配置的上游与受限运行 Key，并恢复 LiteLLM PostgreSQL 数据库；运行时使用集群内 `litellm` Service。上游模型配置保存在 LiteLLM 专用 Secret。
 
-LiteLLM 管理页默认是 [本地 LiteLLM](http://127.0.0.1:4000/ui)，登录配置保存在 `.data/local/gateway/.env.control`。平台与 LiteLLM 使用不同登录会话；配置文件不提交 Git。只有 gateway-sync 收到控制面 master key。
+LiteLLM 管理页是 [本地 LiteLLM](http://127.0.0.1:4000/ui)。原登录凭据已迁入 `litellm-secret`，旧配置备份仍在 `.data/local/gateway/.env.control`。平台与 LiteLLM 使用不同登录会话；只有 gateway-sync 收到用于控制网关的 master key。
 
 首次历史单组织本地部署可采用旧受限 Key；**新增第二个组织之前，先在平台运营的网关面板将原组织纳管**，再分别为新组织授权模型和同步凭据。多租户运行没有全局 Key 回退。
 
-使用外部 LiteLLM 时：
+尚未迁入 Kubernetes 的旧开发实例，可使用外部 LiteLLM：
 
 ```bash
-make -C agent_platform start PORT=8010 GATEWAY=external
+make -C agent_platform local-start PORT=8010 GATEWAY=external
 ```
 
 显式填写 `PLATFORM_LITELLM_URL` 和受限 `PLATFORM_LITELLM_KEY`；组织网关同步另需配置 `PLATFORM_GATEWAY_CONTROL_URL/KEY`，只传入同步器。外部模式不把根 `OPENAI_API_KEY` 当作平台运行 Key。
@@ -90,4 +93,4 @@ make -C agent_platform start PORT=8010 GATEWAY=external
 - 未结费用必须有证据确认或明确核销，不能通过清空预占恢复服务。
 - 关闭组织的删除记录放在独立持久卷，数据库恢复前必须重放；不随 PostgreSQL 回滚。
 
-本地启动参数、离线 SQLite → PostgreSQL 工具和恢复步骤见[运行手册](docs/multi-tenant-operations.md)。本次仅完成静态检查、构建、现有本地库迁移和启动；未运行新增自动化或付费模型验收。
+当前 Kubernetes 参数和恢复方式见 [Kubernetes 本地部署](docs/kubernetes-local.md)。离线 SQLite → PostgreSQL 工具和 SaaS 验收见[运行手册](docs/multi-tenant-operations.md)。集群部署不代表已完成 SaaS 隔离与容量验收。

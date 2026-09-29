@@ -2,6 +2,8 @@
 
 更新日期：2026-09-30。配套设计：[multi-tenant-iteration-design.md](multi-tenant-iteration-design.md)。
 
+当前本机已采用 [OrbStack Kubernetes 部署](kubernetes-local.md)。本文的 Compose 命令用于独立 SaaS 环境；操作旧 supervisor 请使用 `make local-stop/local-status`，`make stop/status` 现用于 Kubernetes。
+
 ## 1. 使用范围与交付状态
 
 本文描述本仓库多租户实现的部署和运维步骤。命令供运维在获准的维护窗口执行，本文交付过程没有执行 PostgreSQL 切库、真实供应商调用、隔离验收、故障注入或容量测试。设计中的 **I5 灰度与正式验收仍待执行**；SQLite 本地启动成功不能作为 SaaS 上线证据。
@@ -118,8 +120,8 @@ API、Worker、常驻 Maintenance 不接收网关 master、上游根 Key、数�
 3. 关停旧 API、Worker、Gateway Sync、Maintenance、cron/恢复作业和本地 supervisor，关闭系统级自动重启。若由本地脚本管理，可使用：
 
    ```sh
-   make -C agent_platform stop
-   make -C agent_platform status
+   make -C agent_platform local-stop
+   make -C agent_platform local-status
    ```
 
    同时确认其他部署方式启动的进程已停止。脚本只管理自身记录的进程，不会停止其他服务。
