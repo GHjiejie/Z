@@ -1,5 +1,6 @@
 # Local OrbStack profile: SQLite uses one RWO volume and one replica per role.
 # Secrets and the LiteLLM ConfigMap are installed by scripts.kubernetes.
+# Historical one-time local import only. Daily service releases use charts/.
 apiVersion: v1
 kind: List
 items:

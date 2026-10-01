@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 
 @dataclass(frozen=True)
 class Settings:
+    service_role: str = "api"
     mode: str = "local"
     operator_emails: tuple[str, ...] = ()
     secret_encryption_key: str = ""
@@ -44,6 +45,14 @@ class Settings:
     web_directory: Path = Path(__file__).resolve().parents[1] / "apps/web/dist"
 
     def __post_init__(self) -> None:
+        if self.service_role not in {
+            "api",
+            "worker",
+            "gateway-sync",
+            "maintenance",
+            "init",
+        }:
+            raise ValueError("Unknown platform service role")
         if self.mode not in {"local", "saas"}:
             raise ValueError("PLATFORM_MODE must be local or saas")
         if self.worker_concurrency < 1:
@@ -51,10 +60,12 @@ class Settings:
         if self.mode == "saas":
             if not self.database_url.startswith("postgresql"):
                 raise ValueError("SaaS mode requires PostgreSQL")
-            if not self.redis_url:
+            if self.service_role in {"api", "worker", "init"} and not self.redis_url:
                 raise ValueError("SaaS mode requires PLATFORM_REDIS_URL")
-            if self.embedded_worker or not self.secure_cookies:
-                raise ValueError("SaaS requires separate workers and secure cookies")
+            if self.embedded_worker:
+                raise ValueError("SaaS requires separate workers")
+            if self.service_role == "api" and not self.secure_cookies:
+                raise ValueError("SaaS API requires secure cookies")
             if not self.secret_encryption_key:
                 raise ValueError("SaaS requires PLATFORM_SECRET_ENCRYPTION_KEY")
         if self.secret_encryption_key:
@@ -94,8 +105,9 @@ class Settings:
             )
 
     @classmethod
-    def from_env(cls) -> "Settings":
+    def from_env(cls, *, role: str = "api") -> "Settings":
         return cls(
+            service_role=role,
             mode=os.getenv("PLATFORM_MODE", "local"),
             operator_emails=tuple(
                 x.strip().lower()

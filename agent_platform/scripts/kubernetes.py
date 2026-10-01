@@ -1,4 +1,4 @@
-"""Deploy the existing local installation into the current OrbStack cluster.
+"""One-time import of the local installation into OrbStack Kubernetes.
 
 Secrets are sent on stdin to kubectl, never stored in manifests or command args.
 The local profile retains SQLite, so all application roles stay at one replica.
@@ -388,6 +388,8 @@ class Cluster:
         )
 
     def deploy(self):
+        if (self.get("configmap", "platform-release") or {}).get("data", {}).get("manager") == "helm":
+            raise RuntimeError("资源已经由独立 Helm releases 管理；请使用 scripts.helm deploy。")
         if not self.get("configmap", "platform-release"):
             raise RuntimeError(
                 "首次迁移请运行 make k8s-import；尚未导入数据，不能直接启动。"
@@ -747,6 +749,12 @@ print('SQLite digest, integrity, foreign keys and table counts verified')
 
 
 def main():
+    # Keep old command names usable, but never reconcile the monolithic stack
+    # over Helm-owned resources. Only the historical one-time importer uses it.
+    if len(sys.argv) > 1 and sys.argv[1] != "import-local":
+        from agent_platform.scripts.helm import main as helm_main
+        helm_main(sys.argv[1:])
+        return
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
         "command", choices=("import-local", "deploy", "status", "stop", "logs")

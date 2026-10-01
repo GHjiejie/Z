@@ -17,7 +17,7 @@ from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select
 from starlette.middleware.base import BaseHTTPMiddleware
 
 from agent_platform.apps.api import schemas as s
@@ -102,6 +102,8 @@ class BoundaryMiddleware(BaseHTTPMiddleware):
 
 def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
     settings = settings or Settings.from_env()
+    if settings.service_role != "api":
+        raise ValueError("API must use API configuration validation")
     db = Database(settings.database_url)
     platform = Platform(db, settings)
 
@@ -244,8 +246,6 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
 
     @app.get("/api/v1/health")
     def health():
-        with db.read() as connection:
-            connection.execute(text("SELECT 1"))
         return {
             "status": "ok",
             "gateway_configured": bool(settings.litellm_url and settings.litellm_key),
@@ -265,6 +265,14 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
         return JSONResponse(
             result, status_code=200 if result["status"] == "ready" else 503
         )
+
+    @app.get("/api/v1/platform-status")
+    def service_status(actor=Depends(principal)):
+        from agent_platform.modules.health import platform_status
+
+        with db.read() as connection:
+            platform.require_platform(connection, actor, "platform.tenants.manage")
+        return platform_status(db, settings)
 
     @app.post("/api/v1/auth/login")
     def login(body: s.Login, request: Request):
@@ -669,7 +677,9 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
     for route in list(app.routes):
         if isinstance(route, APIRoute) and route.path.startswith("/api/v1/"):
             suffix = route.path.removeprefix("/api/v1")
-            if suffix.startswith(("/auth/", "/health", "/ready", "/gateway")):
+            if suffix.startswith(
+                ("/auth/", "/health", "/ready", "/platform-status", "/gateway")
+            ):
                 continue
             app.add_api_route(
                 "/api/v2/tenants/{tenant_id}" + suffix,

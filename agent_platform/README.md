@@ -26,23 +26,27 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 | 账务 | 平台财务入账/补证/核销/解冻；精确钱包、预占、结算、未知费用冻结 |
 | 容量 | 套餐硬上限、内部配额、成员/Agent/队列/运行/SSE/导出限制 |
 | 数据 | 分页接口、私有异步导出、关闭组织、保留期、独立持久删除记录 |
-| 部署 | PostgreSQL FORCE RLS、独立迁移/运行角色、四种独立进程、就绪检查 |
+| 部署 | PostgreSQL FORCE RLS、独立迁移/运行角色、独立 Web/后台进程、10 个 Helm Charts |
 
 未配置可用模型、组织凭据或额度时会明确拒绝调用，不生成模拟答案。
 
 ## 本地 Kubernetes 部署
 
-前置依赖：`uv`、`make`、Docker、`kubectl`，默认使用已有的 `orbstack` 集群。Python 共用根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`；前端在容器构建阶段编译。
+前置依赖：`uv`、`make`、Docker、`kubectl`、Helm，默认使用已有的 `orbstack` 集群。Python 共用根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`；前端有独立 Dockerfile 和镜像。
 
 ```bash
 make -C agent_platform start
+make -C agent_platform deploy SERVICE=worker
 make -C agent_platform status
-make -C agent_platform stop
+make -C agent_platform stop SERVICE=worker
+make -C agent_platform resume SERVICE=worker
 ```
 
-当前实例已迁入 `agent-platform` 命名空间：5 个 Deployment（API、Worker、gateway-sync、maintenance、LiteLLM）和 2 个 StatefulSet（PostgreSQL、Redis）。`make start` 构建镜像，关闭新请求入口并等待运行结束，通过独立 Job 迁移 schema，再恢复服务。命令退出后服务由 Kubernetes 持续管理；`make stop` 将工作负载缩容为零，保留 PVC 和 Secret。
+当前实例在 `agent-platform` 命名空间由 9 个独立 Helm releases 管理：6 个 Deployment（Web、API、Worker、gateway-sync、maintenance、LiteLLM）和 2 个 StatefulSet（PostgreSQL、Redis），存储独立管理。`charts/` 下为这些服务及手动 migration 提供 10 个 Chart，没有自动部署其他服务的 Chart dependencies。每个角色有独立配置、探针、资源及镜像；后台不再加载 HTTP facade。
 
-首次从旧 supervisor 导入使用 `make -C agent_platform k8s-import`；当前环境已完成，无需重复导入。备份和迁移步骤见 [Kubernetes 本地部署](docs/kubernetes-local.md)。SQLite 当前仍为单节点持久卷，各应用角色固定单副本。
+`make start` 逐个构建并更新服务，`make deploy SERVICE=worker` 只更新 Worker。schema 变更显式执行 `make migrate`，本地完成后 `make resume`；日常发布不隐式迁移。`make stop` 关闭准入、等运行收尾并缩容，保留 releases、PVC 和 Secret。
+
+首次从旧 supervisor 导入使用 `make -C agent_platform k8s-import`；已有 Kubernetes 资源首次接管使用 `make helm-adopt`。当前环境两项均已完成。边界、独立 Charts、外部依赖、备份和迁移步骤见 [服务与 Helm 部署](docs/kubernetes-local.md)。通用 Chart 默认使用外部 PostgreSQL；本地 values 保留原单节点 SQLite，应用固定单副本，核心领域库和平台数据库仍共享。
 
 访问 [本地控制台](http://127.0.0.1:8010)。本地默认账号为 `admin@example.com`，密码在 `agent_platform/.env` 的 `PLATFORM_ADMIN_PASSWORD`。初始密码只用于开户，修改配置不会重置已存在账号。
 
@@ -89,7 +93,7 @@ make -C agent_platform local-start PORT=8010 GATEWAY=external
 
 - SaaS 必须使用 PostgreSQL、非 owner 运行角色、HTTPS secure Cookie 和持久加密密钥。
 - 迁移命令与 `init` 使用迁移身份；服务启动只核对版本，不修改 schema。
-- `GET /api/v1/health` 检查存活；`GET /api/v1/ready` 检查后台心跳及数据库/Redis条件。
+- `GET /api/v1/health` 检查 API 存活；`GET /api/v1/ready` 只检查自身数据库/Redis；鉴权的 `/api/v1/platform-status` 提供聚合状态。后台探针检查各自 Pod UID 心跳。
 - 未结费用必须有证据确认或明确核销，不能通过清空预占恢复服务。
 - 关闭组织的删除记录放在独立持久卷，数据库恢复前必须重放；不随 PostgreSQL 回滚。
 

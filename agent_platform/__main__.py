@@ -8,7 +8,6 @@ import signal
 
 from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
-from agent_platform.modules.platform import Platform
 
 
 async def run_background(db, role, service):
@@ -38,7 +37,9 @@ def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s"
     )
-    settings = Settings.from_env()
+    settings = Settings.from_env(
+        role="api" if args.command == "serve" else args.command
+    )
     if args.command in {"serve", "worker", "maintenance"} and any(
         os.getenv(key)
         for key in (
@@ -70,21 +71,29 @@ def main() -> None:
             # Schema changes belong exclusively to Alembic. Explicit init is an
             # operator action and may use the migration owner; runtime may not.
             db.assert_schema(saas=settings.mode == "saas" and args.command != "init")
-            platform = Platform(db, settings)
             if args.command == "init":
+                from agent_platform.modules.platform import Platform
+
+                platform = Platform(db, settings)
                 platform.bootstrap()
                 print("平台已初始化；新组织余额为零。")
             else:
                 if args.command == "worker":
                     from agent_platform.apps.worker.main import Worker
+                    from agent_platform.modules.service_contexts import worker_services
 
-                    service = Worker(platform)
+                    service = Worker(worker_services(db, settings))
                 elif args.command == "gateway-sync":
-                    service = platform.gateway
+                    from agent_platform.modules.gateway_control import GatewayService
+
+                    service = GatewayService(db, settings)
                 else:
                     from agent_platform.modules.operations import OperationsService
+                    from agent_platform.modules.service_contexts import (
+                        maintenance_services,
+                    )
 
-                    service = OperationsService(platform)
+                    service = OperationsService(maintenance_services(db, settings))
                 try:
                     asyncio.run(run_background(db, args.command, service))
                 except KeyboardInterrupt:

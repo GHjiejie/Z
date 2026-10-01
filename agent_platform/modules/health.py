@@ -1,23 +1,36 @@
 """Dependency readiness without provider calls, credentials or tenant labels."""
 
 import asyncio
+import hashlib
+import os
+import socket
 import time
-from contextlib import suppress
-from uuid import uuid4
 
 from sqlalchemy import delete, insert, select, update
 
 from agent_platform.infrastructure.runtime_tables import service_heartbeats
 
+BACKGROUND_ROLES = {"worker", "gateway-sync", "maintenance"}
+
+
+def service_instance_id(role):
+    # Charts inject Pod UID so a healthy replica cannot hide another replica's
+    # dead process. Native deployments may set their own unique instance name.
+    instance = os.getenv("PLATFORM_SERVICE_INSTANCE") or socket.gethostname()
+    return hashlib.sha256(f"{role}:{instance}".encode()).hexdigest()
+
 
 async def run_service(db, role, service, stop):
-    identifier = uuid4().hex
+    if role not in BACKGROUND_ROLES:
+        raise ValueError("Unsupported background service role")
+    identifier = service_instance_id(role)
 
     def beat():
-        with db.transaction("health:" + role) as connection:
+        with db.transaction("health:" + identifier) as connection:
             connection.execute(
                 delete(service_heartbeats).where(
-                    service_heartbeats.c.expires_at < time.time() - 300
+                    service_heartbeats.c.role == role,
+                    service_heartbeats.c.expires_at < time.time() - 300,
                 )
             )
             exists = connection.scalar(
@@ -39,7 +52,10 @@ async def run_service(db, role, service, stop):
                 )
 
     async def pulse():
-        while not stop.is_set():
+        # Keep the heartbeat alive while a stopped worker drains in-flight runs.
+        # The operation owns graceful shutdown; a SIGTERM must not let a finished
+        # heartbeat task immediately cancel an external model call.
+        while True:
             await asyncio.to_thread(beat)
             await asyncio.sleep(5)
 
@@ -54,17 +70,43 @@ async def run_service(db, role, service, stop):
     finally:
         heartbeat.cancel()
         operation.cancel()
-        with suppress(asyncio.CancelledError):
-            await heartbeat
-        with suppress(asyncio.CancelledError):
-            await operation
-        with db.transaction("health:" + role) as connection:
+        await asyncio.gather(heartbeat, operation, return_exceptions=True)
+        with db.transaction("health:" + identifier) as connection:
             connection.execute(
                 delete(service_heartbeats).where(service_heartbeats.c.id == identifier)
             )
 
 
-def readiness(db, settings):
+def readiness(db, settings, *, role="api"):
+    """Process readiness checks only the service's own required dependencies."""
+    db.assert_schema(saas=settings.mode == "saas")
+    if role in BACKGROUND_ROLES:
+        with db.read() as connection:
+            live = connection.scalar(
+                select(service_heartbeats.c.id).where(
+                    service_heartbeats.c.id == service_instance_id(role),
+                    service_heartbeats.c.role == role,
+                    service_heartbeats.c.expires_at > time.time(),
+                )
+            )
+        return {"status": "ready" if live else "unavailable", "service": role}
+    if role != "api":
+        raise ValueError("Unsupported readiness service role")
+    if settings.redis_url:
+        from redis import Redis
+
+        client = Redis.from_url(
+            settings.redis_url, socket_connect_timeout=2, socket_timeout=2
+        )
+        try:
+            client.ping()
+        finally:
+            client.close()
+    return {"status": "ready", "service": "api"}
+
+
+def platform_status(db, settings):
+    """Aggregate diagnostics are separate from individual service routing."""
     db.assert_schema(saas=settings.mode == "saas")
     with db.read() as connection:
         live = set(
@@ -78,17 +120,8 @@ def readiness(db, settings):
     if settings.mode == "saas":
         required.add("gateway-sync")
     missing = sorted(required - live)
-    if settings.redis_url:
-        from redis import Redis
-
-        client = Redis.from_url(
-            settings.redis_url, socket_connect_timeout=2, socket_timeout=2
-        )
-        try:
-            client.ping()
-        finally:
-            client.close()
     return {
         "status": "ready" if not missing else "degraded",
         "missing_services": missing,
+        "live_services": sorted(live & BACKGROUND_ROLES),
     }

@@ -243,7 +243,7 @@ class OperationsService:
             ).mappings()
             return [self._public_export(row) for row in rows]
 
-    def _directory(self, tenant_id):
+    def _directory(self, tenant_id, *, create=False):
         if not IDENTIFIER.fullmatch(tenant_id):
             raise PlatformError(503, "export_storage_invalid", "组织存储标识无效。")
         root = Path(self.settings.export_directory).resolve()
@@ -251,19 +251,20 @@ class OperationsService:
             raise PlatformError(
                 503, "export_storage_invalid", "导出存储不能位于公开静态文件目录。"
             )
-        root.mkdir(parents=True, exist_ok=True, mode=0o700)
-        os.chmod(root, 0o700)
         folder = root / tenant_id
         if folder.is_symlink():
             raise PlatformError(503, "export_storage_invalid", "导出存储路径不可用。")
-        folder.mkdir(mode=0o700, exist_ok=True)
-        os.chmod(folder, 0o700)
+        if create:
+            root.mkdir(parents=True, exist_ok=True, mode=0o700)
+            os.chmod(root, 0o700)
+            folder.mkdir(mode=0o700, exist_ok=True)
+            os.chmod(folder, 0o700)
         return folder
 
-    def _file(self, tenant_id, filename):
+    def _file(self, tenant_id, filename, *, create=False):
         if not FILENAME.fullmatch(filename):
             raise PlatformError(503, "export_storage_invalid", "导出文件标识无效。")
-        return self._directory(tenant_id) / filename
+        return self._directory(tenant_id, create=create) / filename
 
     def _authorized_job(self, connection, user, job_id):
         row = (
@@ -484,7 +485,7 @@ class OperationsService:
             writer.writerows([_cell(row[name]) for name in names] for row in rows)
             data = buffer.getvalue().encode("utf-8")
             filename = f"{job['id']}-{job['fence']}-{_id()}.csv"
-            path = self._file(job["tenant_id"], filename)
+            path = self._file(job["tenant_id"], filename, create=True)
             fd = os.open(
                 path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600
             )
@@ -1010,7 +1011,7 @@ class OperationsService:
                     self._release_closure_after(connection, job, status="purging")
                     return
                 # Old staged files are inaccessible; clean any unreferenced chunks.
-            folder = self._directory(tenant_id)
+            folder = self._directory(tenant_id, create=True)
             removed = 0
             with os.scandir(folder) as entries:
                 for entry in entries:

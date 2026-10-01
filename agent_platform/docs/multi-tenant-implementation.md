@@ -1,6 +1,6 @@
 # 多租户实现说明
 
-更新：2026-09-30。代码实现基于《多租户迭代设计方案》，数据库最新迁移为 `0007_support_access`。
+更新：2026-10-01。代码实现基于《多租户迭代设计方案》，数据库最新迁移为 `0007_support_access`。
 
 本机部署已迁入 OrbStack Kubernetes，当前资源、持久化与管理命令见 [Kubernetes 本地部署](kubernetes-local.md)。下述首次迁移记录保留历史过程。
 
@@ -10,7 +10,8 @@
 
 ```mermaid
 flowchart LR
-  Browser[React 控制台] --> API[FastAPI API]
+  Browser[浏览器] --> Web[独立 Web 静态前端与反向代理]
+  Web --> API[FastAPI API]
   API --> Identity[全局身份与组织成员关系]
   API --> DB[(平台数据库)]
   Worker[独立 Worker] --> DB
@@ -24,6 +25,7 @@ flowchart LR
   Maintenance --> Tombstone[独立持久化删除记录]
 ```
 
+- Web：独立前端镜像与服务，同源代理 API/SSE，无数据库、模型凭据或数据卷。
 - API：认证、CSRF、组织上下文、业务命令、平台运营、持久事件读取。
 - Worker：按组织轮转领取任务；执行 LangGraph、调用模型、结算及恢复失联任务。
 - gateway-sync：消费持久 Outbox，执行网关用户和受限 Key 的创建、核查、轮换与撤销。
@@ -31,6 +33,8 @@ flowchart LR
 - PostgreSQL 是 SaaS 运行目标；SQLite 保留本地开发模式。Redis 参与速率准入，数据库是钱包和并发预占的最终依据。
 
 四种运行进程均只检查数据库版本，不运行建表或初始化。`init` 是独立运营命令。Compose 使用迁移角色 `platform_migrator` 和无表所有权、无 `BYPASSRLS` 的 `platform_runtime`；SaaS 启动拒绝超级用户或表所有者。
+
+当前 Kubernetes 通过 10 个独立 Helm Charts 管理服务与迁移/存储；单服务更新不重启其他 release，不自动执行迁移。后台构建最小服务上下文，不加载 HTTP facade。API readiness 不依赖后台心跳；各后台检查自己 Pod UID 的心跳，聚合状态通过鉴权接口提供。核心领域库和平台数据库仍共享，本地 SQLite 用原 PVC 保留数据；具体部署契约见 [服务与 Helm 部署](kubernetes-local.md)。
 
 ## 2. 身份和访问规则
 

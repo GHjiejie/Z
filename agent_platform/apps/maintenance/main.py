@@ -14,15 +14,15 @@ from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.modules.health import run_service
 from agent_platform.modules.operations import OperationsService
-from agent_platform.modules.platform import Platform
+from agent_platform.modules.service_contexts import maintenance_services
 
 
 async def run(args):
-    settings = Settings.from_env()
+    settings = Settings.from_env(role="maintenance")
     db = Database(settings.database_url)
     try:
         db.assert_schema(saas=settings.mode == "saas")
-        service = OperationsService(Platform(db, settings))
+        service = OperationsService(maintenance_services(db, settings))
         if args.replay_tombstones:
             print(json.dumps(service.replay_tombstones()))
             return

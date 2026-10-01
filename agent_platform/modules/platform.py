@@ -5,9 +5,8 @@ import hashlib
 import json
 import secrets
 import time
-from datetime import UTC, datetime
+from datetime import datetime
 from decimal import Decimal
-from uuid import uuid4
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
@@ -35,19 +34,12 @@ from agent_platform.modules.billing.service import BillingService, reservations_
 from agent_platform.modules.builtin_agents import BUILTIN_AGENTS, COMMON_INSTRUCTIONS
 from agent_platform.modules.gateway_control import GatewayService
 from agent_platform.modules.identity import IdentityService
+from agent_platform.modules.run_records import append_event, now, uid
 
 ACTIVE_STATUSES = ("queued", "running", "cancelling")
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "expired")
 hasher = PasswordHasher()
 _DUMMY_HASH = hasher.hash(secrets.token_urlsafe(32))
-
-
-def now() -> str:
-    return datetime.now(UTC).isoformat()
-
-
-def uid() -> str:
-    return uuid4().hex
 
 
 def public_user(row) -> dict:
@@ -73,29 +65,6 @@ def audit(connection, user: dict, action: str, target: str) -> None:
             target=target,
         )
     )
-
-
-def append_event(connection, run_id: str, kind: str, data: dict) -> dict:
-    sequence = (
-        connection.scalar(
-            select(func.max(t.run_events.c.sequence)).where(
-                t.run_events.c.run_id == run_id
-            )
-        )
-        or 0
-    ) + 1
-    event = {
-        "run_id": run_id,
-        "tenant_id": connection.scalar(
-            select(t.runs.c.tenant_id).where(t.runs.c.id == run_id)
-        ),
-        "sequence": sequence,
-        "type": kind,
-        "data": data,
-        "created_at": now(),
-    }
-    connection.execute(insert(t.run_events).values(**event))
-    return event
 
 
 class Platform:

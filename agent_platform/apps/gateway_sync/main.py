@@ -10,7 +10,7 @@ from agent_platform.modules.health import run_service
 
 
 async def run():
-    settings = Settings.from_env()
+    settings = Settings.from_env(role="gateway-sync")
     db = Database(settings.database_url)
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()

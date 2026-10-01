@@ -7,6 +7,7 @@ import time
 from contextlib import suppress
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import TYPE_CHECKING
 
 from sqlalchemy import and_, func, insert, or_, select, update
 
@@ -16,14 +17,18 @@ from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.modules.billing.service import BillingService, reservations_table
-from agent_platform.modules.platform import Platform, append_event, now, uid
+from agent_platform.modules.run_records import append_event, now, uid
 from agent_platform.modules.runtime.engine import RunCancelled, execute_agent
 from agent_platform.modules.runtime.gateway import Gateway, GatewayError, ModelReply
+
+if TYPE_CHECKING:
+    from agent_platform.modules.platform import Platform
+    from agent_platform.modules.service_contexts import WorkerServices
 
 logger = logging.getLogger(__name__)
 
 
-def sync_call_receipt(platform: Platform, receipt: dict) -> None:
+def sync_call_receipt(platform: "Platform | WorkerServices", receipt: dict) -> None:
     """Rebuild the display projection from the immutable billing evidence."""
     status = {
         "settled": "confirmed",
@@ -56,7 +61,7 @@ def sync_call_receipt(platform: Platform, receipt: dict) -> None:
 
 
 class Worker:
-    def __init__(self, platform: Platform, *, gateway=None):
+    def __init__(self, platform: "Platform | WorkerServices", *, gateway=None):
         self.platform = platform
         self.db = platform.db
         self.settings = platform.settings
@@ -942,7 +947,10 @@ class Worker:
                     if time.monotonic() - recovered_at > 10:
                         await asyncio.to_thread(self.recover)
                         recovered_at = time.monotonic()
-                    while len(tasks) < self.settings.worker_concurrency:
+                    while (
+                        not stop.is_set()
+                        and len(tasks) < self.settings.worker_concurrency
+                    ):
                         run = await asyncio.to_thread(self.claim)
                         if not run:
                             break
@@ -951,8 +959,18 @@ class Worker:
                         task.add_done_callback(tasks.discard)
                 except Exception as exc:  # noqa: BLE001 - background supervisor retries storage availability
                     logger.error("worker cycle failed: %s", type(exc).__name__)
-                await asyncio.sleep(self.settings.worker_poll_seconds)
-        finally:
+                try:
+                    await asyncio.wait_for(
+                        stop.wait(), timeout=self.settings.worker_poll_seconds
+                    )
+                except TimeoutError:
+                    pass
+        except BaseException:
             for task in tasks:
                 task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            raise
+        else:
+            # Ordinary SIGTERM stops claims and preserves model usage evidence by
+            # allowing existing runs to finish within the Pod's grace period.
             await asyncio.gather(*tasks, return_exceptions=True)
