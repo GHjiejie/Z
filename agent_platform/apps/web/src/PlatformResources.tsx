@@ -31,7 +31,7 @@ export function ModelPolicyPanel({ models, changed }: { models: Model[]; changed
       </div>}</ResourceState>
     {editing && resource.data && <ModelPolicyEditor policy={resource.data} models={models} close={() => setEditing(false)} saved={async () => { setEditing(false); await Promise.all([resource.reload(), changed()]); }} />}</Panel>;
 }
-function ModelPolicyEditor({ policy, models, close, saved }: { policy: ModelPolicy; models: Model[]; close: () => void; saved: () => Promise<void> }) {
+export function ModelPolicyEditor({ policy, models, close, saved }: { policy: ModelPolicy; models: Model[]; close: () => void; saved: () => Promise<void> }) {
   const [order, setOrder] = useState(policy.ordered_model_ids);
   const [defaultId, setDefaultId] = useState(policy.default_model_id ?? "");
   function move(index: number, direction: number) {

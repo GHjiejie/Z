@@ -19,6 +19,7 @@ export default defineConfig({
   use: {
     baseURL,
     browserName: "chromium",
+    channel: process.env.PLATFORM_E2E_BROWSER_CHANNEL,
     headless: true,
     actionTimeout: 10_000,
     viewport: { width: 1440, height: 1000 },

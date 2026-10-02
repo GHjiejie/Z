@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { ReactNode } from "react";
 import { Download, FileDown, RefreshCw, Trash2 } from "lucide-react";
 import {
   api, ApiError, apiUrl, dateTime, getScopeRevision, getTenantId,
@@ -9,6 +10,7 @@ import {
   formValue, useResource, useToast,
 } from "./components";
 import type { User } from "./types";
+import { ResourceHeader, ResourceIcon, ResourceStatus, resourceTime } from "./ResourcesUI";
 
 type ExportJob = {
   id: string;
@@ -38,11 +40,11 @@ function exportError(code: string) {
   return "本次导出未完成，可重新申请或联系管理员。";
 }
 
-export function TenantExportsPanel({ user }: { user: User }) {
+export function TenantExportsPanel({ user, designMode = false, navigation, initialCreate = false }: { user: User; designMode?: boolean; navigation?: ReactNode; initialCreate?: boolean }) {
   const allowed = !!user.capabilities?.includes("exports.create");
   const organizationAllowed = !!user.capabilities?.includes("usage.read_all");
   const resource = useResource<{ items: ExportJob[] }>("/exports", allowed);
-  const [creating, setCreating] = useState(false);
+  const [creating, setCreating] = useState(initialCreate);
   const [kind, setKind] = useState<"calls" | "runs">("calls");
   const [scope, setScope] = useState<"self" | "tenant">("self");
   const [downloading, setDownloading] = useState<string | null>(null);
@@ -108,7 +110,18 @@ export function TenantExportsPanel({ user }: { user: User }) {
 
   if (!allowed) return null;
   return <>
-    <Panel title="数据导出" detail="导出调用或运行元数据。每份文件仅申请人可下载，不包含对话正文、提示词或供应商成本。"
+    {designMode ? <>
+      <ResourceHeader title="调用统计与导出" description="查看你创建的最近导出任务" action={<div className="resource-header-actions"><Button variant="secondary" onClick={() => void resource.reload()}><ResourceIcon file="825fa" />刷新</Button><Button onClick={() => setCreating(true)}><ResourceIcon file="a4b8c" />创建导出</Button></div>} />
+      {navigation}
+      <div className="resource-table-wrap"><ResourceState loading={resource.loading && !resource.data} error={resource.error} retry={resource.reload}>
+        {resource.data?.items.length ? <table className="resource-table resource-export-table"><colgroup>{[20,20,14,16,16,14].map((width,index) => <col key={index} style={{width:`${width}%`}} />)}</colgroup><thead><tr><th>任务 ID</th><th>内容 / 范围</th><th>状态</th><th>创建时间</th><th>有效期</th><th>操作</th></tr></thead><tbody>{resource.data.items.map(job => {
+          const expired = job.status === "expired" || (job.status === "ready" && job.expires_at * 1000 <= Date.now());
+          const effectiveStatus = expired ? "expired" : job.status;
+          return <tr key={job.id} className={expired ? "resource-expired" : ""}><td><strong className="resource-mono">{job.id}</strong></td><td>{job.kind === "calls" ? "调用记录" : "运行记录"}<small>范围：{job.scope === "tenant" ? "当前组织 (tenant)" : "仅本人 (self)"}</small></td><td><ResourceStatus status={effectiveStatus} />{job.error_code && <small>{exportError(job.error_code)}</small>}</td><td className="resource-muted">{resourceTime(job.created_at)}</td><td>{expired ? "已过期" : job.status === "ready" ? resourceTime(job.expires_at) : "—"}</td><td><Button variant={job.status === "ready" && !expired ? "ghost" : "secondary"} busy={downloading === job.id} disabled={job.status !== "ready" || expired} onClick={() => void download(job)}>{job.status === "ready" && !expired && <ResourceIcon file="15864" />}{expired ? "已过期" : ["queued","running"].includes(job.status) ? "准备中" : job.status === "ready" ? "下载 CSV" : exportLabels[job.status] ?? job.status}</Button></td></tr>;
+        })}</tbody></table> : <Empty title="还没有导出文件" description="提交申请后将在后台生成，可稍后回来下载。" />}
+      </ResourceState><div className="resource-table-footer">共 {resource.data?.items.length ?? 0} 个导出任务（展示最近生成的导出记录）</div></div>
+      <p className="resource-footnote">* CSV 不包含会话正文、系统提示词和供应商成本</p>
+    </> : <Panel title="数据导出" detail="导出调用或运行元数据。每份文件仅申请人可下载，不包含对话正文、提示词或供应商成本。"
       action={<div className="row-actions">
         <Button variant="ghost" onClick={() => void resource.reload()} aria-label="刷新导出任务"><RefreshCw size={16} /></Button>
         <Button variant="secondary" onClick={() => setCreating(true)}><FileDown size={16} />申请导出</Button>
@@ -130,7 +143,7 @@ export function TenantExportsPanel({ user }: { user: User }) {
         </table></div> : <Empty title="还没有导出文件" description="提交申请后将在后台生成，可稍后回来下载。" />}
       </ResourceState>
       <p className="tenant-detail-summary">记录范围固定到申请时间；费用、用量与状态取各分页生成时的账务记录。后续结算不会改写已生成文件，查看最新账务请重新申请。</p>
-    </Panel>
+    </Panel>}
     {creating && <Modal title="申请数据导出" close={() => setCreating(false)} description="文件仅自己可见，下载时会重新检查当前组织权限。">
       <Form close={() => setCreating(false)} label="提交导出申请" submit={async () => {
         const actualScope = kind === "runs" ? "self" : scope;
