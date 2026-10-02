@@ -58,6 +58,8 @@ export type Run = {
   cost?: string;
   model_id?: string;
   model_alias?: string;
+  finished_at?: string | null;
+  message?: string;
 };
 export type Message = { role: string; content: string; created_at?: string };
 export type SessionDetail = Session & { messages: Message[]; runs: Run[] };

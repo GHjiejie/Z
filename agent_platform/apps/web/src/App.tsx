@@ -5,7 +5,12 @@ import type { LucideIcon } from "lucide-react";
 import { api, getTenantId, resetSession, setCsrf, setTenantId, tenantLink, write } from "./api";
 import type { IdentityUser, Tenant, User } from "./types";
 import { Button, Empty, ErrorState, Field, Form, Loading, Modal, ToastProvider, formValue, useToast } from "./components";
-import { DashboardPage, AgentsPage, ModelsPage, UsagePage, BillingPage, QuotasPage, AuditPage, RunsPage } from "./pages";
+import { ModelsPage, UsagePage, BillingPage, QuotasPage, AuditPage } from "./pages";
+import { AgentManagement, AgentSidebar } from "./AgentManagement";
+import type { AgentView } from "./AgentManagement";
+import { WorkspaceOverview } from "./WorkspaceOverview";
+import { WorkspaceRuns } from "./WorkspaceRuns";
+import { workspaceTitles, workspaceIcons } from "./WorkspaceDesign";
 import { Playground } from "./Playground";
 import { InvitationPage, MembersPage, PlatformPage, PlatformGatewayPage, roleLabel } from "./Tenancy";
 import { OwnerSupportPanel, SupportPage } from "./Support";
@@ -51,6 +56,9 @@ function Workspace() {
   const [contextError, setContextError] = useState("");
   const [authError, setAuthError] = useState("");
   const [route, setRoute] = useState<Route>(getRoute);
+  const [agentView, setAgentView] = useState<AgentView>({ mode: "list", title: "" });
+  const [collapsed, setCollapsed] = useState(() => sessionStorage.getItem("agent-platform.sidebar-collapsed") === "1");
+  const agentViewChanged = useCallback((view: AgentView) => setAgentView(view), []);
   const [mobile, setMobile] = useState(false);
   const [password, setPassword] = useState(false);
   const [contextReload, setContextReload] = useState(0);
@@ -157,9 +165,14 @@ function Workspace() {
   const memberships = identity.memberships.filter((item) => item.status === "active");
   const currentMembership = memberships.find((item) => item.tenant_id === selected);
   const canManageAgents = user?.capabilities?.includes("agents.manage") ?? false;
-  return <div className="app-shell">
+  const agentRoute = safeRoute === "agents";
+  const workspaceRoute = Object.hasOwn(workspaceTitles, safeRoute);
+  const designRoute = agentRoute || workspaceRoute;
+  const toggleSidebar = () => { setCollapsed(value => { sessionStorage.setItem("agent-platform.sidebar-collapsed", value ? "0" : "1"); return !value; }); };
+  return <div className={`app-shell ${designRoute ? `agent-shell ${workspaceRoute ? `workspace-shell ${safeRoute === "runs" ? "workspace-runs-shell" : ""}` : agentView.mode === "list" ? "agent-list-shell" : ""} ${collapsed ? "agent-collapsed" : ""}` : ""}`}>
     {mobile && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setMobile(false)} />}
     <aside className={`sidebar ${mobile ? "open" : ""}`}>
+      {designRoute ? <AgentSidebar items={visible} collapsed={collapsed && !mobile} toggle={toggleSidebar} list={agentRoute && agentView.mode === "list"} activeRoute={safeRoute} icons={workspaceRoute ? workspaceIcons(safeRoute) : undefined} iconsDirectory={workspaceRoute ? "workspace-design" : undefined} /> : <>
       <a className="brand" href={tenantLink("overview")}>
         <span className="brand-symbol">
           <Command size={22} />
@@ -210,6 +223,7 @@ function Workspace() {
           <SlidersHorizontal size={16} />
         </button>
       </div>
+      </>}
     </aside>
     <main className="main-shell">
       <div className="topbar">
@@ -221,17 +235,21 @@ function Workspace() {
             {isGlobal ? "账号与平台" : tenant?.name ?? currentMembership?.tenant_name ?? "工作空间"}</span>
           <span className="breadcrumb-slash">/</span>
           <strong>
-            {current.title}</strong>
+            {agentRoute ? "Agent管理" : workspaceRoute ? workspaceTitles[safeRoute] : current.title}</strong>
+          {agentRoute && agentView.mode !== "list" && <><span className="breadcrumb-slash">/</span><strong>{agentView.title}</strong></>}
         </div>
         <div className="topbar-right">
-          <span className="edition">
-            <span />多租户工作空间</span>
-          <button className="icon-button" aria-label="账号设置" onClick={() => setPassword(true)}>
-            <CircleHelp size={19} />
-          </button>
-          <button className="icon-button" aria-label="退出登录" onClick={() => void logout()}>
-            <LogOut size={18} />
-          </button>
+          {designRoute ? <details className="agent-context-menu"><summary>{tenant?.name ?? "工作空间"}</summary><div className="agent-context-popover">
+            <label>当前组织<select aria-label="切换组织" value={selected} onChange={event => chooseTenant(event.target.value)}>{memberships.map(item => <option key={item.tenant_id} value={item.tenant_id}>{item.tenant_name ?? item.tenant_id}{item.tenant_status !== "active" ? "（已暂停）" : ""}</option>)}</select></label>
+            <small>{currentMembership ? roleLabel(currentMembership.role) : "个人账号"} · {identityName}</small>
+            <button onClick={() => setPassword(true)}>账号与密码</button>
+            {visible.filter(item => item.platform || item.route === "invite").map(item => <a key={item.route} href={tenantLink(item.route)}>{item.title}</a>)}
+            <button onClick={() => void logout()}>退出登录</button>
+          </div></details> : <>
+          <span className="edition"><span />多租户工作空间</span>
+          <button className="icon-button" aria-label="账号设置" onClick={() => setPassword(true)}><CircleHelp size={19} /></button>
+          <button className="icon-button" aria-label="退出登录" onClick={() => void logout()}><LogOut size={18} /></button>
+          </>}
         </div>
       </div>
       <div className={`page-content ${safeRoute === "playground" ? "playground-page" : ""}`} key={`${identity.id}:${selected}:${safeRoute}:${JSON.stringify(user?.capabilities)}:${platformKey}`}>
@@ -251,10 +269,10 @@ function Workspace() {
         {safeRoute === "support" && <SupportPage />}
         {safeRoute === "invite" && <InvitationPage identity={identity} accepted={refreshIdentity} />}
         {!isGlobal && (contextLoading ? <Loading /> : contextError ? <ErrorState message={contextError} retry={() => setContextReload((value) => value + 1)} /> : !user || user.tenant_id !== selected ? <Empty title="选择一个组织" description="加入组织后即可使用组织授权的 Agent 和模型。" /> : tenant && !["active", "suspended", "closing"].includes(tenant.status) ? <Empty title="该组织当前不可用" description="组织已暂停或正在开通，请联系平台运营人员，或切换到其他组织。" /> : <>
-          {safeRoute === "overview" && <DashboardPage user={user} navigate={navigate} />}
-          {safeRoute === "agents" && <AgentsPage admin={canManageAgents} navigate={navigate} />}
+          {safeRoute === "overview" && <WorkspaceOverview user={user} navigate={navigate} />}
+          {safeRoute === "agents" && <AgentManagement admin={canManageAgents} canRun={user.capabilities?.includes("runs.execute") ?? false} navigate={navigate} onViewChange={agentViewChanged} />}
           {safeRoute === "playground" && <Playground />}
-          {safeRoute === "runs" && <RunsPage navigate={navigate} />}
+          {safeRoute === "runs" && <WorkspaceRuns navigate={navigate} canRun={user.capabilities?.includes("runs.execute") ?? false} />}
           {safeRoute === "models" && <ModelsPage admin={false} canPolicy={!readOnlyTenant && (user.capabilities?.includes("models.policy") ?? false)} />}
           {safeRoute === "users" && <MembersPage user={user} changed={refreshIdentity} />}
           {safeRoute === "support-access" && <OwnerSupportPanel user={user} />}
