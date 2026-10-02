@@ -120,13 +120,14 @@ export type Audit = {
   action: string;
   target: string;
   created_at: string;
+  details?: unknown;
 };
 
 export type TenantRole = "owner" | "tenant_admin" | "member" | "finance_viewer";
 export type Membership = {
   id: string; user_id: string; tenant_id: string; tenant_name?: string;
   name?: string; email?: string; role: TenantRole; status: string;
-  tenant_status?: string; version?: number; authz_version?: number;
+  tenant_status?: string; version?: number; authz_version?: number; joined_at?: string;
 };
 export type IdentityUser = {
   id: string; email: string; name: string; active: boolean;

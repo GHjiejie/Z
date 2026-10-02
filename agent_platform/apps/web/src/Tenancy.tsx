@@ -1,5 +1,5 @@
 import { useRef, useState } from "react";
-import { Building2, Check, Copy, ExternalLink, Pencil, Plus, RefreshCw, ShieldCheck, Users } from "lucide-react";
+import { Building2, Check, Copy, ExternalLink, Plus, RefreshCw, ShieldCheck, Users } from "lucide-react";
 import { api, dateTime, money, tenantLink, write } from "./api";
 import type { Entitlements, GatewayAdmin, IdentityUser, Invitation, Membership, Model, Tenant, User } from "./types";
 import { Badge, Button, Empty, Field, Form, Modal, PageTitle, Panel, ResourceState, SearchBox, formValue, useResource, useToast } from "./components";
@@ -7,6 +7,8 @@ import { Badge, Button, Empty, Field, Form, Modal, PageTitle, Panel, ResourceSta
 import { PlatformDeploymentsPanel, PlatformModelGrants, TenantFinancePanel, TenantGatewayPanel } from "./PlatformResources";
 import { PlatformRolesPanel } from "./Support";
 import { TenantClosurePanel } from "./OperationsPanel";
+
+import { OrganizationHeading, OrganizationSearch, OrganizationTabs, OrganizationFooter } from "./OrganizationDesign";
 
 type Items<T> = { items: T[] };
 export const roleLabel = (role: string) => ({ owner: "组织所有者", tenant_admin: "组织管理员", member: "成员", finance_viewer: "财务查看员" }[role] ?? role);
@@ -61,80 +63,40 @@ export function MembersPage({ user, changed }: { user: User; changed: () => Prom
   const [transfer, setTransfer] = useState<Membership | null>(null);
   const [search, setSearch] = useState("");
   const toast = useToast();
+  const [tab, setTab] = useState("members");
+  const [transferPicker, setTransferPicker] = useState(false);
+  const invitationItems = (invitations.data?.items ?? []).filter(item => `${item.email} ${item.role}`.toLowerCase().includes(search.toLowerCase()));
   const isOwner = user.tenant_role === "owner";
   const items = (members.data?.items ?? []).filter((item) => `${item.name} ${item.email}`.toLowerCase().includes(search.toLowerCase()));
   async function reload() { await Promise.all([members.reload(), invitations.reload(), changed()]); }
-  return <>
-    <PageTitle eyebrow="MEMBERS" title="成员与邀请" description="角色仅在当前组织生效；移除成员不会删除其历史运行或账务记录。" action={<Button onClick={() => { setCreatedLink(""); setInvite(true); }}>
-      <Plus size={16} />邀请成员</Button>} />
-    <div className="inline-note">
-      <ShieldCheck size={18} />组织所有者负责所有权转移；财务查看员只能访问费用与用量，不能运行 Agent。</div>
-    <Panel title="组织成员" action={<Button variant="ghost" aria-label="刷新成员" onClick={() => void reload()}>
-      <RefreshCw size={16} />
-    </Button>}>
-      <div className="toolbar">
-        <SearchBox value={search} onChange={setSearch} placeholder="搜索姓名或邮箱" />
-      </div>
-      <ResourceState loading={members.loading} error={members.error} retry={() => void members.reload()}>
-        {items.length ? <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>成员</th>
-                <th>角色</th>
-                <th>状态</th>
-                <th className="align-right">操作</th>
-              </tr>
-            </thead>
-            <tbody>
-              {items.map((item) => <tr key={item.id}>
-                <td>
-                  <strong>
-                    {item.name || item.email}</strong>
-                  <small>
-                    {item.email}{item.user_id === user.id ? " · 你" : ""}</small>
-                </td>
-                <td>
-                  {roleLabel(item.role)}</td>
-                <td>
-                  <State value={item.status} />
-                </td>
-                <td className="align-right">
-                  <div className="row-actions">
-                    {item.role !== "owner" && (isOwner || item.role !== "tenant_admin") && <Button variant="ghost" onClick={() => setEditing(item)}>
-                      <Pencil size={14} />编辑</Button>}{isOwner && item.role !== "owner" && item.status === "active" && <Button variant="ghost" onClick={() => setTransfer(item)}>转移所有权</Button>}</div>
-                </td>
-              </tr>)}</tbody>
-          </table>
-        </div> : <Empty title="没有匹配成员" />}</ResourceState>
-    </Panel>
-    <Panel title="组织邀请" detail="创建邀请后复制链接并自行分享；新邮箱需由平台运营人员先开通账号，平台不会自动发送邮件。">
-      <ResourceState loading={invitations.loading} error={invitations.error} retry={() => void invitations.reload()}>
-        {invitations.data?.items.length ? <div className="table-scroll">
-          <table>
-            <thead>
-              <tr>
-                <th>受邀邮箱</th>
-                <th>角色</th>
-                <th>状态</th>
-                <th>过期时间</th>
-              </tr>
-            </thead>
-            <tbody>
-              {invitations.data.items.map((item) => <tr key={item.id}>
-                <td>
-                  {item.email}</td>
-                <td>
-                  {roleLabel(item.role)}</td>
-                <td>
-                  <State value={invitationState(item)} />
-                </td>
-                <td>
-                  {item.expires_at ? dateTime(item.expires_at) : "—"}</td>
-              </tr>)}</tbody>
-          </table>
-        </div> : <Empty title="暂无邀请" description="邀请成员使用现有账号加入组织。" />}</ResourceState>
-    </Panel>
+  return <div className="organization-page organization-members" data-testid="organization-members">
+    <OrganizationHeading title="成员与邀请" description="管理当前组织成员及邀请">
+      {isOwner && <Button variant="secondary" onClick={() => setTransferPicker(true)}>转移所有权</Button>}
+      <Button onClick={() => { setCreatedLink(""); setInvite(true); }}>+ 邀请成员</Button>
+    </OrganizationHeading>
+    <div className="organization-toolbar">
+      <OrganizationTabs tabs={[{ id: "members", title: "成员" }, { id: "invitations", title: "邀请记录" }]} selected={tab} change={setTab} />
+      <OrganizationSearch value={search} change={setSearch} placeholder={tab === "members" ? "在已加载成员中搜索..." : "在已加载邀请中搜索..."} />
+    </div>
+    <section className="organization-table-box" role="tabpanel" id={`organization-${tab}`} aria-labelledby={`tab-${tab}`}>
+      <ResourceState loading={tab === "members" ? members.loading : invitations.loading} error={tab === "members" ? members.error : invitations.error} retry={() => void (tab === "members" ? members.reload() : invitations.reload())}>
+        {tab === "members" ? (items.length ? <div className="table-scroll"><table className="organization-members-table">
+          <colgroup>{[35,18,15,17,15].map((width,index) => <col key={index} style={{width: `${width}%`}} />)}</colgroup>
+          <thead><tr><th>成员 (姓名 / 邮箱)</th><th>角色</th><th>状态</th><th>加入时间</th><th>操作</th></tr></thead>
+          <tbody>{items.map(item => <tr key={item.id}>
+            <td><strong>{item.name || item.email}</strong><small>{item.email}</small></td>
+            <td><span className="organization-pill">{item.role}</span></td>
+            <td><span className={`organization-state ${item.status === "active" ? "active" : ""}`}>{item.status}</span></td>
+            <td className="organization-muted">{item.joined_at ? item.joined_at.slice(0,10) : "—"}</td>
+            <td>{item.role !== "owner" && (isOwner || item.role !== "tenant_admin") ? <Button variant="ghost" onClick={() => setEditing(item)}>管理</Button> : <span className="organization-muted">—</span>}</td>
+          </tr>)}</tbody></table></div> : <Empty title="没有匹配成员" />) : (
+          invitationItems.length ? <div className="table-scroll"><table><thead><tr><th>受邀邮箱</th><th>角色</th><th>状态</th><th>过期时间</th></tr></thead><tbody>{invitationItems.map(item => <tr key={item.id}><td>{item.email}</td><td><span className="organization-pill">{item.role}</span></td><td><State value={invitationState(item)} /></td><td>{item.expires_at ? dateTime(item.expires_at) : "—"}</td></tr>)}</tbody></table></div> : <Empty title="暂无匹配邀请" description="创建邀请后复制链接并自行分享；平台不会自动发送邮件。" />
+        )}
+        <OrganizationFooter note={tab === "invitations" ? "邀请链接仅在创建时展示；新邮箱需先开通账号" : undefined}>共 {tab === "members" ? items.length : invitationItems.length} {tab === "members" ? "名成员" : "条邀请"}</OrganizationFooter>
+      </ResourceState>
+    </section>
+
+    {transferPicker && <Modal title="选择新的组织所有者" close={() => setTransferPicker(false)}><Form label="继续" close={() => setTransferPicker(false)} submit={async form => { const member = members.data?.items.find(item => item.id === formValue(form,"membership_id")); if (!member || member.role === "owner" || member.status !== "active") throw new Error("请选择有效成员。"); setTransferPicker(false); setTransfer(member); }}><Field label="新的组织所有者"><select name="membership_id" required defaultValue=""><option value="" disabled>选择有效成员</option>{members.data?.items.filter(item => item.status === "active" && item.role !== "owner").map(item => <option key={item.id} value={item.id}>{item.name || item.email} · {item.email}</option>)}</select></Field></Form></Modal>}
     {invite && <Modal title={createdLink ? "邀请已创建" : "邀请组织成员"} close={() => setInvite(false)}>
       {createdLink ? <div className="form-body">
         <Field label="邀请链接" hint="请发送给指定邮箱的成员。令牌仅在创建时展示，请妥善分享。">
@@ -174,7 +136,7 @@ export function MembersPage({ user, changed }: { user: User; changed: () => Prom
           {transfer.name} · {transfer.email}</div>
       </Form>
     </Modal>}
-  </>;
+  </div>;
 }
 
 export function PlatformPage({ identity, changed }: { identity: IdentityUser; changed: () => Promise<void> }) {

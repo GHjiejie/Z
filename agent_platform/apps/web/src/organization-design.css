@@ -1,0 +1,119 @@
+.agent-shell.org-shell { background: #fbf9f9; color: #111827; }
+.agent-shell.org-shell.org-audit, .agent-shell.org-shell.org-support-access { background: white; color: #181818; }
+.agent-shell.org-shell .page-content { padding: 32px; }
+.agent-shell.org-shell .breadcrumb strong:first-of-type { color: #181818; font-weight: 500; }
+.agent-shell.org-shell .sidebar .agent-nav { padding: 8px 12px; }
+.agent-shell.org-shell .agent-nav-group { margin-bottom: 24px; }
+.agent-shell.org-shell .agent-nav-label { height: 24.5px; line-height: 16.5px; padding: 0 12px; margin-bottom: 0; color: #9ca3af; letter-spacing: 0; }
+.agent-shell.org-shell .agent-nav-link { height: 31.5px; padding: 0 12px; color: #374151; }
+.agent-shell.org-shell .agent-nav-link.selected { color: #6262e8; background: #eff2fe; }
+.agent-shell.org-shell .sidebar .agent-subnav { margin: 4px 0 2px 28px; padding-left: 8px; border-left: 1px solid #e5e7eb; }
+.agent-shell.org-shell .sidebar .agent-subnav a { height: 24px; padding: 0; margin: 0 0 4px; line-height: 16px; color: #6b7280; }
+.agent-shell.org-shell .sidebar .agent-subnav a:last-child { margin-bottom: 0; }
+.agent-shell.org-shell .sidebar .agent-subnav a:last-child span { padding: 0; }
+.agent-shell.org-shell .sidebar .agent-subnav small { font-size: 10px; line-height: 14px; padding: 0 4px; border: 1px solid #e5e7eb; border-radius: 3px; }
+.agent-shell.org-shell.org-quotas .agent-nav, .agent-shell.org-shell.org-audit .agent-nav, .agent-shell.org-shell.org-support-access .agent-nav { padding-top: 16px; }
+.agent-shell.org-shell.org-audit .agent-nav-link, .agent-shell.org-shell.org-support-access .agent-nav-link { height: 35.5px; }
+.agent-shell.org-shell.org-audit .agent-nav-label, .agent-shell.org-shell.org-support-access .agent-nav-label { height: 24px; }
+.agent-shell.org-shell.org-audit .agent-nav-group, .agent-shell.org-shell.org-support-access .agent-nav-group { margin-bottom: 24px; }
+.organization-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 24px; margin-bottom: 24px; }
+.organization-heading h1 { margin: 0; font-size: 22px; font-weight: 700; line-height: 27.5px; letter-spacing: 0; }
+.organization-heading p { margin: 4px 0 0; color: #6b7280; font-size: 13px; line-height: 19.5px; }
+.organization-actions { display: flex; align-items: center; gap: 10px; }
+.agent-shell.org-shell .button { min-height: 0; height: 34px; padding: 7px 13px; font-size: 12px; font-weight: 500; gap: 6px; border-radius: 6px; box-shadow: none; white-space: nowrap; line-height: 18px; }
+.agent-shell.org-shell .button.primary { background: #181818; color: white; border-color: #181818; }
+.agent-shell.org-shell .button.primary:hover { background: #303030; }
+.agent-shell.org-shell .button.secondary { background: white; color: #374151; border-color: #d1d5db; }
+.agent-shell.org-shell .button.ghost { border: 0; color: #6262e8; background: transparent; padding: 0; height: auto; box-shadow: none; line-height: 18px; }
+.organization-toolbar { display: flex; justify-content: space-between; align-items: flex-start; border-bottom: 1px solid #e5e7eb; margin-bottom: 16px; min-height: 32px; gap: 20px; }
+.organization-tabs { display: flex; gap: 24px; }
+.organization-tabs button { display: flex; align-items: center; gap: 6px; background: transparent; border: 0; border-bottom: 2px solid transparent; padding: 0 4px 10px; color: #6b7280; font-size: 14px; line-height: 20px; font-weight: 400; height: 32px; }
+.organization-tabs button[aria-selected="true"] { color: #111827; border-color: #6262e8; font-weight: 700; }
+.organization-search { display: flex; align-items: center; gap: 8px; height: 30px; width: 256px; background: white; border: 1px solid #e5e7eb; border-radius: 6px; padding: 0 10px; }
+.organization-search input { width: 100%; min-width: 0; border: 0; background: transparent; padding: 0; box-shadow: none; height: 28px; font-size: 12px; line-height: 18px; }
+.organization-search input::placeholder { color: #9ca3af; }
+.organization-search input:focus { outline: none; box-shadow: none; }
+.organization-search:focus-within { outline: 2px solid #6262e8; outline-offset: 2px; }
+.organization-icon { display: block; flex-shrink: 0; }
+.organization-table-box { border: 1px solid #e5e7eb; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 1px 2px #0000000d; }
+.agent-shell.org-shell .table-scroll { border: 0; border-radius: 0; margin: 0; }
+.agent-shell.org-shell table { border-collapse: collapse; width: 100%; font-size: 13px; table-layout: fixed; }
+.agent-shell.org-shell th { font-weight: 500; color: #6b7280; font-size: 12px; background: #f9fafb; height: 41px; padding: 0 24px; line-height: 16.5px; border-bottom: 1px solid #e5e7eb; text-transform: none; letter-spacing: 0; }
+.agent-shell.org-shell td { padding: 14px 24px; border-bottom: 1px solid #f3f4f6; font-size: 12px; line-height: 18px; vertical-align: middle; overflow-wrap: anywhere; }
+.agent-shell.org-shell tbody tr:last-child td { border-bottom: 0; }
+.agent-shell.org-shell th:last-child, .agent-shell.org-shell td:last-child { text-align: right; }
+.agent-shell.org-shell td strong { display: block; font-weight: 500; font-size: 13px; line-height: 19.5px; }
+.agent-shell.org-shell .organization-members-table td strong { font-family: "Agent Noto Sans SC", sans-serif; font-size: 14px; font-weight: 700; line-height: 19.25px; }
+.agent-shell.org-shell td small { display: block; margin: 0; font-size: 12px; line-height: 16.5px; color: #6b7280; }
+.organization-pill { display: inline-flex; align-items: center; background: #f3f4f6; border: 1px solid #e5e7eb; border-radius: 4px; padding: 2px 8px; color: #374151; font-size: 12px; font-weight: 500; line-height: 16px; max-width: 100%; }
+.organization-state { display: inline-flex; align-items: center; gap: 6px; font-size: 12px; line-height: 18px; color: #71717a; white-space: nowrap; }
+.organization-state::before { content: ""; height: 6px; width: 6px; flex-shrink: 0; background: #a1a1aa; border-radius: 50%; }
+.organization-state.active::before { background: #10b981; }
+.organization-members .organization-state.active { color: #111827; }
+.organization-support .organization-state.active { color: #16a34a; }
+.organization-muted { color: #9ca3af; }
+.organization-members-table .organization-muted { color: #4b5563; }
+.organization-numeric { font-family: "Agent Roboto Mono", monospace; font-weight: 500; }
+.organization-numeric .organization-muted { font-family: "Agent Roboto", "Agent Noto Sans SC", sans-serif; font-weight: 400; }
+.organization-table-footer { display: flex; justify-content: space-between; gap: 16px; padding: 12px 24px; border-top: 1px solid #f3f4f6; background: #f9fafb80; font-size: 12px; line-height: 16px; color: #6b7280; min-height: 40px; }
+.organization-extra { margin-top: 10px; font-size: 12px; color: #6b7280; }
+.organization-extra summary { width: fit-content; cursor: pointer; }
+.organization-extra p { margin: 12px 0; }
+.organization-note { color: #6b7280; font-size: 12px; line-height: 18px; margin: -2px 0 12px; }
+.organization-readonly { display: inline-flex; align-items: center; font-size: 10px; line-height: 14px; padding: 1px 5px; font-weight: 400; color: #9ca3af; border: 1px solid #e5e7eb; border-radius: 3px; background: #f3f4f6; }
+.agent-shell.org-shell .organization-quotas-table th { padding: 0 24px; height: 42px; }
+.agent-shell.org-shell .organization-quotas-table td { height: 53px; padding: 12px 24px; }
+.organization-entitlements { padding: 24px; }
+.organization-entitlements h2 { margin: 0 0 20px; font-size: 16px; }
+.organization-entitlements dl > div, .organization-audit-detail dl > div { display: flex; justify-content: space-between; gap: 20px; border-bottom: 1px solid #e5e7eb; padding: 10px 0; }
+.organization-entitlements dd { margin: 0; font-family: "Agent Roboto Mono", monospace; }
+.agent-shell.org-shell.org-audit .organization-heading h1, .agent-shell.org-shell.org-support-access .organization-heading h1 { line-height: 29px; font-size: 20px; }
+.agent-shell.org-shell.org-audit .organization-heading p, .agent-shell.org-shell.org-support-access .organization-heading p { color: #71717a; }
+.agent-shell.org-shell.org-audit .organization-heading { margin-bottom: 24px; }
+.agent-shell.org-shell.org-audit .organization-search { height: 32px; width: 240px; }
+.agent-shell.org-shell.org-audit .organization-actions { gap: 12px; }
+.agent-shell.org-shell.org-audit .organization-table-box, .agent-shell.org-shell.org-support-access .organization-table-box { border-color: #e4e4e7; border-radius: 6px; }
+.agent-shell.org-shell .organization-audit-table th, .agent-shell.org-shell .organization-support-table th { height: 48px; padding: 0 16px; background: #fafafa; color: #71717a; font-size: 13px; font-weight: 400; }
+.agent-shell.org-shell .organization-audit-table td, .agent-shell.org-shell .organization-support-table td { padding: 0 16px; height: 53px; font-size: 13px; line-height: 19.5px; border-color: #f4f4f5; }
+.agent-shell.org-shell .organization-audit-table .organization-pill { font-family: "Agent Roboto Mono", monospace; font-size: 12px; font-weight: 400; line-height: 18px; padding: 2px 6px; background: #f4f4f5; border-color: #e4e4e7; }
+.organization-audit .organization-table-footer, .organization-support .organization-table-footer { padding: 12px 16px; background: #fafafa; line-height: 18px; color: #71717a; min-height: 42px; border-color: #e4e4e7; }
+.organization-audit-detail { padding: 20px 24px; }
+.organization-audit-detail pre { white-space: pre-wrap; overflow-wrap: anywhere; background: #fafafa; padding: 16px; font-family: "Agent Roboto Mono", monospace; }
+.organization-audit-detail dd { margin: 0; overflow-wrap: anywhere; }
+.org-audit .modal { margin-left: auto; margin-right: 0; height: 100vh; max-height: 100vh; width: min(520px,100vw); border-radius: 0; }
+.org-audit .modal-backdrop { justify-content: flex-end; padding: 0; }
+.organization-support-note { display: flex; align-items: center; gap: 8px; border: 1px solid #e4e4e7; border-radius: 6px; background: #fafafa; padding: 12px 16px; font-size: 12px; line-height: 18px; color: #71717a; margin: -4px 0 20px; }
+.agent-shell.org-shell .organization-support-table td { height: 49px; }
+.organization-support .organization-pill { background: #f4f4f5; border-color: #e4e4e7; color: #52525b; font-weight: 400; }
+.agent-shell.org-shell .organization-revoke { color: #dc2626; font-size: 13px; }
+.agent-shell.org-shell .modal { font-family: "Agent Roboto", "Agent Noto Sans SC", sans-serif; }
+.agent-shell.org-shell .modal .button { height: 38px; font-size: 13px; }
+@media (max-width: 760px) {
+  .agent-shell.org-shell .page-content { padding: 20px 16px; }
+  .organization-heading { flex-wrap: wrap; gap: 16px; }
+  .organization-toolbar { flex-wrap: wrap; }
+  .organization-search { width: 100%; }
+  .agent-shell.org-shell table { min-width: 760px; }
+  .organization-table-footer { flex-wrap: wrap; }
+  .organization-actions { flex-wrap: wrap; }
+  .agent-shell.org-shell.org-audit .organization-search { width: 220px; }
+}
+
+.agent-shell.org-shell .main-shell { background: inherit; }
+.agent-shell.org-shell td { color: inherit; }
+.agent-shell.org-shell td strong { color: inherit; }
+.agent-shell.org-shell .button.organization-revoke { color: #dc2626; }
+.agent-shell.org-shell.org-support-access .organization-heading .button { height: 36px; padding: 8px 16px; font-size: 13px; }
+.agent-shell.org-shell .organization-audit .organization-actions .button { height: 32px; }
+.agent-shell.org-shell .organization-support-note { padding: 10px 16px; }
+
+.agent-shell.org-shell.org-users .organization-toolbar { min-height: 39px; align-items: center; }
+.agent-shell.org-shell td.organization-muted { color: #71717a; }
+.agent-shell.org-shell .organization-members-table td.organization-muted { color: #4b5563; }
+.agent-shell.org-shell.org-audit .sidebar .agent-subnav,
+.agent-shell.org-shell.org-support-access .sidebar .agent-subnav { border-left: 0; padding-left: 10px; }
+.agent-shell.org-shell .organization-heading h1 { transform: translateY(3px); }
+.agent-shell.org-shell .organization-heading p { transform: translateY(3px); }
+.agent-shell.org-shell.org-audit .modal-overlay { justify-content: flex-end; padding: 0; }
+
+.agent-shell.org-shell.org-audit .modal { max-width: 520px; border-radius: 0; margin: 0; height: 100vh; }

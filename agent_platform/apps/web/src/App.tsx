@@ -8,6 +8,7 @@ import { Button, Empty, ErrorState, Field, Form, Loading, Modal, ToastProvider, 
 import { DashboardPage, QuotasPage, AuditPage, RunsPage } from "./pages";
 import { AgentManagement, AgentSidebar } from "./AgentManagement";
 import type { AgentView } from "./AgentManagement";
+import { organizationTitles, organizationIcons } from "./OrganizationDesign";
 import { Playground } from "./Playground";
 import { InvitationPage, MembersPage, PlatformPage, PlatformGatewayPage, roleLabel } from "./Tenancy";
 import { OwnerSupportPanel, SupportPage } from "./Support";
@@ -166,11 +167,13 @@ function Workspace() {
   const agentRoute = safeRoute === "agents";
   const resourceRoute = ["models", "billing", "usage"].includes(safeRoute);
   const resourceTitle = safeRoute === "models" ? "模型策略" : safeRoute === "billing" ? "费用中心" : "调用统计与导出";
+  const organizationRoute = Object.hasOwn(organizationTitles, safeRoute);
+  const designRoute = agentRoute || organizationRoute;
   const toggleSidebar = () => { setCollapsed(value => { sessionStorage.setItem("agent-platform.sidebar-collapsed", value ? "0" : "1"); return !value; }); };
-  return <div className={`app-shell ${agentRoute ? `agent-shell ${agentView.mode === "list" ? "agent-list-shell" : ""} ${collapsed ? "agent-collapsed" : ""}` : resourceRoute ? `resources-shell resources-${safeRoute}-shell ${collapsed ? "resources-collapsed" : ""}` : ""}`}>
+  return <div className={`app-shell ${designRoute ? `agent-shell ${organizationRoute ? `org-shell org-${safeRoute}` : agentView.mode === "list" ? "agent-list-shell" : ""} ${collapsed ? "agent-collapsed" : ""}` : resourceRoute ? `resources-shell resources-${safeRoute}-shell ${collapsed ? "resources-collapsed" : ""}` : ""}`}>
     {mobile && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setMobile(false)} />}
     <aside className={`sidebar ${mobile ? "open" : ""}`}>
-      {resourceRoute ? <ResourcesSidebar items={visible} route={safeRoute} collapsed={collapsed && !mobile} toggle={toggleSidebar} /> : agentRoute ? <AgentSidebar items={visible} collapsed={collapsed && !mobile} toggle={toggleSidebar} list={agentView.mode === "list"} /> : <>
+      {resourceRoute ? <ResourcesSidebar items={visible} route={safeRoute} collapsed={collapsed && !mobile} toggle={toggleSidebar} /> : designRoute ? <AgentSidebar items={visible} collapsed={collapsed && !mobile} toggle={toggleSidebar} list={agentRoute && agentView.mode === "list"} activeRoute={safeRoute} icons={organizationRoute ? organizationIcons(safeRoute) : undefined} /> : <>
       <a className="brand" href={tenantLink("overview")}>
         <span className="brand-symbol">
           <Command size={22} />
@@ -233,14 +236,15 @@ function Workspace() {
             {resourceRoute ? safeRoute === "usage" ? "工作空间" : "资源与费用" : isGlobal ? "账号与平台" : tenant?.name ?? currentMembership?.tenant_name ?? "工作空间"}</span>
           <span className="breadcrumb-slash">/</span>
           <strong>
-            {resourceRoute ? resourceTitle : agentRoute ? "Agent管理" : current.title}</strong>
+            {resourceRoute ? resourceTitle : agentRoute ? "Agent管理" : organizationRoute ? organizationTitles[safeRoute] : current.title}</strong>
           {agentRoute && agentView.mode !== "list" && <><span className="breadcrumb-slash">/</span><strong>{agentView.title}</strong></>}
         </div>
         <div className="topbar-right">
-          {agentRoute || resourceRoute ? <details className="agent-context-menu"><summary>{tenant?.name ?? "工作空间"}</summary><div className="agent-context-popover">
+          {designRoute || resourceRoute ? <details className="agent-context-menu"><summary>{tenant?.name ?? "工作空间"}</summary><div className="agent-context-popover">
             <label>当前组织<select aria-label="切换组织" value={selected} onChange={event => chooseTenant(event.target.value)}>{memberships.map(item => <option key={item.tenant_id} value={item.tenant_id}>{item.tenant_name ?? item.tenant_id}{item.tenant_status !== "active" ? "（已暂停）" : ""}</option>)}</select></label>
             <small>{currentMembership ? roleLabel(currentMembership.role) : "个人账号"} · {identityName}</small>
             <button onClick={() => setPassword(true)}>账号与密码</button>
+            {organizationRoute && <button onClick={() => location.reload()}>刷新当前页面</button>}
             {visible.filter(item => item.platform || item.route === "invite").map(item => <a key={item.route} href={tenantLink(item.route)}>{item.title}</a>)}
             <button onClick={() => void logout()}>退出登录</button>
           </div></details> : <>

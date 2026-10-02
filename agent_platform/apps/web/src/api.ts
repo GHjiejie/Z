@@ -63,7 +63,10 @@ export async function api<T>(path: string, options: RequestInit = {}, scope = te
     if (scoped && revision !== scopeRevision) throw new ApiError("组织已切换，请重新操作。", 0, "scope_changed");
     if (!response.ok) {
       if (response.status === 401 && path !== "/auth/login" && path !== "/api/v2/me") window.dispatchEvent(new Event("auth-expired"));
-      if (response.status === 403 && scoped) window.dispatchEvent(new Event("tenant-access-changed"));
+      // This creation error concerns the chosen recipient, not the owner's access.
+      // Refreshing the tenant here would unmount the form and discard its inputs.
+      const invalidSupportRecipient = path === "/support-grants" && method === "POST" && body?.error?.code === "support_role_required";
+      if (response.status === 403 && scoped && !invalidSupportRecipient) window.dispatchEvent(new Event("tenant-access-changed"));
       throw new ApiError(body?.error?.message ?? (response.status === 422 ? "请检查表单内容是否符合要求。" : `请求未完成（${response.status}）`), response.status, body?.error?.code ?? "request_failed");
     }
     return body as T;

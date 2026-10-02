@@ -23,13 +23,15 @@ const query = () => new URLSearchParams(location.hash.split("?")[1] ?? "");
 export function DesignIcon({
   file,
   className = "",
+  directory = "agent-design",
 }: {
   file: string;
   className?: string;
+  directory?: string;
 }) {
   return (
     <img
-      src={`/agent-design/${file}.svg`}
+      src={`/${directory}/${file}.svg`}
       className={`agent-design-icon ${className}`}
       alt=""
     />
@@ -68,11 +70,17 @@ export function AgentSidebar({
   collapsed,
   toggle,
   list,
+  activeRoute = "agents",
+  icons,
+  iconsDirectory = "organization-design",
 }: {
   items: { route: string; title: string; group: string; icon: LucideIcon }[];
   collapsed: boolean;
   toggle: () => void;
   list: boolean;
+  activeRoute?: string;
+  icons?: Record<string, string>;
+  iconsDirectory?: string;
 }) {
   return (
     <>
@@ -111,15 +119,17 @@ export function AgentSidebar({
                 <div key={item.route}>
                   <a
                     href={tenantLink(item.route)}
-                    className={`agent-nav-link ${item.route === "agents" ? "selected" : ""}`}
+                    className={`agent-nav-link ${item.route === activeRoute ? "selected" : ""}`}
                     aria-label={
                       collapsed
                         ? (menuLabels[item.route] ?? item.title)
                         : undefined
                     }
-                    aria-current={item.route === "agents" ? "page" : undefined}
+                    aria-current={item.route === activeRoute ? "page" : undefined}
                   >
-                    {menuAssets[item.route] ? (
+                    {icons?.[item.route] ? (
+                      <DesignIcon file={icons[item.route]} directory={iconsDirectory} />
+                    ) : menuAssets[item.route] ? (
                       <DesignIcon file={menuAssets[item.route][list ? 0 : 1]} />
                     ) : (
                       <item.icon size={16} />
@@ -130,7 +140,7 @@ export function AgentSidebar({
                   </a>
                   {!collapsed && item.route === "playground" && (
                     <div className="agent-subnav">
-                      <a href={tenantLink("playground")}>＋ 新建会话</a>
+                      <a href={tenantLink("playground")}>{icons ? "+ 新建会话" : "＋ 新建会话"}</a>
                       <a href={tenantLink("playground")}>会话记录</a>
                       <a href={tenantLink("playground")}>
                         <span>运行轨迹</span>

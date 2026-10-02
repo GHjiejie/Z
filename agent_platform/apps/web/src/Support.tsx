@@ -1,5 +1,6 @@
+import { OrganizationHeading, OrganizationFooter, OrganizationIcon, organizationTime } from "./OrganizationDesign";
 import { useEffect, useRef, useState } from "react";
-import { RefreshCw, ShieldCheck, UserCog } from "lucide-react";
+import { RefreshCw, UserCog } from "lucide-react";
 import { api, dateTime, write } from "./api";
 import { Badge, Button, Empty, Field, Form, Modal, PageTitle, Panel, ResourceState, formValue, useResource, useToast } from "./components";
 import type { IdentityUser, Message, User } from "./types";
@@ -12,48 +13,22 @@ type Grant = {
 type SupportRun = { id: string; session_id: string; status: string; created_at: string; finished_at: string | null };
 type RoleUser = Pick<IdentityUser, "id" | "name" | "email" | "active" | "platform_roles">;
 const roleNames: Record<string, string> = { platform_admin: "平台管理员", platform_finance: "平台财务", platform_support: "平台支持" };
-const grantActive = (grant: Grant) => !grant.revoked_at && grant.expires_at * 1000 > Date.now();
 
 export function OwnerSupportPanel({ user }: { user: User }) {
   const grants = useResource<Items<Grant>>("/support-grants");
   const [creating, setCreating] = useState(false);
   const [revoking, setRevoking] = useState<Grant | null>(null);
   const toast = useToast();
-  return <Panel title="临时支持访问" detail="仅组织所有者可以批准。默认开放 15 分钟运行元数据；会话正文需要单独勾选批准，每次访问都会留下审计记录。" action={user.tenant_status === "active" && <Button variant="secondary" onClick={() => setCreating(true)}>
-    <ShieldCheck size={16} />批准支持访问</Button>}>
-    <ResourceState loading={grants.loading} error={grants.error} retry={() => void grants.reload()}>
-      {grants.data?.items.length ? <div className="table-scroll">
-        <table>
-          <thead>
-            <tr>
-              <th>支持人员</th>
-              <th>范围 / 原因</th>
-              <th>到期时间</th>
-              <th>状态</th>
-              <th className="align-right">操作</th>
-            </tr>
-          </thead>
-          <tbody>
-            {grants.data.items.map((grant) => <tr key={grant.id}>
-              <td>
-                {grant.staff_email}</td>
-              <td>
-                {grant.allow_content ? "运行元数据与会话正文" : "仅运行元数据"}<small>
-                  {grant.reason}</small>
-              </td>
-              <td>
-                {dateTime(grant.expires_at)}</td>
-              <td>
-                <Badge status={grantActive(grant) ? "active" : "disabled"}>
-                  {grant.revoked_at ? "已撤销" : grantActive(grant) ? "有效" : "已过期"}</Badge>
-              </td>
-              <td className="align-right">
-                {grantActive(grant) && <Button variant="danger" onClick={() => setRevoking(grant)}>撤销</Button>}</td>
-            </tr>)}
-          </tbody>
-        </table>
-      </div> : <Empty title="没有支持授权" description="支持人员默认不能读取本组织的运行或会话。" />}
-    </ResourceState>
+  const [clock, setClock] = useState(Date.now());
+  useEffect(() => { const timer = setInterval(() => setClock(Date.now()), 1000); return () => clearInterval(timer); }, []);
+  const active = (grant: Grant) => !grant.revoked_at && grant.expires_at * 1000 > clock;
+  return <div className="organization-page organization-support" data-testid="organization-support">
+    <OrganizationHeading title="Owner支持审批" description="为指定支持人员提供限时访问">{user.tenant_status === "active" && <Button onClick={()=>setCreating(true)}><OrganizationIcon file="8c233" />批准支持访问</Button>}</OrganizationHeading>
+    <div className="organization-support-note"><OrganizationIcon file="64a17" />* 默认不含会话正文；授权到期或撤销后立即失效。</div>
+    <section className="organization-table-box"><ResourceState loading={grants.loading} error={grants.error} retry={()=>void grants.reload()}>
+      {grants.data?.items.length ? <div className="table-scroll"><table className="organization-support-table"><colgroup>{[22,28,14,12,16,8].map((width,index)=><col key={index} style={{width:`${width}%`}} />)}</colgroup><thead><tr><th>支持人员</th><th>授权原因</th><th>访问范围</th><th>状态</th><th>到期时间</th><th>操作</th></tr></thead><tbody>{grants.data.items.map(grant=><tr key={grant.id}><td><strong>{grant.staff_email}</strong></td><td>{grant.reason}</td><td><span className="organization-pill">{grant.allow_content ? "元数据与会话正文" : "仅元数据"}</span></td><td><span className={`organization-state ${active(grant) ? "active" : ""}`}>{grant.revoked_at ? "已撤销" : active(grant) ? "有效" : "已过期"}</span></td><td className="organization-muted">{organizationTime(grant.expires_at)}</td><td>{active(grant) ? <Button variant="ghost" className="organization-revoke" onClick={()=>setRevoking(grant)}>撤销</Button> : <span className="organization-muted">—</span>}</td></tr>)}</tbody></table></div> : <Empty title="没有支持授权" description="支持人员默认不能读取本组织的运行或会话。" />}
+      <OrganizationFooter note="* 状态由系统根据到期时间与撤销记录推导，仅支持撤销操作">共 {grants.data?.items.length ?? 0} 条授权记录</OrganizationFooter>
+    </ResourceState></section>
     {creating && <Modal title="批准临时支持访问" description={`批准人：${user.name || user.email}。请核实支持人员邮箱和本次排查范围。`} close={() => setCreating(false)}>
       <Form close={() => setCreating(false)} label="批准访问" submit={async (form) => {
         await write("/support-grants", { staff_email: formValue(form, "staff_email"), reason: formValue(form, "reason"), minutes: Number(formValue(form, "minutes")), allow_content: (form.elements.namedItem("allow_content") as HTMLInputElement).checked });
@@ -78,7 +53,7 @@ export function OwnerSupportPanel({ user }: { user: User }) {
           {revoking.reason}</p>
       </Form>
     </Modal>}
-  </Panel>;
+  </div>;
 }
 
 export function SupportPage() {

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { OrganizationHeading, OrganizationSearch, OrganizationTabs, OrganizationFooter, OrganizationIcon, organizationTime } from "./OrganizationDesign";
 import {
   Activity,
   ArrowDownLeft,
@@ -12,12 +13,10 @@ import {
   CreditCard,
   Download,
   ExternalLink,
-  Layers,
   Pencil,
   Plus,
   RefreshCw,
   ShieldCheck,
-  SlidersHorizontal,
   Sparkles,
   Wallet,
   Zap,
@@ -31,6 +30,7 @@ import type {
   Model,
   Membership,
   Quota,
+  Entitlements,
   Run,
   Usage,
   User,
@@ -1128,114 +1128,39 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
   const [editing, setEditing] = useState<Quota | "new" | null>(null);
   const [scope, setScope] = useState("tenant");
   const toast = useToast();
+  const [tab, setTab] = useState("internal");
+  const entitlements = useResource<Entitlements>("/entitlements", tab === "entitlements");
   const scopeNames: Record<string, string> = {
-    tenant: "工作空间",
+    tenant: "组织",
     user: "用户",
     model: "模型",
   };
   const targetName = (quota: Quota) =>
     quota.scope === "tenant"
-      ? "整个工作空间"
+      ? "当前组织 (tenant)"
       : quota.scope === "user"
         ? (users.data?.items.find((user) => user.user_id === quota.subject_id)
             ?.email ?? quota.subject_id)
         : (models.data?.items.find((model) => model.id === quota.subject_id)
             ?.name ?? quota.subject_id);
+  const quotaItems = [...(resource.data?.items ?? [])].sort((a,b) => ["tenant","user","model"].indexOf(a.scope) - ["tenant","user","model"].indexOf(b.scope));
   const show = (quota: Quota | "new") => {
     setScope(quota === "new" ? "tenant" : quota.scope);
     setEditing(quota);
   };
   return (
-    <>
-      <PageTitle
-        eyebrow="QUOTAS & LIMITS"
-        title="配额与限流"
-        description="在工作空间、用户和模型层面控制调用速度与费用。"
-        action={
-          <Button onClick={() => show("new")}>
-            <Plus size={17} />
-            配置策略
-          </Button>
-        }
-      />
-      <div className="policy-explainer">
-        <div>
-          <Activity size={20} />
-          <strong>RPM / TPM</strong>
-          <p>每分钟请求数与 Token 数</p>
-        </div>
-        <div>
-          <Layers size={20} />
-          <strong>并发限制</strong>
-          <p>同时进行的模型调用数</p>
-        </div>
-        <div>
-          <CircleDollarSign size={20} />
-          <strong>累计预算</strong>
-          <p>累计费用上限，不按月重置</p>
-        </div>
-      </div>
-      <div className="inline-note">
-        <SlidersHorizontal size={17} />
-        各层限制同时生效。留空表示不限制，填写 0
-        表示禁止；下级配置不能放大上级额度。
-      </div>
-      <Panel title="生效策略">
-        <ResourceState
-          loading={resource.loading}
-          error={resource.error}
-          retry={() => void resource.reload()}
-        >
-          {resource.data?.items.length ? (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>作用范围</th>
-                    <th>目标</th>
-                    <th>RPM</th>
-                    <th>TPM</th>
-                    <th>并发数</th>
-                    <th>累计预算（USD）</th>
-                    <th className="align-right">操作</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {resource.data.items.map((quota) => (
-                    <tr key={quota.id}>
-                      <td>
-                        <span className="scope-pill">
-                          {scopeNames[quota.scope]}
-                        </span>
-                      </td>
-                      <td>{targetName(quota)}</td>
-                      <td>{quota.rpm == null ? "不限" : number(quota.rpm)}</td>
-                      <td>{quota.tpm == null ? "不限" : number(quota.tpm)}</td>
-                      <td>{quota.concurrent ?? "不限"}</td>
-                      <td>
-                        {quota.max_budget == null
-                          ? "不限"
-                          : money(quota.max_budget)}
-                      </td>
-                      <td className="align-right">
-                        <Button variant="ghost" onClick={() => show(quota)}>
-                          <Pencil size={14} />
-                          编辑
-                        </Button>
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <Empty
-              title="暂无策略"
-              description="为不同层级配置明确的调用限制。"
-            />
-          )}
-        </ResourceState>
-      </Panel>
+    <div className="organization-page organization-quotas" data-testid="organization-quotas">
+      <OrganizationHeading title="组织配额" description="按组织、用户或模型配置内部调用限制">{tab === "internal" && <Button onClick={() => show("new")}>+ 配置配额</Button>}</OrganizationHeading>
+      <div className="organization-toolbar"><OrganizationTabs tabs={[{id:"internal",title:"内部配额"},{id:"entitlements",title:"套餐上限",suffix:<span className="organization-readonly">只读</span>}]} selected={tab} change={setTab} /></div>
+      <p className="organization-note">* 0 表示禁止；未设置表示无此内部限制，仍受套餐上限约束；预算为累计额度。</p>
+      <section className="organization-table-box" role="tabpanel" id={`organization-${tab}`} aria-labelledby={`tab-${tab}`}>
+        {tab === "internal" ? <ResourceState loading={resource.loading} error={resource.error} retry={() => void resource.reload()}>
+          {resource.data?.items.length ? <div className="table-scroll"><table className="organization-quotas-table"><colgroup>{[12,20,12,14,13,21,8].map((width,index)=><col key={index} style={{width:`${width}%`}} />)}</colgroup><thead><tr><th>范围</th><th>对象</th><th>RPM</th><th>TPM</th><th>并发上限</th><th>累计预算 (USD)</th><th>操作</th></tr></thead><tbody>{quotaItems.map(quota=><tr key={quota.id}><td><span className="organization-pill">{scopeNames[quota.scope]}</span></td><td><strong>{targetName(quota)}</strong></td><td className="organization-numeric">{quota.rpm == null ? <span className="organization-muted">未设置</span> : number(quota.rpm)}</td><td className="organization-numeric">{quota.tpm == null ? <span className="organization-muted">未设置</span> : number(quota.tpm)}</td><td className="organization-numeric">{quota.concurrent ?? <span className="organization-muted">未设置</span>}</td><td className="organization-numeric">{quota.max_budget == null ? <span className="organization-muted">未设置</span> : new Intl.NumberFormat("en-US", {style:"currency",currency:"USD",minimumFractionDigits:2,maximumFractionDigits:4}).format(Number(quota.max_budget))}</td><td><Button variant="ghost" onClick={()=>show(quota)}>编辑</Button></td></tr>)}</tbody></table></div> : <Empty title="暂无配额规则" />}
+          <OrganizationFooter>共 {resource.data?.items.length ?? 0} 条配额规则</OrganizationFooter>
+        </ResourceState> : <ResourceState loading={entitlements.loading} error={entitlements.error} retry={()=>void entitlements.reload()}>
+          {entitlements.data && <div className="organization-entitlements"><h2>套餐上限 <span className="organization-readonly">只读</span></h2><dl>{Object.entries(entitlements.data).filter(([key])=>key!=="version").map(([key,value])=><div key={key}><dt>{({rpm:"RPM",tpm:"TPM",concurrent:"并发上限",max_concurrent_runs:"同时运行数",max_queued_runs:"排队运行数",max_members:"成员数",max_agents:"Agent 数",max_sse_connections:"SSE 连接数",max_export_jobs:"导出任务数",max_budget:"累计预算 (USD)"} as Record<string,string>)[key] ?? key}</dt><dd>{value === null ? "不限" : key === "max_budget" ? money(String(value)) : String(value)}</dd></div>)}</dl><p>由平台运营配置，内部配额不能放大套餐上限。</p></div>}
+        </ResourceState>}
+      </section>
       {editing && (
         <Modal
           title="配置配额策略"
@@ -1249,6 +1174,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                 formValue(form, key) === ""
                   ? null
                   : Number(formValue(form, key));
+              if (scope !== "tenant" && (scope === "user" ? users.loading || Boolean(users.error) : models.loading || Boolean(models.error))) throw new Error("目标列表尚未加载，请重试后保存。");
               await write(
                 "/quotas",
                 {
@@ -1284,6 +1210,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
               <Field label={scope === "user" ? "用户" : "模型"}>
                 <select
                   name="subject_id"
+                  disabled={scope === "user" ? users.loading || Boolean(users.error) : models.loading || Boolean(models.error)}
                   required
                   defaultValue={editing === "new" ? "" : editing.subject_id}
                 >
@@ -1310,6 +1237,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                   name="rpm"
                   type="number"
                   min={0}
+                  max={1000000}
                   step={1}
                   placeholder="不限"
                   defaultValue={editing === "new" ? "" : (editing.rpm ?? "")}
@@ -1320,6 +1248,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                   name="tpm"
                   type="number"
                   min={0}
+                  max={1000000000}
                   step={1}
                   placeholder="不限"
                   defaultValue={editing === "new" ? "" : (editing.tpm ?? "")}
@@ -1330,6 +1259,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                   name="concurrent"
                   type="number"
                   min={0}
+                  max={10000}
                   step={1}
                   placeholder="不限"
                   defaultValue={
@@ -1342,6 +1272,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                   name="max_budget"
                   type="number"
                   min={0}
+                  max={1000000000}
                   step="any"
                   placeholder="不限"
                   defaultValue={
@@ -1353,90 +1284,28 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
           </Form>
         </Modal>
       )}
-    </>
+    </div>
   );
 }
 
 export function AuditPage() {
   const resource = useResource<Items<Audit>>("/audit");
   const [search, setSearch] = useState("");
-  const items =
-    resource.data?.items.filter((entry) =>
-      `${entry.actor_email} ${entry.action} ${entry.target}`
-        .toLowerCase()
-        .includes(search.toLowerCase()),
-    ) ?? [];
-  return (
-    <>
-      <PageTitle
-        eyebrow="AUDIT LOG"
-        title="审计日志"
-        description="关键管理操作的完整记录，帮助团队了解每一次变更。"
-        action={
-          <Button variant="secondary" onClick={() => void resource.reload()}>
-            <RefreshCw size={16} />
-            刷新
-          </Button>
-        }
-      />
-      <Panel>
-        <div className="table-toolbar">
-          <SearchBox
-            value={search}
-            onChange={setSearch}
-            placeholder="搜索操作者、动作或对象"
-          />
-          <span>{items.length} 条记录</span>
-        </div>
-        <ResourceState
-          loading={resource.loading}
-          error={resource.error}
-          retry={() => void resource.reload()}
-        >
-          {items.length ? (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>操作人</th>
-                    <th>动作</th>
-                    <th>操作对象</th>
-                    <th>发生时间</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((entry) => (
-                    <tr key={entry.id}>
-                      <td>
-                        <div className="table-identity">
-                          <span className="audit-icon">
-                            <ShieldCheck size={16} />
-                          </span>
-                          {entry.actor_email}
-                        </div>
-                      </td>
-                      <td>
-                        <code className="action-code">{entry.action}</code>
-                      </td>
-                      <td className="muted mono">{entry.target}</td>
-                      <td className="muted nowrap">
-                        {dateTime(entry.created_at)}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          ) : (
-            <Empty
-              title="暂无审计记录"
-              description="成员、模型、Agent 与额度的关键变更将记录在这里。"
-            />
-          )}
-        </ResourceState>
-      </Panel>
-    </>
-  );
+  const [selected, setSelected] = useState<Audit | null>(null);
+  const items = resource.data?.items.filter(entry => `${entry.actor_email} ${entry.action} ${entry.target}`.toLowerCase().includes(search.toLowerCase())) ?? [];
+  const details = (entry: Audit) => {
+    if (entry.details === undefined || entry.details === null || entry.details === "") return null;
+    if (typeof entry.details !== "string") return JSON.stringify(entry.details,null,2);
+    try { return JSON.stringify(JSON.parse(entry.details),null,2); } catch { return entry.details; }
+  };
+  return <div className="organization-page organization-audit" data-testid="organization-audit">
+    <OrganizationHeading title="审计日志" description="当前组织最近记录，最多200条"><OrganizationSearch value={search} change={setSearch} placeholder="筛选已加载记录..." file="0e92b" /><Button variant="secondary" onClick={()=>void resource.reload()}><OrganizationIcon file="81827" />刷新</Button></OrganizationHeading>
+    <section className="organization-table-box"><ResourceState loading={resource.loading} error={resource.error} retry={()=>void resource.reload()}>
+      {items.length ? <div className="table-scroll"><table className="organization-audit-table"><colgroup>{[16,26,24,28,6].map((width,index)=><col key={index} style={{width:`${width}%`}} />)}</colgroup><thead><tr><th>时间</th><th>操作者</th><th>动作</th><th>目标</th><th>操作</th></tr></thead><tbody>{items.map(entry=><tr key={entry.id}><td className="organization-muted">{organizationTime(entry.created_at, true)}</td><td><strong>{entry.actor_email}</strong></td><td><code className="organization-pill">{entry.action}</code></td><td>{entry.target}</td><td><Button variant="ghost" onClick={()=>setSelected(entry)}>查看</Button></td></tr>)}</tbody></table></div> : <Empty title="暂无匹配审计记录" />}
+      <OrganizationFooter note="* 详情抽屉按需呈现结构化日志，缺失时无附加信息">共 {items.length} 条记录</OrganizationFooter>
+    </ResourceState></section>
+    {selected && <Modal title="审计记录详情" close={()=>setSelected(null)}><div className="organization-audit-detail"><dl>{[["时间",dateTime(selected.created_at)],["操作者",selected.actor_email],["动作",selected.action],["目标",selected.target]].map(([label,value])=><div key={label}><dt>{label}</dt><dd>{value}</dd></div>)}</dl><h3>附加信息</h3>{details(selected) === null ? <p>无附加信息</p> : <pre>{details(selected)}</pre>}</div></Modal>}
+  </div>;
 }
 
 export function RunsPage({ navigate }: { navigate: (path: string) => void }) {
