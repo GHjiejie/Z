@@ -37,6 +37,31 @@ class SupportService:
         return current
 
     @staticmethod
+    def _lock_users(connection, *user_ids):
+        # Support reads and role writes may involve the same two identities.
+        # Lock all identities in one order before taking role/grant row locks.
+        connection.execute(
+            select(t.users.c.id)
+            .where(t.users.c.id.in_(set(user_ids)))
+            .order_by(t.users.c.id)
+            .with_for_update()
+        ).all()
+
+    @staticmethod
+    def _approval_conditions(grant, approver):
+        return (
+            nt.memberships.c.id == grant["approver_membership_id"],
+            nt.memberships.c.tenant_id == grant["tenant_id"],
+            nt.memberships.c.user_id == grant["approved_by"],
+            nt.memberships.c.role == "owner",
+            nt.memberships.c.status == "active",
+            nt.memberships.c.authz_version == grant["approver_membership_version"],
+            approver.c.id == grant["approved_by"],
+            approver.c.active.is_(True),
+            approver.c.global_status == "active",
+        )
+
+    @staticmethod
     def _staff(connection, user_id):
         # Locks coordinate with platform role changes until the access audit commits.
         user = connection.execute(
@@ -78,6 +103,9 @@ class SupportService:
                 raise PlatformError(
                     404, "support_staff_not_found", "未找到指定支持人员。"
                 )
+            self._lock_users(connection, actor["id"], staff_id)
+            # Recheck after locking: an identity can be disabled outside this tenant.
+            owner = self._owner(connection, actor)
             self._staff(connection, staff_id)
             stamp = now()
             grant = {
@@ -158,7 +186,18 @@ class SupportService:
 
     def my_grants(self, actor):
         with self.db.transaction("support:list") as connection:
+            approver_ids = connection.scalars(
+                select(st.support_grants.c.approved_by)
+                .where(
+                    st.support_grants.c.staff_user_id == actor["id"],
+                    st.support_grants.c.revoked_at.is_(None),
+                    st.support_grants.c.expires_at > time.time(),
+                )
+                .distinct()
+            ).all()
+            self._lock_users(connection, actor["id"], *approver_ids)
             self._staff(connection, actor["id"])
+            approver = t.users.alias("support_approver")
             rows = list(
                 connection.execute(
                     select(st.support_grants, t.tenants.c.name.label("tenant_name"))
@@ -167,14 +206,25 @@ class SupportService:
                         nt.tenant_settings,
                         nt.tenant_settings.c.tenant_id == st.support_grants.c.tenant_id,
                     )
+                    .join(
+                        nt.memberships,
+                        nt.memberships.c.id
+                        == st.support_grants.c.approver_membership_id,
+                    )
+                    .join(approver, approver.c.id == nt.memberships.c.user_id)
                     .where(
                         st.support_grants.c.staff_user_id == actor["id"],
+                        # A newly approved identity is included on the next request,
+                        # after its user row can join the ordered lock set.
+                        st.support_grants.c.approved_by.in_(approver_ids),
                         st.support_grants.c.revoked_at.is_(None),
                         st.support_grants.c.expires_at > time.time(),
                         nt.tenant_settings.c.status.in_(["active", "suspended"]),
+                        *self._approval_conditions(st.support_grants.c, approver),
                     )
                     .order_by(st.support_grants.c.expires_at)
                     .limit(200)
+                    .with_for_update(of=[nt.memberships, st.support_grants])
                 ).mappings()
             )
             self._audit(
@@ -199,6 +249,16 @@ class SupportService:
         return tenant_id
 
     def _authorized(self, connection, actor, grant_id, tenant_id, *, content=False):
+        approver_id = connection.scalar(
+            select(st.support_grants.c.approved_by).where(
+                st.support_grants.c.id == grant_id,
+                st.support_grants.c.tenant_id == tenant_id,
+                st.support_grants.c.staff_user_id == actor["id"],
+            )
+        )
+        self._lock_users(
+            connection, actor["id"], *([approver_id] if approver_id else [])
+        )
         self._staff(connection, actor["id"])
         grant = (
             connection.execute(
@@ -226,6 +286,16 @@ class SupportService:
         ):
             raise PlatformError(
                 403, "support_grant_inactive", "支持授权已过期、撤销或组织已关闭。"
+            )
+        approval = connection.execute(
+            select(nt.memberships.c.id)
+            .join(t.users, t.users.c.id == nt.memberships.c.user_id)
+            .where(*self._approval_conditions(grant, t.users))
+            .with_for_update(of=nt.memberships)
+        ).first()
+        if not approval:
+            raise PlatformError(
+                403, "support_grant_inactive", "支持授权的审批依据已失效，请重新申请。"
             )
         if content and not grant["allow_content"]:
             raise PlatformError(
@@ -349,6 +419,7 @@ class SupportService:
     def set_role(self, actor, user_id, *, role, active, reason):
         # All platform role writes serialize; two admins cannot concurrently remove the last two.
         with self.db.transaction("identity:platform-roles") as connection:
+            self._lock_users(connection, actor["id"], user_id)
             self.platform.require_platform(connection, actor, "platform.roles.manage")
             target = (
                 connection.execute(

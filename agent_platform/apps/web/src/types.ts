@@ -1,3 +1,5 @@
+import type { CallResponse, PrincipalResponse, RunResponse, SessionResponse, WalletResponse } from "./api-contract.generated";
+
 export type User = {
   id: string;
   email: string;
@@ -42,23 +44,8 @@ export type Agent = {
   published_version: number | null;
   created_at: string;
 };
-export type Session = {
-  id: string;
-  title: string;
-  agent_id: string;
-  created_at: string;
-};
-export type Run = {
-  id: string;
-  session_id: string;
-  agent_name?: string;
-  status: string;
-  created_at: string;
-  error?: string;
-  cost?: string;
-  model_id?: string;
-  model_alias?: string;
-};
+export type Session = SessionResponse;
+export type Run = RunResponse;
 export type Message = { role: string; content: string; created_at?: string };
 export type SessionDetail = Session & { messages: Message[]; runs: Run[] };
 export type RunEvent = {
@@ -66,14 +53,7 @@ export type RunEvent = {
   type: string;
   data: Record<string, unknown>;
 };
-export type Wallet = {
-  balance: string;
-  reserved: string;
-  available: string;
-  currency: string;
-  blocked?: boolean;
-  block_reason?: string;
-};
+export type Wallet = WalletResponse;
 export type Dashboard = Wallet & {
   requests: number;
   tokens: number;
@@ -84,18 +64,7 @@ export type Dashboard = Wallet & {
   models: { model: string; requests: number; tokens: number; cost: string }[];
   gateway_configured: boolean;
 };
-export type Usage = {
-  id: string;
-  model: string;
-  agent_name: string;
-  user_email: string;
-  status: string;
-  input_tokens: number;
-  output_tokens: number;
-  cost: string;
-  provider_cost: string | null;
-  created_at: string;
-};
+export type Usage = CallResponse;
 export type Ledger = {
   id: string;
   type: string;
@@ -128,10 +97,7 @@ export type Membership = {
   name?: string; email?: string; role: TenantRole; status: string;
   tenant_status?: string; version?: number; authz_version?: number;
 };
-export type IdentityUser = {
-  id: string; email: string; name: string; active: boolean;
-  platform_roles: string[]; capabilities: string[]; memberships: Membership[];
-};
+export type IdentityUser = PrincipalResponse;
 export type Tenant = { id: string; name: string; status: string; version?: number; authz_version?: number; created_at?: string; };
 export type Invitation = { id: string; email: string; role: TenantRole; status?: string; expires_at?: string | number; accepted_at?: string | null; revoked_at?: string | null; token?: string; accept_url?: string; };
 export type Entitlements = {

@@ -245,3 +245,31 @@ class DeploymentCreate(StrictModel):
     capabilities: list[Literal["chat", "tools"]] = Field(
         default_factory=lambda: ["chat"], max_length=2
     )
+
+
+class DeploymentPatch(StrictModel):
+    name: str | None = Field(default=None, min_length=1, max_length=120)
+    internal_route: str | None = Field(
+        default=None, min_length=1, max_length=200, pattern=r"^[a-zA-Z0-9_.:/-]+$"
+    )
+    base_url: str | None = Field(default=None, min_length=1, max_length=500)
+    status: Literal["active", "disabled"] | None = None
+
+
+class CostBudget(StrictModel):
+    limit: str
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+class CostPrice(StrictModel):
+    input_price: str
+    output_price: str
+    expected_version: int | None = Field(default=None, ge=0)
+
+
+class ProjectionRebuild(StrictModel):
+    reason: str = Field(min_length=1, max_length=2000)
+
+
+class CostReview(ProjectionRebuild):
+    expected_version: int = Field(ge=1)

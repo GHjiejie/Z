@@ -1,5 +1,7 @@
 # 架构源码核查：边界、部署与待验证项
 
+> 本文保留2026-10-02基线。2026-10-07后的实现、迁移与实测结果以[架构调整记录](architecture-adjustments.md)和[多租户实现说明](multi-tenant-implementation.md)为准。
+
 > 与 [前端功能规格](frontend-functional-spec.md)、[接口契约](frontend-api-contracts.md) 配套。源码基线 `master` @ `db1ab95367b53d84e68cb39f59c97715ccce37a0`，2026-10-02；本地HEAD、origin/master与只读GitHub master查询一致。没有运行服务/测试、读取.env或真实凭据。本文的源码事实和后续运行验收严格分开。
 
 ## 目录与模块地图

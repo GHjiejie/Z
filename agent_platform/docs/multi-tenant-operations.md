@@ -1,12 +1,12 @@
 # 多租户部署、维护与离线切库手册
 
-更新日期：2026-09-30。配套设计：[multi-tenant-iteration-design.md](multi-tenant-iteration-design.md)。
+更新日期：2026-10-07。配套设计：[multi-tenant-iteration-design.md](multi-tenant-iteration-design.md)。
 
 当前本机已采用 [OrbStack Kubernetes 部署](kubernetes-local.md)。本文的 Compose 命令用于独立 SaaS 环境；操作旧 supervisor 请使用 `make local-stop/local-status`，`make stop/status` 现用于 Kubernetes。
 
 ## 1. 使用范围与交付状态
 
-本文描述本仓库多租户实现的部署和运维步骤。命令供运维在获准的维护窗口执行，本文交付过程没有执行 PostgreSQL 切库、真实供应商调用、隔离验收、故障注入或容量测试。设计中的 **I5 灰度与正式验收仍待执行**；SQLite 本地启动成功不能作为 SaaS 上线证据。
+本文描述本仓库多租户实现的部署和运维步骤。命令供运维在获准的维护窗口执行，本轮没有执行现有部署 PostgreSQL 切库或真实供应商调用；一次性数据库的隔离、角色与故障回归见[架构调整记录](architecture-adjustments.md)。生产恢复与容量仍需另行验收。设计中的 **I5 灰度与正式验收仍待执行**；SQLite 本地启动成功不能作为 SaaS 上线证据。
 
 本机当前使用的 `k3` 模型配置继续保留。部署、迁移及恢复均不以更换模型为前提；模型上游、部署路由、租户授权和 Agent 模板分别管理。禁止在搬迁过程中用新默认模型重写历史 `run.spec`、价格快照或调用记录。
 
@@ -19,15 +19,15 @@
 | 组件 | 启动入口 | 数据库身份 | 需要的秘密 | 职责 |
 | --- | --- | --- | --- | --- |
 | 结构迁移 / 显式初始化 | `alembic ... upgrade head` / `python -m agent_platform init` | `platform_migrator`，表所有者，但无 SUPERUSER / BYPASSRLS | 独立迁移连接凭据；初始化时的管理员密码 | 受控 DDL、首次身份引导 |
-| API | `python -m agent_platform serve` | `platform_runtime` | 运行连接凭据、持久加密 Key | 鉴权、租户上下文、业务准入、控制面操作入队 |
-| Worker | `python -m agent_platform worker` | `platform_runtime` | 运行连接凭据、持久加密 Key | 按租户领取任务、授权复核、推理、计费收尾 |
-| Gateway Sync | `python -m agent_platform gateway-sync` | `platform_runtime` | 运行连接凭据、加密 Key、网关控制 Key | 领取 Outbox、远端开通、轮换、撤销和核查 |
-| Maintenance | `python -m agent_platform maintenance` | `platform_runtime` | 运行连接凭据、加密 Key | 导出、过期文件回收、租户关闭及墓碑处理 |
+| API | `python -m agent_platform serve` | `platform_api` | 运行连接凭据、持久加密 Key | 鉴权、租户上下文、业务准入、控制面操作入队 |
+| Worker | `python -m agent_platform worker` | `platform_worker` | 运行连接凭据、持久加密 Key | 按租户领取任务、授权复核、推理、计费收尾 |
+| Gateway Sync | `python -m agent_platform gateway-sync` | `platform_gateway_sync` | 运行连接凭据、加密 Key、网关控制 Key | 领取 Outbox、远端开通、轮换、撤销和核查 |
+| Maintenance | `python -m agent_platform maintenance` | `platform_maintenance` | 运行连接凭据、加密 Key | 导出、过期文件回收、租户关闭及墓碑处理 |
 | LiteLLM | Compose `litellm` | 独立 LiteLLM 库身份 | 上游 Key、LiteLLM master / salt、管理 UI 密码 | 上游调用和网关资源管理 |
 
 API、Worker、常驻 Maintenance 不接收网关 master、上游根 Key、数据库迁移密码或初始化管理员密码。只有独立 Gateway Sync 进程接收网关控制 Key；LiteLLM 服务本身另持有其 master 和上游秘密。临时 legacy 撤销核实命令属于例外的受控运维作业，见第 7 节。
 
-`platform_runtime` 必须为非表所有者，具有 `NOSUPERUSER NOBYPASSRLS`；禁止通过 `SET ROLE` 提升为迁移角色。内容、运行、财务及租户网关表启用 FORCE RLS。全局身份、Membership、平台角色、审计/支持授权等控制元数据按应用权限访问，不能依靠它们的全局可枚举性推导出正文读取权。
+四个独立运行角色必须为非表所有者，具有 `NOSUPERUSER NOBYPASSRLS`；禁止通过 `SET ROLE` 提升为迁移角色。内容、运行、财务及租户网关表启用 FORCE RLS。全局身份、Membership、平台角色、审计/支持授权等控制元数据按应用权限访问，不能依靠它们的全局可枚举性推导出正文读取权。
 
 每个请求/后台任务显式绑定一个 `tenant_id`，每次数据库事务使用事务级 `app.tenant_id`。后台枚举租户后逐租户处理，不持有跨租户正文查询特权。平台管理员也必须针对明确的目标租户操作。进程启动仅检查 schema；API/Worker 不建表、不自动引导账号。
 
@@ -38,7 +38,7 @@ API、Worker、常驻 Maintenance 不接收网关 master、上游根 Key、数�
 以 `.env.example` 为字段清单，真实值只放在忽略的 `.env`、权限为 `0600` 的运维配置或秘密管理系统中。禁止提交数据库文件、报告、导出物和秘密。不要将 `docker compose config` 的完整展开结果、环境变量列表、数据库连接串或异常原文贴入工单。
 
 - `PLATFORM_MODE=saas`：必须 PostgreSQL、`PLATFORM_REDIS_URL`、`PLATFORM_EMBEDDED_WORKER=false`、`PLATFORM_SECURE_COOKIES=true`。
-- `PLATFORM_RUNTIME_DATABASE_URL` / `PLATFORM_MIGRATION_DATABASE_URL`：独立身份；如果密码含 URL 保留字符，先正确百分号编码。不要把未编码密码拼到 URL。
+- `PLATFORM_API_DATABASE_URL`、`PLATFORM_WORKER_DATABASE_URL`、`PLATFORM_GATEWAY_SYNC_DATABASE_URL`、`PLATFORM_MAINTENANCE_DATABASE_URL` / `PLATFORM_MIGRATION_DATABASE_URL`：每个服务使用独立身份及独立密码；如果密码含 URL 保留字符，先正确百分号编码。不要把未编码密码拼到 URL。
 - `PLATFORM_SECRET_ENCRYPTION_KEY`：持久的 Fernet Key。所有需要读取租户凭据的组件使用同一代 Key；备份 Key 的引用与恢复权限，禁止在迁移时重新生成。
 - `PLATFORM_OPERATOR_EMAILS`：仅列出明确授权的平台操作员。旧租户 `admin` 不会全部自动变为平台管理员。引导需要显式 `init`，不要为赋权而在运行进程反复执行初始化。
 - `PLATFORM_WORKER_CONCURRENCY`：进程本地并行上限；租户套餐与持久账务预占仍分别实施全局租户上限。
@@ -66,7 +66,7 @@ API、Worker、常驻 Maintenance 不接收网关 master、上游根 Key、数�
 本节只用于全新环境，已有 SQLite 数据请走第 5 节。下列命令在仓库根目录执行；配置文件、代理域名、存储所有权由部署负责人先准备好。
 
 1. 记录发行版提交号，安装锁定依赖，准备 PostgreSQL / Redis / LiteLLM 和 TLS 反向代理。SaaS 的安全 Cookie 要求浏览器通过 HTTPS 访问；内网 HTTP 健康检查不等于可通过 HTTP 登录。
-2. 配置独立的 `POSTGRES_PASSWORD`、`PLATFORM_DB_PASSWORD`、`PLATFORM_MIGRATION_DB_PASSWORD`、`LITELLM_DB_PASSWORD`、网关秘密、初始密码及持久加密 Key。不要复用这些秘密。
+2. 配置独立的 `POSTGRES_PASSWORD`、四个 `PLATFORM_<SERVICE>_DB_PASSWORD`、`PLATFORM_MIGRATION_DB_PASSWORD`、`LITELLM_DB_PASSWORD`、网关秘密、初始密码及持久加密 Key。不要复用这些秘密。
 3. 显式配置初始操作员邮箱。新租户余额为零，运营应通过有审计及幂等键的充值入口授予余额，租户管理员没有自充值能力。
 4. 创建独立外部墓碑卷，名称与配置一致：
 
@@ -385,3 +385,18 @@ docker compose --env-file agent_platform/.env -f agent_platform/deploy/compose.y
 每次变更记录至少包括：负责人/审批、代码提交号、动态 schema head、维护窗口、源/目标角色类型、备份位置引用、密钥版本引用、外部状态工单、报告校验结果、切流时间、回滚界限、待核实财务项的负责人及后续截止时间。记录引用，不记录秘密值。
 
 运行过程中至少关注：readiness 缺失服务、租户队列等待时间、最长未决网关操作、导出/关闭积压、reserved/unresolved 数量与金额、钱包/分录差异、授权拒绝和墓碑写入失败。心跳健康并不掩盖业务任务持续失败；这些指标需要结合运营界面和告警接入，不能只用进程存活作为验收结论。
+
+## 本轮架构调整的上线顺序
+
+现有数据库不会被新 bootstrap 隐式修改。本发行版运行时要求 Alembic 的唯一当前 head（0010），不能与迁移前二进制混合滚动发布；本轮需明确维护窗口。独立 Helm release 仅允许在 schema 相同且快照/事件兼容的情况下单独更新。
+
+1. 备份平台库、LiteLLM 库、加密材料和独立删除记录；停止新 Run、控制修改与财务写入，排空或核实外部请求，保留 unknown。
+2. 数据库管理员预先创建四个 `platform_<service>` 登录角色及不同密码，均无 owner、SUPERUSER、BYPASSRLS 或向 migrator 提权的角色成员关系。新数据卷使用 `deploy/bootstrap-roles.sh`；已有库由负责人审核该脚本的角色/所有权步骤，不能用重新初始化数据卷替代升级。
+3. 以原 schema 所有者迁移到 0010；0010 对存在的标准服务角色应用冻结权限。自定义角色使用 `python -m agent_platform.deploy.database_permissions --role worker --schema public --database platform` 等生成 SQL，经数据库负责人应用；角色命名可由 SQL 审核时调整。迁移角色不能代替运行身份。
+4. 更新 Compose 各服务 URL，或准备 `platform-api-database-secret`、`platform-worker-database-secret`、`platform-gateway-sync-database-secret`、`platform-maintenance-database-secret`，键均为 `PLATFORM_DATABASE_URL`。旧 `platform_runtime` 不再用于新发布；切换完成、确认没有旧连接后由负责人撤销旧角色权限和登录凭据，避免遗留广泛授权。
+5. 平台财务设置 `/api/v2/platform/costs/budgets/platform/platform` 及每个部署的 `cost-prices`。冻结价格是 USD/百万 token 的供应商成本估算，独立于客户报价和网关 Key。缺预算或价格时 SaaS 拒绝新的模型发送。
+6. 发布同版本 API/Worker/gateway-sync/maintenance，检查各自 readiness、授权、Outbox、补证与未知预占；验证后恢复准入。历史不可变账本/证据不能用 UPDATE 修补，投影故障走有原因及审计的重建接口。
+
+累计客户预算重建：`POST /api/v2/platform/tenants/{tenant_id}/billing/budget-projection/rebuild`，body 为 `reason`；从不可变 charge 账本重新汇总，不改变钱包或交易。供应商成本核实：`POST /api/v2/platform/costs/budgets/{scope}/{subject_id}/review`，body 为 `reason` 与 `expected_version`；有未处置预占或已发生成本超预算时拒绝解封。只读 `receipts` 保留每个调用的追加证据及冲突，`diagnostics` 用于观察积压和冻结。
+
+未来 schema 变更采用 expand → 兼容代码 → 回填 → contract。开始支持跨 head 的滚动发布前，先发布明确 reader/schema 范围的验证机制，并对旧/新四进程与在途快照、Outbox、补证作兼容验收；本版本的严格 head 校验不承诺该能力。0010 权限收紧和0009财务不可变记录没有自动广泛授权或破坏性降级。

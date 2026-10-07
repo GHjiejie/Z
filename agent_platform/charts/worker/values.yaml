@@ -29,7 +29,7 @@ resources:
 # The default database is an external PostgreSQL runtime connection.
 # A plaintext URL is accepted only for SQLite local compatibility.
 database:
-  existingSecret: platform-database-secret
+  existingSecret: platform-worker-database-secret
   urlKey: PLATFORM_DATABASE_URL
   url: ""
 # SQLite cannot run across nodes. Local values pin its existing RWO volume.

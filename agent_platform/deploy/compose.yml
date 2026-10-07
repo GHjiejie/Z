@@ -9,7 +9,6 @@ x-platform: &platform
   environment: &platform-environment
     PLATFORM_MODE: saas
     # Use URL-safe passwords, or set complete percent-encoded URLs explicitly.
-    PLATFORM_DATABASE_URL: ${PLATFORM_RUNTIME_DATABASE_URL:-postgresql+psycopg://platform_runtime:${PLATFORM_DB_PASSWORD:?Set PLATFORM_DB_PASSWORD}@postgres:5432/platform}
     PLATFORM_REDIS_URL: redis://redis:6379/0
     PLATFORM_LITELLM_URL: http://litellm:4000/v1
     PLATFORM_LITELLM_ADMIN_URL: ${PLATFORM_LITELLM_ADMIN_URL:-http://127.0.0.1:${LITELLM_HTTP_PORT:-4000}/ui}
@@ -18,6 +17,7 @@ x-platform: &platform
     PLATFORM_EMBEDDED_WORKER: "false"
     PLATFORM_SECURE_COOKIES: "true"
     PLATFORM_WORKER_CONCURRENCY: ${PLATFORM_WORKER_CONCURRENCY:-4}
+    PLATFORM_QUEUE_TIMEOUT: ${PLATFORM_QUEUE_TIMEOUT:-300}
     PLATFORM_RUN_TIMEOUT: ${PLATFORM_RUN_TIMEOUT:-300}
     PLATFORM_MODEL_TIMEOUT: ${PLATFORM_MODEL_TIMEOUT:-90}
     PLATFORM_MAX_RUN_COST: ${PLATFORM_MAX_RUN_COST:-1}
@@ -26,10 +26,6 @@ x-platform: &platform
     PLATFORM_MAINTENANCE_INTERVAL: ${PLATFORM_MAINTENANCE_INTERVAL:-30}
     PLATFORM_EXPORT_TTL_SECONDS: ${PLATFORM_EXPORT_TTL_SECONDS:-86400}
     PLATFORM_DELETION_RETENTION_DAYS: ${PLATFORM_DELETION_RETENTION_DAYS:-30}
-  volumes:
-    - platform-artifacts:/app/agent_platform/.data
-    # Keep this independent volume separate from PostgreSQL backup/restore.
-    - tenant-tombstones:/app/agent_platform/.tombstones
 
 services:
   postgres:
@@ -37,7 +33,10 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD}
-      PLATFORM_DB_PASSWORD: ${PLATFORM_DB_PASSWORD:?Set PLATFORM_DB_PASSWORD}
+      PLATFORM_API_DB_PASSWORD: ${PLATFORM_API_DB_PASSWORD:?Set PLATFORM_API_DB_PASSWORD}
+      PLATFORM_WORKER_DB_PASSWORD: ${PLATFORM_WORKER_DB_PASSWORD:?Set PLATFORM_WORKER_DB_PASSWORD}
+      PLATFORM_GATEWAY_SYNC_DB_PASSWORD: ${PLATFORM_GATEWAY_SYNC_DB_PASSWORD:?Set PLATFORM_GATEWAY_SYNC_DB_PASSWORD}
+      PLATFORM_MAINTENANCE_DB_PASSWORD: ${PLATFORM_MAINTENANCE_DB_PASSWORD:?Set PLATFORM_MAINTENANCE_DB_PASSWORD}
       PLATFORM_MIGRATION_DB_PASSWORD: ${PLATFORM_MIGRATION_DB_PASSWORD:?Set PLATFORM_MIGRATION_DB_PASSWORD separately}
       LITELLM_DB_PASSWORD: ${LITELLM_DB_PASSWORD:?Set LITELLM_DB_PASSWORD}
     volumes:
@@ -86,7 +85,7 @@ services:
     volumes:
       - ./litellm.yaml:/app/platform-config.yaml:ro
       - ./bootstrap_gateway_key.py:/app/platform-bootstrap-key.py:ro
-      - ${GATEWAY_BOOTSTRAP_DIR:-../.data}:/bootstrap
+      - ${GATEWAY_BOOTSTRAP_DIR:-../.data/gateway-bootstrap}:/bootstrap
     depends_on:
       postgres:
         condition: service_healthy
@@ -114,6 +113,11 @@ services:
 
   api:
     <<: *platform
+    environment:
+      <<: *platform-environment
+      PLATFORM_DATABASE_URL: ${PLATFORM_API_DATABASE_URL:-postgresql+psycopg://platform_api:${PLATFORM_API_DB_PASSWORD:?Set PLATFORM_API_DB_PASSWORD}@postgres:5432/platform}
+    volumes:
+      - platform-artifacts:/app/agent_platform/.data:ro
     ports:
       - "127.0.0.1:${PLATFORM_HTTP_PORT:-8000}:8000"
     depends_on:
@@ -130,6 +134,9 @@ services:
 
   worker:
     <<: *platform
+    environment:
+      <<: *platform-environment
+      PLATFORM_DATABASE_URL: ${PLATFORM_WORKER_DATABASE_URL:-postgresql+psycopg://platform_worker:${PLATFORM_WORKER_DB_PASSWORD:?Set PLATFORM_WORKER_DB_PASSWORD}@postgres:5432/platform}
     command: ["python", "-m", "agent_platform", "worker"]
     depends_on:
       init:
@@ -144,6 +151,7 @@ services:
     command: ["python", "-m", "agent_platform", "gateway-sync"]
     environment:
       <<: *platform-environment
+      PLATFORM_DATABASE_URL: ${PLATFORM_GATEWAY_SYNC_DATABASE_URL:-postgresql+psycopg://platform_gateway_sync:${PLATFORM_GATEWAY_SYNC_DB_PASSWORD:?Set PLATFORM_GATEWAY_SYNC_DB_PASSWORD}@postgres:5432/platform}
       PLATFORM_GATEWAY_CONTROL_URL: http://litellm:4000
       PLATFORM_GATEWAY_CONTROL_KEY: ${LITELLM_MASTER_KEY:?Set LITELLM_MASTER_KEY}
       PLATFORM_GATEWAY_SYNC_INTERVAL: ${PLATFORM_GATEWAY_SYNC_INTERVAL:-2}
@@ -155,7 +163,14 @@ services:
 
   maintenance:
     <<: *platform
+    environment:
+      <<: *platform-environment
+      PLATFORM_DATABASE_URL: ${PLATFORM_MAINTENANCE_DATABASE_URL:-postgresql+psycopg://platform_maintenance:${PLATFORM_MAINTENANCE_DB_PASSWORD:?Set PLATFORM_MAINTENANCE_DB_PASSWORD}@postgres:5432/platform}
     command: ["python", "-m", "agent_platform", "maintenance"]
+    volumes:
+      - platform-artifacts:/app/agent_platform/.data
+      # Only maintenance writes deletion evidence, independently of DB backups.
+      - tenant-tombstones:/app/agent_platform/.tombstones
     depends_on:
       init:
         condition: service_completed_successfully

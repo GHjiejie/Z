@@ -147,6 +147,8 @@ runs = Table(
     Column("request_hash", String(64), nullable=False),
     Column("cancel_requested", Boolean, nullable=False, default=False),
     Column("owner", String(64)),
+    # Nullable only for legacy writers; enqueue freezes this before publication.
+    Column("queue_expires_at", Float),
     Column("lease_until", Float),
     Column("deadline", Float),
     Column("fence", Integer, nullable=False, default=0),

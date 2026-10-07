@@ -5,7 +5,8 @@ import json
 import logging
 import time
 from contextlib import suppress
-from datetime import UTC, datetime, timedelta
+from dataclasses import replace
+from datetime import UTC, datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -16,6 +17,7 @@ from agent_platform.infrastructure import runtime_tables as rt
 from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.errors import PlatformError
+from agent_platform.infrastructure.events import configure_notifications
 from agent_platform.modules.billing.service import BillingService, reservations_table
 from agent_platform.modules.run_records import append_event, now, uid
 from agent_platform.modules.runtime.engine import RunCancelled, execute_agent
@@ -65,6 +67,7 @@ class Worker:
         self.platform = platform
         self.db = platform.db
         self.settings = platform.settings
+        configure_notifications(self.db, self.settings.redis_url)
         # An explicitly injected adapter is only for offline execution fixtures.
         # Production resolves fresh tenant credentials for every external call.
         self.gateway = gateway
@@ -94,6 +97,23 @@ class Worker:
                 )
                 if status != "active" or ceiling is None or ceiling <= 0:
                     continue
+                checked_at = time.time()
+                expired, eligible = self._queue_conditions(checked_at)
+                # Expiry is also enforced during admission to execution. The
+                # background sweep is repair, never the authority to run a job.
+                for queued in connection.execute(
+                    select(t.runs)
+                    .where(
+                        t.runs.c.tenant_id == tenant_id,
+                        t.runs.c.status == "queued",
+                        expired,
+                    )
+                    .order_by(t.runs.c.created_at, t.runs.c.id)
+                    .limit(64)
+                ).mappings():
+                    self._close_due_run(
+                        connection, queued, "expired", "排队超时，未调用模型。"
+                    )
                 active = connection.scalar(
                     select(func.count())
                     .select_from(t.runs)
@@ -108,7 +128,9 @@ class Worker:
                     connection.execute(
                         select(t.runs)
                         .where(
-                            t.runs.c.tenant_id == tenant_id, t.runs.c.status == "queued"
+                            t.runs.c.tenant_id == tenant_id,
+                            t.runs.c.status == "queued",
+                            eligible,
                         )
                         .order_by(t.runs.c.created_at, t.runs.c.id)
                         .limit(1)
@@ -117,6 +139,20 @@ class Worker:
                     .first()
                 )
                 if not row:
+                    continue
+                queue_expires_at = row["queue_expires_at"]
+                if queue_expires_at is None:
+                    # Compatibility for a legacy writer. Migrations backfill
+                    # existing rows; freeze this fallback before any execution.
+                    queue_expires_at = (
+                        datetime.fromisoformat(row["created_at"]).timestamp()
+                        + self.settings.queue_timeout
+                    )
+                started_at = time.time()
+                if queue_expires_at <= started_at:
+                    self._close_due_run(
+                        connection, row, "expired", "排队超时，未调用模型。"
+                    )
                     continue
                 try:
                     self._authorize_identity(connection, dict(row))
@@ -141,8 +177,9 @@ class Worker:
                     "status": "running",
                     "owner": self.owner,
                     "fence": row["fence"] + 1,
-                    "lease_until": time.time() + 20,
-                    "deadline": time.time() + self.settings.run_timeout,
+                    "queue_expires_at": queue_expires_at,
+                    "lease_until": started_at + min(20, self.settings.run_timeout),
+                    "deadline": started_at + self.settings.run_timeout,
                 }
                 result = connection.execute(
                     update(t.runs)
@@ -156,6 +193,42 @@ class Worker:
                 if result.rowcount:
                     return {**dict(row), **changes}
         return None
+
+    def _queue_conditions(self, checked_at: float):
+        cutoff = datetime.fromtimestamp(
+            checked_at - self.settings.queue_timeout, UTC
+        ).isoformat()
+        legacy = t.runs.c.queue_expires_at.is_(None)
+        return (
+            or_(
+                t.runs.c.queue_expires_at <= checked_at,
+                and_(legacy, t.runs.c.created_at <= cutoff),
+            ),
+            or_(
+                t.runs.c.queue_expires_at > checked_at,
+                and_(legacy, t.runs.c.created_at > cutoff),
+            ),
+        )
+
+    @staticmethod
+    def _close_due_run(connection, run, status: str, message: str):
+        connection.execute(
+            update(t.runs)
+            .where(t.runs.c.tenant_id == run["tenant_id"], t.runs.c.id == run["id"])
+            .values(
+                status=status,
+                fence=run["fence"] + 1,
+                error=message,
+                lease_until=None,
+                finished_at=now(),
+            )
+        )
+        append_event(
+            connection,
+            run["id"],
+            f"run.{status}",
+            {"status": status, "error": message},
+        )
 
     def _tenant_page(self, cursor: str, *, active=False, limit=32) -> list[str]:
         """Global identity metadata only; tenant content is never scanned unscoped."""
@@ -188,7 +261,7 @@ class Worker:
             connection, identity, "runs.execute"
         )
 
-    def _assert_lease(self, connection, run: dict):
+    def _assert_lease(self, connection, run: dict, *, check_deadline=True):
         current = (
             connection.execute(
                 select(t.runs).where(
@@ -198,11 +271,20 @@ class Worker:
             .mappings()
             .one()
         )
+        checked_at = time.time()
         if (
             current["owner"] != self.owner
             or current["fence"] != run["fence"]
             or current["status"] not in ("running", "cancelling")
-            or current["lease_until"] < time.time()
+            or current["lease_until"] is None
+            or current["deadline"] is None
+        ):
+            raise PlatformError(409, "lease_lost", "运行执行权已失效。")
+        deadline_elapsed = current["deadline"] <= checked_at
+        if check_deadline and deadline_elapsed:
+            raise TimeoutError("运行执行期限已到。")
+        if current["lease_until"] <= checked_at and not (
+            deadline_elapsed and not check_deadline
         ):
             raise PlatformError(409, "lease_lost", "运行执行权已失效。")
         return current
@@ -228,22 +310,32 @@ class Worker:
                 active = True
             except PlatformError:
                 active = False
+        if (
+            current["owner"] == self.owner
+            and current["fence"] == run["fence"]
+            and current["status"] in ("running", "cancelling")
+            and current["deadline"] is not None
+            and current["deadline"] <= time.time()
+        ):
+            raise TimeoutError("运行执行期限已到。")
         return bool(
             not active
             or current["cancel_requested"]
             or current["owner"] != self.owner
             or current["fence"] != run["fence"]
             or current["status"] not in ("running", "cancelling")
-            or current["lease_until"] < time.time()
+            or current["lease_until"] is None
+            or current["lease_until"] <= time.time()
+            or current["deadline"] is None
         )
 
     def renew(self, run: dict) -> None:
         with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
-            self._assert_lease(connection, run)
+            current = self._assert_lease(connection, run)
             connection.execute(
                 update(t.runs)
                 .where(t.runs.c.id == run["id"])
-                .values(lease_until=time.time() + 20)
+                .values(lease_until=min(time.time() + 20, current["deadline"]))
             )
 
     async def heartbeat(self, run: dict) -> None:
@@ -400,7 +492,9 @@ class Worker:
                 )
             }
 
-    def _record_attempt(self, run: dict, call_id: str, routing: dict) -> None:
+    def _record_attempt(
+        self, run: dict, call_id: str, routing: dict, attempt_id: str | None = None
+    ) -> None:
         with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
             current = self._assert_lease(connection, run)
             identity = self._authorize_identity(connection, run)
@@ -408,13 +502,20 @@ class Worker:
                 raise RunCancelled()
             self._validate_route(connection, run)
             if routing["credential_version_id"]:
+                current_routing = self.platform.gateway.resolve(
+                    run["tenant_id"],
+                    {
+                        **run["spec"]["model"],
+                        "deployment_id": run["spec"].get("deployment_id"),
+                    },
+                    connection=connection,
+                )
                 binding = (
                     connection.execute(
                         select(gt.bindings).where(
                             gt.bindings.c.tenant_id == run["tenant_id"],
                             gt.bindings.c.active_credential_version_id
                             == routing["credential_version_id"],
-                            gt.bindings.c.status == "ready",
                         )
                     )
                     .mappings()
@@ -431,7 +532,13 @@ class Worker:
                     .mappings()
                     .first()
                 )
-                if not binding or not credential:
+                if (
+                    not binding
+                    or not credential
+                    or current_routing["route"] != routing["route"]
+                    or current_routing["credential_version_id"]
+                    != routing["credential_version_id"]
+                ):
                     raise PlatformError(
                         403,
                         "gateway_credential_changed",
@@ -441,9 +548,10 @@ class Worker:
                 return
             connection.execute(
                 insert(rt.call_attempts).values(
-                    id=call_id,
+                    id=attempt_id or call_id,
                     tenant_id=run["tenant_id"],
                     run_id=run["id"],
+                    logical_call_id=call_id,
                     membership_id=identity["membership_id"],
                     deployment_id=routing["deployment_id"],
                     credential_version_id=routing["credential_version_id"],
@@ -456,6 +564,13 @@ class Worker:
                     created_at=now(),
                 )
             )
+
+            if self.gateway is None:
+                from agent_platform.modules.metering import prepare_reconciliation
+
+                prepare_reconciliation(
+                    connection, run["tenant_id"], call_id, attempt_id or call_id
+                )
 
     def register_call(self, run: dict, call_id: str) -> None:
         model = run["spec"]["model"]
@@ -499,6 +614,7 @@ class Worker:
         self, run: dict, messages: list[dict], tools: list[dict]
     ) -> ModelReply:
         call_id = uid()
+        attempt_id = uid()
         model = run["spec"]["model"]
         max_tokens = run["spec"]["max_tokens"]
         # Conservative UTF-8 byte bound, plus protocol framing. No cache discount
@@ -544,6 +660,8 @@ class Worker:
                     max_tokens,
                     model["input_price"],
                     model["output_price"],
+                    deployment_id=run["spec"].get("deployment_id"),
+                    require_cost_policy=self.settings.mode == "saas",
                 )
             )
             try:
@@ -556,7 +674,9 @@ class Worker:
             if await asyncio.to_thread(self.is_cancelled, run):
                 raise RunCancelled()
             inference, routing = await asyncio.to_thread(self._resolve_inference, run)
-            await asyncio.to_thread(self._record_attempt, run, call_id, routing)
+            await asyncio.to_thread(
+                self._record_attempt, run, call_id, routing, attempt_id
+            )
             await asyncio.to_thread(sync_call_receipt, self.platform, receipt)
             await asyncio.to_thread(
                 self.event,
@@ -573,6 +693,11 @@ class Worker:
                 max_tokens,
                 run["spec"]["temperature"],
                 tools,
+                **(
+                    {"attempt_id": attempt_id, "logical_call_id": call_id}
+                    if self.gateway is None
+                    else {}
+                ),
             ):
                 if event.type == "text":
                     buffer += event.data["text"]
@@ -590,6 +715,14 @@ class Worker:
                 raise GatewayError(
                     "usage_unavailable", "模型未返回完整用量，费用等待核实。"
                 )
+            reply = replace(
+                reply,
+                raw_usage={
+                    **reply.raw_usage,
+                    "attempt_id": attempt_id,
+                    "logical_call_id": call_id,
+                },
+            )
             # Settlement does not depend on current user permissions: a revoked
             # account must still pay for usage already produced upstream.
             settlement = asyncio.create_task(
@@ -674,9 +807,11 @@ class Worker:
 
     def finish(self, run: dict, status: str, result: str = "", error: str = "") -> None:
         with self.db.transaction(f"tenant:{run['tenant_id']}") as connection:
-            current = self._assert_lease(connection, run)
+            current = self._assert_lease(connection, run, check_deadline=False)
             if current["cancel_requested"] and status == "succeeded":
                 status = "cancelled"
+            if status == "succeeded" and current["deadline"] <= time.time():
+                status, error = "expired", "运行超时，已产生的用量仍会结算。"
             connection.execute(
                 update(t.runs)
                 .where(t.runs.c.id == run["id"])
@@ -738,7 +873,9 @@ class Worker:
             async def cancelled():
                 return await asyncio.to_thread(self.is_cancelled, run)
 
-            async with asyncio.timeout(self.settings.run_timeout):
+            # Claim freezes the execution budget. A delayed executor or a
+            # settings change must never grant this run another full timeout.
+            async with asyncio.timeout(max(0, run["deadline"] - time.time())):
                 result = await execute_agent(
                     run["spec"], messages, invoke, emit, cancelled
                 )
@@ -791,11 +928,17 @@ class Worker:
                 self._recover_tenant(tenant_id)
 
     def _recover_tenant(self, tenant_id: str) -> None:
-        cutoff = (
-            datetime.now(UTC) - timedelta(seconds=self.settings.run_timeout)
-        ).isoformat()
+        from agent_platform.modules.metering import apply_ready_evidence
+
+        for _ in range(16):
+            if not apply_ready_evidence(
+                self.db, tenant_id, self.owner, redis_url=self.settings.redis_url
+            ):
+                break
         terminal = ("failed", "cancelled", "expired", "succeeded")
         with self.db.transaction(f"tenant:{tenant_id}") as connection:
+            checked_at = time.time()
+            queue_expired, _ = self._queue_conditions(checked_at)
             due = list(
                 connection.execute(
                     select(t.runs)
@@ -804,12 +947,13 @@ class Worker:
                         or_(
                             and_(
                                 t.runs.c.status == "queued",
-                                t.runs.c.created_at < cutoff,
+                                queue_expired,
                             ),
                             and_(
                                 t.runs.c.status.in_(("running", "cancelling")),
                                 or_(
-                                    t.runs.c.lease_until < time.time(),
+                                    t.runs.c.deadline <= checked_at,
+                                    t.runs.c.lease_until <= checked_at,
                                     t.runs.c.lease_until.is_(None),
                                 ),
                             ),
@@ -821,27 +965,18 @@ class Worker:
             )
             for run in due:
                 queued = run["status"] == "queued"
-                state = "expired" if queued else "failed"
+                timed_out = run["deadline"] is not None and (
+                    run["deadline"] <= checked_at
+                )
+                state = "expired" if queued or timed_out else "failed"
                 message = (
-                    "排队超时，未调用模型。" if queued else "执行进程失联，未自动重放。"
+                    "排队超时，未调用模型。"
+                    if queued
+                    else "运行超时，已产生的用量仍会结算。"
+                    if timed_out
+                    else "执行进程失联，未自动重放。"
                 )
-                connection.execute(
-                    update(t.runs)
-                    .where(t.runs.c.tenant_id == tenant_id, t.runs.c.id == run["id"])
-                    .values(
-                        status=state,
-                        fence=run["fence"] + 1,
-                        error=message,
-                        lease_until=None,
-                        finished_at=now(),
-                    )
-                )
-                append_event(
-                    connection,
-                    run["id"],
-                    f"run.{state}",
-                    {"status": state, "error": message},
-                )
+                self._close_due_run(connection, run, state, message)
 
         mismatches = [
             and_(reservations_table.c.status == stored, t.calls.c.status != projected)

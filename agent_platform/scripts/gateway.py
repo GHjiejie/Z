@@ -25,11 +25,28 @@ CONTROL_SECRETS = (
     "UI_PASSWORD",
 )
 
+SERVICE_DATABASE_SECRETS = (
+    "PLATFORM_API_DB_PASSWORD",
+    "PLATFORM_WORKER_DB_PASSWORD",
+    "PLATFORM_GATEWAY_SYNC_DB_PASSWORD",
+    "PLATFORM_MAINTENANCE_DB_PASSWORD",
+    "PLATFORM_MIGRATION_DB_PASSWORD",
+)
+SERVICE_DATABASE_URLS = (
+    "PLATFORM_API_DATABASE_URL",
+    "PLATFORM_WORKER_DATABASE_URL",
+    "PLATFORM_GATEWAY_SYNC_DATABASE_URL",
+    "PLATFORM_MAINTENANCE_DATABASE_URL",
+    "PLATFORM_RUNTIME_DATABASE_URL",
+)
+
 
 def platform_environment(env: dict[str, str]) -> dict[str, str]:
     """Allow only application settings and essential OS runtime configuration."""
     excluded = {
         *CONTROL_SECRETS,
+        *SERVICE_DATABASE_SECRETS,
+        *SERVICE_DATABASE_URLS,
         "OPENAI_API_KEY",
         "OPENAI_BASE_URL",
         "UPSTREAM_API_KEY",
@@ -82,7 +99,9 @@ class LocalGateway:
             raise RuntimeError("LITELLM_PORT 必须在 1 到 65535 之间。")
         self.directory = state_dir.resolve() / "gateway"
         self.control_file = self.directory / ".env.control"
-        self.key_file = self.directory / ".env.gateway"
+        self.bootstrap_directory = self.directory / "bootstrap"
+        self.key_file = self.bootstrap_directory / ".env.gateway"
+        self.legacy_key_file = self.directory / ".env.gateway"
         self.project = (
             "agent-platform-local-"
             + hashlib.sha256(str(state_dir.resolve()).encode()).hexdigest()[:12]
@@ -111,6 +130,14 @@ class LocalGateway:
 
     def prepare(self) -> None:
         self.directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        self.bootstrap_directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+        legacy_key_file = self.legacy_key_file
+        if legacy_key_file.is_file() and not self.key_file.exists():
+            # Preserve the existing restricted inference key, while keeping the
+            # control-password directory outside LiteLLM's bootstrap mount.
+            fd = os.open(self.key_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            with os.fdopen(fd, "wb") as target:
+                target.write(legacy_key_file.read_bytes())
         if not self.control_file.exists():
             controls = {
                 name: self.env.get(name) or secrets.token_hex(24)
@@ -137,6 +164,20 @@ class LocalGateway:
             raise RuntimeError(
                 "本地网关控制配置不完整，请检查 .env.control；不会覆盖已有数据库凭据。"
             )
+        # Add new service credentials without rotating any existing PostgreSQL
+        # password. An old local volume still needs explicit DBA provisioning
+        # before it can be used as a SaaS platform database.
+        additions = {
+            name: self.env.get(name) or secrets.token_hex(24)
+            for name in SERVICE_DATABASE_SECRETS
+            if not controls.get(name)
+        }
+        if additions:
+            with self.control_file.open("a") as target:
+                for name, value in additions.items():
+                    escaped = value.replace("\\", "\\\\").replace("'", "\\'")
+                    target.write(f"{name}='{escaped}'\n")
+            controls.update(additions)
         if controls["UI_PASSWORD"] == controls["LITELLM_MASTER_KEY"]:
             raise RuntimeError("LiteLLM 管理页密码必须独立于网关 master key。")
         self.control_file.chmod(0o600)
@@ -157,7 +198,7 @@ class LocalGateway:
             **controls,
             "COMPOSE_ANSI": "never",
             "COMPOSE_PROGRESS": "plain",
-            "GATEWAY_BOOTSTRAP_DIR": str(self.directory),
+            "GATEWAY_BOOTSTRAP_DIR": str(self.bootstrap_directory),
             "LITELLM_HTTP_PORT": str(self.port),
             "LITELLM_MODEL_ALIAS": alias,
             "UPSTREAM_MODEL": upstream_model,
@@ -174,7 +215,6 @@ class LocalGateway:
             # Local mode only starts infrastructure containers. These values
             # satisfy Compose's full-file interpolation without exposing them to
             # the API or Worker. Existing local PostgreSQL volumes are preserved.
-            "PLATFORM_MIGRATION_DB_PASSWORD": controls["PLATFORM_DB_PASSWORD"],
             "PLATFORM_TOMBSTONE_VOLUME": f"{self.project}-tenant-tombstones",
         }
 

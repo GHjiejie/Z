@@ -153,7 +153,9 @@ class Cluster:
     def settings(self):
         env = load_runtime_environment(self.args.env_file, environ={})
         gateway = LocalGateway(PLATFORM / ".data/local", env, 4000)
-        if not gateway.control_file.is_file() or not gateway.key_file.is_file():
+        if not gateway.control_file.is_file() or not (
+            gateway.key_file.is_file() or gateway.legacy_key_file.is_file()
+        ):
             raise RuntimeError(
                 "未找到现有 managed 网关配置；请使用原实例配置进行迁移。"
             )
@@ -388,8 +390,12 @@ class Cluster:
         )
 
     def deploy(self):
-        if (self.get("configmap", "platform-release") or {}).get("data", {}).get("manager") == "helm":
-            raise RuntimeError("资源已经由独立 Helm releases 管理；请使用 scripts.helm deploy。")
+        if (self.get("configmap", "platform-release") or {}).get("data", {}).get(
+            "manager"
+        ) == "helm":
+            raise RuntimeError(
+                "资源已经由独立 Helm releases 管理；请使用 scripts.helm deploy。"
+            )
         if not self.get("configmap", "platform-release"):
             raise RuntimeError(
                 "首次迁移请运行 make k8s-import；尚未导入数据，不能直接启动。"
@@ -753,6 +759,7 @@ def main():
     # over Helm-owned resources. Only the historical one-time importer uses it.
     if len(sys.argv) > 1 and sys.argv[1] != "import-local":
         from agent_platform.scripts.helm import main as helm_main
+
         helm_main(sys.argv[1:])
         return
     parser = argparse.ArgumentParser(description=__doc__)

@@ -64,6 +64,7 @@ class Database:
             "runtime_tables",
             "operations_tables",
             "support_tables",
+            "metering_tables",
         ):
             importlib.import_module("agent_platform.infrastructure." + module)
         importlib.import_module("agent_platform.modules.billing.service")
@@ -125,6 +126,7 @@ class Database:
                     "gateway_tables",
                     "runtime_tables",
                     "operations_tables",
+                    "metering_tables",
                 ):
                     importlib.import_module("agent_platform.infrastructure." + module)
                 control = {
@@ -167,10 +169,14 @@ class Database:
 
     @contextmanager
     def transaction(self, scope: str = "platform") -> Iterator[Connection]:
+        notifications = ()
         with (
             self._memory_lock if self._memory_lock else nullcontext(),
             self.engine.connect() as connection,
         ):
+            # Domain writes coalesce wakeups here. Dispatch only after the
+            # transaction, connection and SQLite memory lock are released.
+            connection.info["platform_commit_notifications"] = {}
             try:
                 if self.sqlite:
                     connection.exec_driver_sql("BEGIN IMMEDIATE")
@@ -189,9 +195,29 @@ class Database:
                     )
                 yield connection
                 connection.commit()
+                notifications = tuple(
+                    connection.info["platform_commit_notifications"].items()
+                )
             except BaseException:
                 connection.rollback()
                 raise
+            finally:
+                connection.info.pop("platform_commit_notifications", None)
+        if notifier := getattr(self, "event_notifier", None):
+            for (tenant_id, run_id), sequence in notifications:
+                notifier.publish(tenant_id, run_id, sequence)
+
+    def lock(self, connection: Connection, scope: str) -> None:
+        """Additional lock in the caller's transaction; tenant precedes cost locks."""
+        if not self.sqlite:
+            lock_id = int.from_bytes(
+                hashlib.sha256(scope.encode()).digest()[:8], "big", signed=True
+            )
+            connection.execute(
+                text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_id}
+            )
 
     def close(self) -> None:
+        if notifier := getattr(self, "event_notifier", None):
+            notifier.close()
         self.engine.dispose()

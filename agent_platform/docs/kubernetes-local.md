@@ -89,7 +89,7 @@ make -C agent_platform resume
 
 ## 通用 Chart 与本地 profile
 
-默认应用 Chart 使用外部 PostgreSQL Secret `platform-database-secret/PLATFORM_DATABASE_URL`；migration 使用独立的 `platform-migrator-secret`。没有默认 SQLite 卷或固定节点。API/maintenance 引用共同的 `platform-exports` PVC，API 只读、maintenance 可写；仅维护服务挂载独立的 `tenant-tombstones`。worker/gateway-sync 默认没有文件卷。
+默认应用 Chart 分别使用外部 PostgreSQL Secret `platform-{api,worker,gateway-sync,maintenance}-database-secret/PLATFORM_DATABASE_URL`；migration 使用独立的 `platform-migrator-secret`。没有默认 SQLite 卷或固定节点。API/maintenance 引用共同的 `platform-exports` PVC，API 只读、maintenance 可写；仅维护服务挂载独立的 `tenant-tombstones`。worker/gateway-sync 默认没有文件卷。
 
 部署者需提前准备迁移/运行连接身份、持久加密 Key、网关控制凭据及存储。引用现有依赖的示例：
 
@@ -98,7 +98,7 @@ helm upgrade --install platform-worker ./agent_platform/charts/worker \
   --namespace agent-platform --create-namespace \
   --set image.repository=registry.example/team/platform-worker \
   --set image.tag=YOUR_RELEASE \
-  --set database.existingSecret=platform-database-secret \
+  --set database.existingSecret=platform-worker-database-secret \
   --set config.redisUrl=redis://redis.example:6379/0 \
   --set config.litellmUrl=https://gateway.example/v1 --wait
 ```
@@ -137,7 +137,7 @@ Chart 不创建含凭据的 Secret，只投射必要键：
 | 已有 Secret | 使用者 |
 | --- | --- |
 | `platform-runtime-secret` | 四个应用的加密 Key；本地兼容受限运行 Key按需投射 |
-| `platform-database-secret` | 通用 PostgreSQL 应用运行身份 |
+| `platform-{api,worker,gateway-sync,maintenance}-database-secret` | 各服务独立 PostgreSQL 运行身份与密码 |
 | `platform-migrator-secret` | 仅迁移 Job |
 | `gateway-control-secret` | 仅 gateway-sync 的控制 URL/Key |
 | `litellm-secret` | 仅 LiteLLM 的上游、管理凭据、数据库连接 |

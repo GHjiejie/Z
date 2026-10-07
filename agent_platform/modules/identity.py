@@ -1095,6 +1095,11 @@ class IdentityService:
                 tenant_id,
                 details=values,
             )
+            from agent_platform.modules.gateway_control import GatewayService
+
+            GatewayService(self.db, self.settings).converge_configuration(
+                connection, tenant_id
+            )
             return {**dict(row), **changes}
 
     def model_policy(self, actor):

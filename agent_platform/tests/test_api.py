@@ -7,6 +7,7 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from cryptography.fernet import Fernet
 from fastapi.testclient import TestClient
 from sqlalchemy import insert, select, update
 
@@ -14,8 +15,11 @@ from agent_platform.apps.api.main import COOKIE, create_app
 from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.errors import PlatformError
-from agent_platform.modules.platform import append_event, hasher, now, uid
+from agent_platform.modules.gateway_control import GatewayService
+from agent_platform.modules.platform import append_event, now, uid
 from agent_platform.modules.runtime.gateway import GatewayEvent, ModelReply
+from agent_platform.tests.fixtures import MultiTenantFixture, migrate
+from agent_platform.tests.test_execution_lifecycle import OfflineControl
 
 PASSWORD = "Strong-password-for-tests-42"
 
@@ -50,6 +54,8 @@ class APIIntegrationTest(unittest.TestCase):
             database_url=f"sqlite:///{Path(self.temporary.name) / 'platform.db'}",
             admin_email="admin@example.test",
             admin_password=PASSWORD,
+            operator_emails=("admin@example.test",),
+            secret_encryption_key=Fernet.generate_key().decode(),
             embedded_worker=False,
             litellm_url="http://test",
             litellm_key="test",
@@ -58,10 +64,25 @@ class APIIntegrationTest(unittest.TestCase):
         )
         self.gateway = FakeGateway()
         self.app = create_app(self.settings, gateway=self.gateway)
+        migrate(self.settings.database_url)
+        self.db = self.app.state.database
+        self.fixture = MultiTenantFixture(self.db, self.settings)
+        self.platform = self.app.state.platform
+        self.tenant = self.fixture.tenant_id
+        self.platform.gateway = GatewayService(
+            self.db, self.settings, adapter=OfflineControl()
+        )
+        self.deployment = self.platform.gateway.create_deployment(
+            {
+                "name": "Offline deployment",
+                "internal_route": "offline-test-route",
+                "base_url": self.settings.litellm_url,
+                "capabilities": {"text": True, "tools": True},
+            },
+            actor_id=self.fixture.owner["id"],
+        )
         self.client = TestClient(self.app)
         self.client.__enter__()
-        self.platform = self.app.state.platform
-        self.db = self.app.state.database
         self.admin = self.login()
 
     def tearDown(self):
@@ -85,7 +106,7 @@ class APIIntegrationTest(unittest.TestCase):
                     "password": PASSWORD,
                 },
             )
-            result = client.get("/api/v1/models")
+            result = client.get(f"/api/v2/tenants/{self.tenant}/models")
             self.assertEqual(result.status_code, 200)
             self.assertEqual(result.json(), {"items": [], "default_model": "k3"})
 
@@ -140,7 +161,7 @@ class APIIntegrationTest(unittest.TestCase):
                 "output_price": "5",
             },
         ).json()
-        self.platform.settings = replace(self.settings, default_model="preferred-model")
+        self.request("PUT", "/model-policy", json={"default_model_id": preferred["id"]})
         session = self.request(
             "POST", "/sessions", json={"agent_id": builtin["id"]}
         ).json()
@@ -188,7 +209,7 @@ class APIIntegrationTest(unittest.TestCase):
         rejected = self.request(
             "POST", path, key=uid(), json={"message": "hello", "model_id": other["id"]}
         )
-        self.assertEqual(rejected.json()["error"]["code"], "model_disabled")
+        self.assertEqual(rejected.json()["error"]["code"], "model_not_granted")
         self.request("PATCH", f"/models/{other['id']}", json={"active": True})
         payload = {"message": "hello", "model_id": other["id"]}
         first = self.request("POST", path, key="override", json=payload)
@@ -238,9 +259,7 @@ class APIIntegrationTest(unittest.TestCase):
         foreign = self.seed_second_tenant()
         self.platform.bootstrap()
         local = self.request("GET", "/agents").json()["items"]
-        self.assertTrue(
-            all(a["tenant_id"] == self.admin["user"]["tenant_id"] for a in local)
-        )
+        self.assertTrue(all(a["tenant_id"] == self.tenant for a in local))
         with self.db.read() as conn:
             foreign_ids = list(
                 conn.scalars(
@@ -279,7 +298,7 @@ class APIIntegrationTest(unittest.TestCase):
                 "/api/v1/auth/login",
                 json={"email": settings.admin_email, "password": PASSWORD},
             )
-            response = client.get("/api/v1/gateway")
+            response = client.get("/api/v2/platform/gateway")
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json(), {"admin_url": "", "configured": False})
 
@@ -326,28 +345,29 @@ class APIIntegrationTest(unittest.TestCase):
             default_model_output_price="5",
         )
         app = create_app(settings, gateway=self.gateway)
+        app.state.platform.bootstrap()
         with TestClient(app) as client:
-            context = client.post(
+            client.post(
                 "/api/v1/auth/login",
                 json={
                     "email": settings.admin_email,
                     "password": PASSWORD,
                 },
             ).json()
-            catalog = client.get("/api/v1/models").json()
+            catalog = client.get(f"/api/v2/tenants/{self.tenant}/models").json()
             self.assertEqual(len(catalog["items"]), 1)
             model = catalog["items"][0]
             self.assertEqual(model["alias"], "k3")
             self.assertTrue(model["is_default"])
             self.assertEqual((model["input_price"], model["output_price"]), ("2", "5"))
-            changed = client.patch(
-                f"/api/v1/models/{model['id']}",
-                headers={"X-CSRF-Token": context["csrf_token"]},
+            changed = self.request(
+                "PATCH",
+                f"/models/{model['id']}",
                 json={"active": False, "input_price": "7"},
             )
-            self.assertEqual(changed.status_code, 200)
+            self.assertEqual(changed.status_code, 201, changed.text)
             app.state.platform.bootstrap()
-            after = client.get("/api/v1/models").json()["items"]
+            after = client.get(f"/api/v2/tenants/{self.tenant}/models").json()["items"]
             self.assertEqual(len(after), 1)
             self.assertEqual(after[0]["id"], model["id"])
             self.assertEqual(after[0]["input_price"], "7")
@@ -361,17 +381,16 @@ class APIIntegrationTest(unittest.TestCase):
             default_model_input_price="2",
             default_model_output_price="5",
         )
-        with (
-            TestClient(create_app(settings, gateway=self.gateway)),
-            self.db.read() as connection,
-        ):
+        app = create_app(settings, gateway=self.gateway)
+        app.state.platform.bootstrap()
+        with TestClient(app), self.db.read() as connection:
             rows = (
                 connection.execute(select(t.models).where(t.models.c.alias == "k3"))
                 .mappings()
                 .all()
             )
             self.assertEqual(len(rows), 1)
-            self.assertEqual(rows[0]["tenant_id"], self.admin["user"]["tenant_id"])
+            self.assertEqual(rows[0]["tenant_id"], self.tenant)
 
     def request(
         self, method, path, *, auth="admin", csrf=True, key=None, headers=None, **kwargs
@@ -383,9 +402,95 @@ class APIIntegrationTest(unittest.TestCase):
             request_headers.setdefault("X-CSRF-Token", context["csrf_token"])
         if key is not None:
             request_headers["Idempotency-Key"] = key
-        return self.client.request(
-            method, f"/api/v1{path}", headers=request_headers, **kwargs
+        tenant_prefix = f"/api/v2/tenants/{self.tenant}"
+        platform_prefix = f"/api/v2/platform/tenants/{self.tenant}"
+        if path.startswith("/auth/"):
+            target = "/api/v1" + path
+        elif path == "/gateway":
+            target = "/api/v2/platform/gateway"
+        elif path == "/users" and method == "POST":
+            target = "/api/v2/platform/users"
+        elif path == "/users":
+            target = tenant_prefix + "/memberships"
+        elif path.startswith("/users/"):
+            identifier = path.split("/")[-1]
+            members = self.platform.identity.members(self.fixture.owner)
+            membership = next(
+                (row for row in members if row["user_id"] == identifier), None
+            )
+            payload = dict(kwargs.get("json") or {})
+            if "active" in payload:
+                payload["status"] = "active" if payload.pop("active") else "revoked"
+            if payload.get("role") == "admin":
+                payload["role"] = "tenant_admin"
+            kwargs["json"] = payload
+            target = (
+                tenant_prefix
+                + "/memberships/"
+                + (membership["id"] if membership else identifier)
+            )
+        elif path == "/models" and method == "POST":
+            target = platform_prefix + "/models"
+            kwargs["json"] = {
+                "deployment_id": self.deployment["id"],
+                **(kwargs.get("json") or {}),
+            }
+        elif (
+            path.startswith("/models/")
+            and method == "PATCH"
+            and set(kwargs.get("json") or {}) != {"active"}
+        ):
+            identifier = path.split("/")[-1]
+            with self.db.read() as conn:
+                row = (
+                    conn.execute(
+                        select(t.models).where(
+                            t.models.c.tenant_id == self.tenant,
+                            t.models.c.id == identifier,
+                        )
+                    )
+                    .mappings()
+                    .first()
+                )
+            if row:
+                fields = (
+                    "name",
+                    "alias",
+                    "active",
+                    "input_price",
+                    "output_price",
+                    "context_window",
+                    "max_output_tokens",
+                )
+                kwargs["json"] = {
+                    "deployment_id": self.deployment["id"],
+                    **{field: row[field] for field in fields},
+                    **kwargs["json"],
+                }
+                method, target = "POST", platform_prefix + "/models"
+            else:
+                target = tenant_prefix + path
+        elif path == "/billing/credits":
+            target = platform_prefix + "/credits"
+        elif path.startswith("/billing/reservations") or path == "/billing/unblock":
+            target = platform_prefix + path
+        else:
+            target = tenant_prefix + path
+        response = self.client.request(
+            method, target, headers=request_headers, **kwargs
         )
+        if target == platform_prefix + "/models" and response.status_code == 201:
+            if (
+                response.json()["active"]
+                and self.platform.gateway.status(self.tenant)["status"]
+                == "not_enrolled"
+            ):
+                self.platform.gateway.enroll(
+                    self.tenant, actor_id=self.fixture.owner["id"]
+                )
+            while self.platform.gateway.process_one():
+                pass
+        return response
 
     def create_user(
         self, *, email="member@example.test", role="member", password=PASSWORD
@@ -393,15 +498,26 @@ class APIIntegrationTest(unittest.TestCase):
         response = self.request(
             "POST",
             "/users",
-            json={
-                "email": email,
-                "name": "Test member",
-                "password": password,
-                "role": role,
-            },
+            json={"email": email, "name": "Test member", "password": password},
         )
         self.assertEqual(response.status_code, 201, response.text)
-        return response.json()
+        invitation = self.request(
+            "POST",
+            "/invitations",
+            json={"email": email, "role": "tenant_admin" if role == "admin" else role},
+        )
+        self.assertEqual(invitation.status_code, 201, invitation.text)
+        account = self.login(email, password)
+        accepted = self.client.post(
+            "/api/v2/invitations/accept",
+            headers={
+                "Cookie": f"{COOKIE}={account['token']}",
+                "X-CSRF-Token": account["csrf_token"],
+            },
+            json={"token": invitation.json()["token"]},
+        )
+        self.assertEqual(accepted.status_code, 200, accepted.text)
+        return self.platform.identity.context(response.json()["id"], self.tenant)
 
     def create_resources(self):
         model = self.request(
@@ -449,111 +565,50 @@ class APIIntegrationTest(unittest.TestCase):
         )
 
     def seed_second_tenant(self):
-        tenant_id, user_id, model_id, agent_id, session_id, run_id = (
-            uid() for _ in range(6)
+        tenant_id = self.fixture.tenant_b
+        user = self.fixture.provision_user(
+            f"{uid()}@foreign.test", role="tenant_admin", tenant_id=tenant_id
         )
-        stamp = now()
-        user = {
-            "id": user_id,
-            "tenant_id": tenant_id,
-            "created_at": stamp,
-            "email": f"{user_id}@foreign.test",
-            "name": "Foreign admin",
-            "role": "admin",
-            "active": True,
-        }
-        model = {
-            "id": model_id,
-            "tenant_id": tenant_id,
-            "created_at": stamp,
-            "name": "Foreign model",
-            "alias": "foreign-model",
-            "active": True,
-            "input_price": "1",
-            "output_price": "2",
-            "context_window": 8192,
-            "max_output_tokens": 1024,
-            "price_version": 1,
-        }
-        agent = {
-            "id": agent_id,
-            "tenant_id": tenant_id,
-            "created_at": stamp,
-            "name": "Foreign agent",
-            "description": "",
-            "system_prompt": "Foreign private prompt",
-            "model_id": model_id,
-            "temperature": 0,
-            "max_steps": 3,
-            "max_tokens": 512,
-            "tools": [],
-            "published_version": 1,
-        }
-        session = {
-            "id": session_id,
-            "tenant_id": tenant_id,
-            "user_id": user_id,
-            "agent_id": agent_id,
-            "title": "Foreign conversation",
-            "created_at": stamp,
-        }
-        run = {
-            "id": run_id,
-            "tenant_id": tenant_id,
-            "session_id": session_id,
-            "user_id": user_id,
-            "agent_name": agent["name"],
-            "spec": {**agent, "model": model},
-            "message": "Foreign message",
-            "status": "succeeded",
-            "created_at": stamp,
-            "finished_at": stamp,
-            "error": "",
-            "idempotency_key": "foreign-run",
-            "request_hash": "foreign-hash",
-            "fence": 1,
-        }
+        model = self.platform.gateway.grant_model(
+            tenant_id,
+            self.deployment["id"],
+            {
+                "name": "Foreign model",
+                "alias": "foreign-model",
+                "input_price": "1",
+                "output_price": "2",
+                "context_window": 8192,
+                "max_output_tokens": 1024,
+            },
+            actor_id=self.fixture.owner["id"],
+        )
+        agent = self.platform.save_agent(
+            user,
+            {
+                "name": "Foreign agent",
+                "description": "",
+                "temperature": 0,
+                "system_prompt": "Foreign private prompt",
+                "model_id": model["id"],
+                "max_tokens": 512,
+                "max_steps": 3,
+                "tools": [],
+            },
+        )
+        self.platform.publish(user, agent["id"])
+        session = self.platform.create_session(
+            user, agent["id"], "Foreign conversation"
+        )
+        run = self.fixture.create_run(user, session, "Foreign secret")
         with self.db.transaction(f"tenant:{tenant_id}") as conn:
-            conn.execute(
-                insert(t.tenants).values(
-                    id=tenant_id, name="Foreign tenant", created_at=stamp
-                )
-            )
-            conn.execute(
-                insert(t.users).values(**user, password_hash=hasher.hash(PASSWORD))
-            )
-            conn.execute(insert(t.models).values(**model))
-            conn.execute(insert(t.agents).values(**agent))
-            conn.execute(
-                insert(t.agent_versions).values(
-                    tenant_id=tenant_id,
-                    agent_id=agent_id,
-                    version=1,
-                    spec=agent,
-                    created_at=stamp,
-                )
-            )
-            conn.execute(insert(t.sessions).values(**session))
-            conn.execute(insert(t.runs).values(**run))
-            conn.execute(
-                insert(t.messages).values(
-                    id=uid(),
-                    tenant_id=tenant_id,
-                    session_id=session_id,
-                    run_id=run_id,
-                    role="assistant",
-                    content="Foreign secret",
-                    created_at=stamp,
-                )
-            )
-            append_event(conn, run_id, "run.completed", {"text": "Foreign secret"})
+            append_event(conn, run["id"], "run.completed", {"text": "Foreign secret"})
             conn.execute(
                 insert(t.calls).values(
                     id=uid(),
                     tenant_id=tenant_id,
-                    user_id=user_id,
-                    run_id=run_id,
-                    model_id=model_id,
+                    user_id=user["id"],
+                    run_id=run["id"],
+                    model_id=model["id"],
                     model=model["name"],
                     agent_name=agent["name"],
                     user_email=user["email"],
@@ -562,15 +617,23 @@ class APIIntegrationTest(unittest.TestCase):
                     output_tokens=5,
                     cost="0.00002",
                     price_version=1,
-                    created_at=stamp,
+                    created_at=now(),
                     error="",
                 )
             )
         self.platform.billing.credit(
-            tenant_id, user_id, "99", "Foreign funds", "foreign-credit"
+            tenant_id, self.fixture.owner["id"], "99", "Foreign funds", uid()
         )
         self.platform.billing.reserve(
-            tenant_id, user_id, model_id, run_id, "foreign-call", 1, 1, "1", "1"
+            tenant_id,
+            user["id"],
+            model["id"],
+            run["id"],
+            "foreign-call",
+            1,
+            1,
+            "1",
+            "1",
         )
         return {
             "tenant_id": tenant_id,
@@ -582,14 +645,16 @@ class APIIntegrationTest(unittest.TestCase):
         }
 
     def seed_unresolved_call(self, tenant=None):
-        tenant = tenant or self.admin["user"]["tenant_id"]
+        tenant = tenant or self.tenant
+        model, _, session = self.create_resources()
         user_id = self.admin["user"]["id"]
         self.platform.billing.credit(
             tenant, user_id, "10", "Investigation funds", "credit"
         )
+        run = self.enqueue(session).json()
         call_id = uid()
         self.platform.billing.reserve(
-            tenant, user_id, "model", "run", call_id, 100, 100, "1000", "1000"
+            tenant, user_id, model["id"], run["id"], call_id, 100, 100, "1000", "1000"
         )
         self.platform.billing.unresolved(tenant, call_id, "Gateway dropped final usage")
         with self.db.transaction(f"tenant:{tenant}") as conn:
@@ -598,8 +663,8 @@ class APIIntegrationTest(unittest.TestCase):
                     id=call_id,
                     tenant_id=tenant,
                     user_id=user_id,
-                    run_id="run",
-                    model_id="model",
+                    run_id=run["id"],
+                    model_id=model["id"],
                     model="Test model",
                     agent_name="Test agent",
                     user_email=self.admin["user"]["email"],
@@ -648,6 +713,7 @@ class APIIntegrationTest(unittest.TestCase):
         self.assertNotIn("token", response.json())
 
     def test_validation_never_echoes_password_or_accepts_extra_tenant(self):
+        before = self.request("GET", "/users").json()["items"]
         secret = "top-secret-password"
         response = self.request(
             "POST",
@@ -662,7 +728,7 @@ class APIIntegrationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 422)
         self.assertNotIn(secret, response.text)
         self.assertNotIn("forged-tenant", response.text)
-        self.assertEqual(len(self.request("GET", "/users").json()["items"]), 1)
+        self.assertEqual(self.request("GET", "/users").json()["items"], before)
 
     def test_login_failures_are_rate_limited(self):
         for _ in range(10):
@@ -684,26 +750,39 @@ class APIIntegrationTest(unittest.TestCase):
                 "PATCH", f"/users/{self.admin['user']['id']}", json=values
             )
             self.assertEqual(response.status_code, 409, response.text)
-            self.assertEqual(response.json()["error"]["code"], "last_admin")
+            self.assertEqual(response.json()["error"]["code"], "last_owner")
         self.assertEqual(self.request("GET", "/auth/me").status_code, 200)
 
     def test_disabling_account_revokes_existing_sessions_and_prevents_login(self):
         member = self.create_user()
         context = self.login(member["email"])
         self.assertEqual(self.request("GET", "/auth/me", auth=context).status_code, 200)
-        self.assertEqual(
-            self.request(
-                "PATCH", f"/users/{member['id']}", json={"active": False}
-            ).status_code,
-            200,
+        revoked = self.request(
+            "PATCH", f"/users/{member['id']}", json={"active": False}
         )
+        self.assertEqual(revoked.status_code, 200, revoked.text)
+        self.assertEqual(self.request("GET", "/agents", auth=context).status_code, 404)
+        self.assertEqual(self.request("GET", "/auth/me", auth=context).status_code, 200)
+        self.login(member["email"])
+        # Global suspension is identity-provider fixture state. A tenant owner
+        # revoking membership cannot disable the shared login identity.
+        with self.db.transaction("identity:suspension-fixture") as connection:
+            connection.execute(
+                update(t.users)
+                .where(t.users.c.id == member["id"])
+                .values(
+                    active=False,
+                    global_status="disabled",
+                    auth_version=t.users.c.auth_version + 1,
+                )
+            )
         self.assertEqual(self.request("GET", "/auth/me", auth=context).status_code, 401)
         response = self.client.post(
             "/api/v1/auth/login", json={"email": member["email"], "password": PASSWORD}
         )
         self.assertEqual(response.status_code, 401)
 
-    def test_role_change_revokes_prior_admin_session(self):
+    def test_role_change_recalculates_permissions_for_existing_global_session(self):
         second = self.create_user(email="second-admin@example.test", role="admin")
         context = self.login(second["email"])
         self.assertEqual(
@@ -712,7 +791,8 @@ class APIIntegrationTest(unittest.TestCase):
             ).status_code,
             200,
         )
-        self.assertEqual(self.request("GET", "/users", auth=context).status_code, 401)
+        self.assertEqual(self.request("GET", "/users", auth=context).status_code, 403)
+        self.assertEqual(self.request("GET", "/auth/me", auth=context).status_code, 200)
         context = self.login(second["email"])
         self.assertEqual(self.request("GET", "/users", auth=context).status_code, 403)
 
@@ -837,7 +917,7 @@ class APIIntegrationTest(unittest.TestCase):
             "/quotas",
             json={
                 "scope": "tenant",
-                "subject_id": self.admin["user"]["tenant_id"],
+                "subject_id": self.tenant,
                 "rpm": 0,
                 "max_budget": "0",
             },
@@ -924,8 +1004,8 @@ class APIIntegrationTest(unittest.TestCase):
             "POST", "/sessions", auth=context, json={"agent_id": agent["id"]}
         ).json()
         response = self.enqueue(member_session)
-        self.assertEqual(response.status_code, 403)
-        self.assertEqual(response.json()["error"]["code"], "session_owner_required")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["error"]["code"], "not_found")
         own_list = self.request("GET", "/sessions").json()["items"]
         self.assertEqual([row["id"] for row in own_list], [admin_session["id"]])
 
@@ -951,7 +1031,7 @@ class APIIntegrationTest(unittest.TestCase):
             self.assertEqual(len(list(conn.execute(select(t.runs)))), 1)
 
     def test_zero_balance_stays_zero_and_failed_admission_creates_no_charge(self):
-        tenant = self.admin["user"]["tenant_id"]
+        tenant = self.tenant
         wallet = self.request("GET", "/billing/wallet").json()
         self.assertEqual(Decimal(wallet["available"]), 0)
         with self.assertRaises(PlatformError) as caught:
@@ -1063,7 +1143,7 @@ class APIIntegrationTest(unittest.TestCase):
         self.assertEqual(len(self.request("GET", "/billing/ledger").json()["items"]), 1)
 
     def test_expired_server_session_cannot_be_reused(self):
-        with self.db.transaction(f"tenant:{self.admin['user']['tenant_id']}") as conn:
+        with self.db.transaction(f"tenant:{self.tenant}") as conn:
             conn.execute(update(t.auth_sessions).values(expires_at=1))
         self.assertEqual(self.request("GET", "/auth/me").status_code, 401)
         self.assertEqual(
@@ -1097,7 +1177,7 @@ class APIIntegrationTest(unittest.TestCase):
         response = self.request(
             "PATCH", f"/models/{model['id']}", json={"context_window": 512}
         )
-        self.assertEqual(response.status_code, 400, response.text)
+        self.assertEqual(response.status_code, 422, response.text)
         self.request("PATCH", f"/models/{model['id']}", json={"active": False})
         self.assertEqual(
             self.request("POST", f"/agents/{agent['id']}/publish").status_code, 400
@@ -1107,7 +1187,7 @@ class APIIntegrationTest(unittest.TestCase):
         call_id = self.seed_unresolved_call()
         # Simulate a worker committing the authoritative ledger then crashing
         # before refreshing platform_calls. Display must remain reconstructable.
-        self.platform.billing.settle(self.admin["user"]["tenant_id"], call_id, 100, 25)
+        self.platform.billing.settle(self.tenant, call_id, 100, 25)
         calls = self.request("GET", "/usage/calls").json()["items"]
         self.assertEqual(Decimal(calls[0]["cost"]), Decimal("0.125"))
         self.assertEqual(calls[0]["status"], "confirmed")
@@ -1121,7 +1201,7 @@ class APIIntegrationTest(unittest.TestCase):
             "/quotas",
             json={
                 "scope": "tenant",
-                "subject_id": self.admin["user"]["tenant_id"],
+                "subject_id": self.tenant,
                 "rpm": 10,
                 "tpm": 1000,
                 "concurrent": 1,

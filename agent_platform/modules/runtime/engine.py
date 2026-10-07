@@ -10,6 +10,7 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from .contracts import validate_run_snapshot_version
 from .gateway import ModelReply
 from .tools import execute_tool, tool_definitions
 
@@ -74,6 +75,12 @@ async def execute_agent(
     settlement for every model call. Cancellation stops that callback, which
     must retain reservations whenever an in-flight request has unknown usage.
     """
+    try:
+        validate_run_snapshot_version(spec)
+    except ValueError:
+        raise RuntimeFailure(
+            "unsupported_run_snapshot", "运行快照版本不受当前执行器支持。"
+        ) from None
     max_steps = spec.get("max_steps", 8)
     if type(max_steps) is not int or not 1 <= max_steps <= 50:
         raise RuntimeFailure("invalid_agent_config", "最大步数须为 1 至 50。")

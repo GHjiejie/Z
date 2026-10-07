@@ -150,6 +150,42 @@ class LocalGatewayTests(unittest.TestCase):
             str(first.control_file),
         )
 
+    def test_service_database_credentials_are_private_distinct_and_persistent(self):
+        from agent_platform.scripts.gateway import (
+            SERVICE_DATABASE_SECRETS,
+            platform_environment,
+        )
+
+        gateway = LocalGateway(self.root, self.env, 4010)
+        gateway.prepare()
+        values = {key: gateway.compose_env[key] for key in SERVICE_DATABASE_SECRETS}
+        self.assertEqual(len(set(values.values())), len(values))
+        gateway.prepare()
+        self.assertEqual(
+            values, {key: gateway.compose_env[key] for key in SERVICE_DATABASE_SECRETS}
+        )
+        runtime = platform_environment(
+            {
+                **gateway.compose_env,
+                "PLATFORM_API_DATABASE_URL": "postgresql://private-api-url",
+            }
+        )
+        for key in (*SERVICE_DATABASE_SECRETS, "PLATFORM_API_DATABASE_URL"):
+            self.assertNotIn(key, runtime)
+
+    def test_bootstrap_mount_cannot_read_control_secrets_and_preserves_legacy_key(self):
+        gateway = LocalGateway(self.root, self.env, 4010)
+        gateway.directory.mkdir(parents=True)
+        legacy = gateway.directory / ".env.gateway"
+        legacy.write_text("PLATFORM_LITELLM_KEY=sk-disposable-legacy-only\n")
+        gateway.prepare()
+        mount = Path(gateway.compose_env["GATEWAY_BOOTSTRAP_DIR"])
+        self.assertEqual(mount, gateway.bootstrap_directory)
+        self.assertFalse((mount / ".env.control").exists())
+        self.assertEqual(gateway.key_file.read_bytes(), legacy.read_bytes())
+        self.assertEqual(stat.S_IMODE(gateway.key_file.stat().st_mode), 0o600)
+        self.assertNotEqual(mount, gateway.directory)
+
     def test_start_passes_only_runtime_key_and_public_gateway_settings_to_platform(
         self,
     ):
@@ -192,10 +228,11 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertNotIn("previous-direct-upstream-key", runtime.values())
         self.assertEqual(stat.S_IMODE(gateway.key_file.stat().st_mode), 0o600)
         check_port.assert_called_once_with("127.0.0.1", 4010)
-        self.assertEqual(len(commands), 2)
-        self.assertIn("up", commands[0][0])
-        self.assertIn("--reuse-existing", commands[1][0])
-        self.assertEqual(commands[0][0][: len(gateway.command)], gateway.command)
+        self.assertEqual(len(commands), 3)
+        self.assertEqual(commands[0][0][:3], ["docker", "volume", "create"])
+        self.assertIn("up", commands[1][0])
+        self.assertIn("--reuse-existing", commands[2][0])
+        self.assertEqual(commands[1][0][: len(gateway.command)], gateway.command)
 
     def test_occupied_port_is_rejected_before_up_and_stop_does_not_touch_docker(self):
         gateway = LocalGateway(self.root, self.env, 4000)
@@ -335,6 +372,7 @@ class LocalGatewayTests(unittest.TestCase):
 
     def test_external_mode_uses_configured_gateway_without_creating_local_gateway(self):
         supervisor = Supervisor(self.root / "state")
+        (self.root / "platform.env").write_text("# existing local configuration\n")
         external_env = {
             "PLATFORM_LITELLM_URL": "https://external.example/v1",
             "PLATFORM_LITELLM_KEY": "sk-test-external-runtime",
@@ -365,7 +403,12 @@ class LocalGatewayTests(unittest.TestCase):
             )
         gateway.assert_not_called()
         self.assertIsNone(supervisor.gateway)
-        self.assertEqual(spawn.call_args.args[1], external_env)
+        runtime_env = spawn.call_args.args[1]
+        for key, value in external_env.items():
+            self.assertEqual(runtime_env[key], value)
+        self.assertTrue(runtime_env["PLATFORM_SECRET_ENCRYPTION_KEY"])
+        self.assertEqual(runtime_env["PLATFORM_MODE"], "local")
+        self.assertEqual(runtime_env["PLATFORM_EMBEDDED_WORKER"], "false")
         self.assertFalse((supervisor.state_dir / "gateway").exists())
 
 

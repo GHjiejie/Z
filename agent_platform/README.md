@@ -4,13 +4,14 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 
 ## 文档
 
+- [架构调整与验收](docs/architecture-adjustments.md)：八项架构改进、证据及升级契约。
 - [多租户实现说明](docs/multi-tenant-implementation.md)：当前架构、权限、数据库、网关、账务和交付状态。
 - [多租户运行手册](docs/multi-tenant-operations.md)：部署、密钥、切库、备份、关闭与恢复。
 - [Kubernetes 本地部署](docs/kubernetes-local.md)：OrbStack 集群、数据迁移、更新、停启及恢复。
 - [迭代设计方案](docs/multi-tenant-iteration-design.md)：设计依据和正式验收矩阵。
 - [历史第一版记录](docs/implementation-status.md)：旧版本验证记录，不作为多租户上线依据。
 
-当前功能已实现并在本地迁移运行。**PostgreSQL 隔离、真实网关控制操作、故障注入与容量验收尚未完成，当前不声明已达到 SaaS 正式上线条件。**
+当前功能已实现。一次性 PostgreSQL/RLS、独立角色、Redis 和故障回归的验证记录见架构调整文档；本轮没有更新现有部署数据库。真实 LiteLLM/供应商兼容性、恢复演练和生产容量仍需部署环境验收。
 
 ## 已实现功能
 
@@ -22,11 +23,11 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 | Agent | 8 个内置助手、草稿和不可变发布、受控工具、多轮会话 |
 | 模型 | 组织模型授权、默认及候选顺序、部署与显示别名分离、价格快照 |
 | 网关 | 每组织加密凭据、代际轮换、Outbox、未知外部写入核查、独立同步进程 |
-| 执行 | 租户轮转调度、持久任务和 SSE、取消、租约/fencing、有限批次恢复 |
-| 账务 | 平台财务入账/补证/核销/解冻；精确钱包、预占、结算、未知费用冻结 |
+| 执行 | 独立排队/执行期限、租户轮转、持久事件与提交唤醒、SSE独立租约及撤权检查 |
+| 账务 | 精确钱包、独立供应商成本预算、追加用量证据、后台补证、未知冻结、可重建累计预算 |
 | 容量 | 套餐硬上限、内部配额、成员/Agent/队列/运行/SSE/导出限制 |
 | 数据 | 分页接口、私有异步导出、关闭组织、保留期、独立持久删除记录 |
-| 部署 | PostgreSQL FORCE RLS、独立迁移/运行角色、独立 Web/后台进程、10 个 Helm Charts |
+| 部署 | PostgreSQL FORCE RLS、迁移与每服务独立运行角色、隔离文件卷、10 个 Helm Charts |
 
 未配置可用模型、组织凭据或额度时会明确拒绝调用，不生成模拟答案。
 
@@ -98,3 +99,5 @@ make -C agent_platform local-start PORT=8010 GATEWAY=external
 - 关闭组织的删除记录放在独立持久卷，数据库恢复前必须重放；不随 PostgreSQL 回滚。
 
 当前 Kubernetes 参数和恢复方式见 [Kubernetes 本地部署](docs/kubernetes-local.md)。离线 SQLite → PostgreSQL 工具和 SaaS 验收见[运行手册](docs/multi-tenant-operations.md)。集群部署不代表已完成 SaaS 隔离与容量验收。
+
+关键接口的 TS 类型由 FastAPI OpenAPI 生成：`make -C agent_platform api-contract`；`api-contract-check` 和自动验收检查漂移。严格发行验收使用 `python -m agent_platform.scripts.acceptance`，仅接受显式的一次性 PostgreSQL 17/Redis 配置和 Docker 隔离环境，任一跳过均失败；具体命令见[架构调整记录](docs/architecture-adjustments.md)。

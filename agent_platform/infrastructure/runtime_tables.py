@@ -8,6 +8,7 @@ from sqlalchemy import (
     Integer,
     String,
     Table,
+    UniqueConstraint,
 )
 
 from .db import metadata
@@ -18,6 +19,7 @@ call_attempts = Table(
     Column("id", String(64), primary_key=True),
     Column("tenant_id", String(64), nullable=False),
     Column("run_id", String(64), nullable=False),
+    Column("logical_call_id", String(64)),
     Column("membership_id", String(64)),
     Column("deployment_id", String(64), nullable=False),
     Column("credential_version_id", String(64)),
@@ -25,6 +27,7 @@ call_attempts = Table(
     Column("config_version", Integer, nullable=False),
     Column("route", String(200), nullable=False),
     Column("created_at", String(40), nullable=False),
+    UniqueConstraint("tenant_id", "id"),
     ForeignKeyConstraint(
         ["tenant_id", "run_id"], ["platform_runs.tenant_id", "platform_runs.id"]
     ),

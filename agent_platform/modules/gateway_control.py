@@ -538,6 +538,101 @@ class GatewayService:
             connection.execute(g.deployments.insert().values(**result))
             return result
 
+    def update_deployment(self, deployment_id, values: dict, *, actor_id: str):
+        """Change a registered route and its grants in one authorized transaction."""
+        if not values or set(values) - {
+            "name",
+            "internal_route",
+            "base_url",
+            "capabilities",
+            "status",
+        }:
+            raise PlatformError(422, "invalid_deployment", "部署字段无效。")
+        changes = dict(values)
+        if "name" in changes and (
+            not isinstance(changes["name"], str)
+            or not changes["name"].strip()
+            or len(changes["name"]) > 120
+        ):
+            raise PlatformError(422, "invalid_deployment", "部署名称无效。")
+        if "capabilities" in changes and not isinstance(changes["capabilities"], dict):
+            raise PlatformError(422, "invalid_deployment", "部署能力字段无效。")
+        if "internal_route" in changes:
+            route = str(changes["internal_route"]).strip()
+            if not route or route == "*" or len(route) > 200:
+                raise PlatformError(
+                    422, "invalid_deployment", "必须指定单个网关内部模型路由。"
+                )
+            changes["internal_route"] = route
+        if "base_url" in changes:
+            changes["base_url"] = _url(changes["base_url"])
+            if changes["base_url"] != _url(self.settings.litellm_url):
+                raise PlatformError(
+                    422, "unsupported_gateway", "当前控制面仅支持配置的 primary 网关。"
+                )
+        if "status" in changes and (
+            not isinstance(changes["status"], str)
+            or changes["status"] not in {"active", "disabled"}
+        ):
+            raise PlatformError(422, "invalid_deployment", "部署状态无效。")
+        with self._transaction(scope="gateway:control") as connection:
+            self._authorize(connection, actor_id, "platform.models.manage")
+            row = (
+                connection.execute(
+                    select(g.deployments)
+                    .where(g.deployments.c.id == deployment_id)
+                    .with_for_update()
+                )
+                .mappings()
+                .first()
+            )
+            if not row:
+                raise PlatformError(404, "deployment_not_found", "部署不存在。")
+            if all(row[key] == value for key, value in changes.items()):
+                return dict(row)
+            changes["config_version"] = row["config_version"] + 1
+            connection.execute(
+                g.deployments.update()
+                .where(g.deployments.c.id == deployment_id)
+                .values(**changes)
+            )
+            # Grants are tenant content protected by RLS. Select each tenant
+            # explicitly and take the same lock as grant/enable/entitlement writes.
+            tenant_ids = connection.scalars(
+                select(t.tenants.c.id).order_by(t.tenants.c.id)
+            ).all()
+            for tenant_id in tenant_ids:
+                if not self.db.sqlite:
+                    lock_id = int.from_bytes(
+                        hashlib.sha256(("tenant:" + tenant_id).encode()).digest()[:8],
+                        "big",
+                        signed=True,
+                    )
+                    connection.execute(
+                        text("SELECT pg_advisory_xact_lock(:key)"), {"key": lock_id}
+                    )
+                self.db.set_tenant(connection, tenant_id)
+                granted = connection.scalar(
+                    select(g.model_bindings.c.model_id)
+                    .where(
+                        g.model_bindings.c.tenant_id == tenant_id,
+                        g.model_bindings.c.deployment_id == deployment_id,
+                    )
+                    .limit(1)
+                )
+                if granted:
+                    self.converge_configuration(connection, tenant_id)
+            self._audit(
+                connection,
+                None,
+                actor_id,
+                "deployment.update",
+                deployment_id,
+                config_version=changes["config_version"],
+                fields=sorted(values),
+            )
+            return {**dict(row), **changes}
+
     def _add_price(self, connection, tenant_id, model, actor_id):
         existing = (
             connection.execute(
@@ -702,6 +797,7 @@ class GatewayService:
                 deployment_id=deployment_id,
                 price_version_id=price_id,
             )
+            self.converge_configuration(connection, tenant_id)
             return {
                 **model,
                 "deployment_id": deployment_id,
@@ -748,6 +844,7 @@ class GatewayService:
                 model_id,
                 policy_version=row["policy_version"] + 1,
             )
+            self.converge_configuration(connection, tenant_id)
             return {"model_id": model_id, "enabled": bool(enabled)}
 
     def bootstrap_legacy_catalog(self):
@@ -843,6 +940,236 @@ class GatewayService:
                 binding_id,
             )
 
+    def _desired_configuration(self, connection, tenant_id, binding):
+        routes = sorted(
+            set(
+                connection.scalars(
+                    select(g.deployments.c.internal_route)
+                    .select_from(
+                        g.model_bindings.join(
+                            g.deployments,
+                            g.model_bindings.c.deployment_id == g.deployments.c.id,
+                        ).join(
+                            t.models,
+                            and_(
+                                t.models.c.id == g.model_bindings.c.model_id,
+                                t.models.c.tenant_id == g.model_bindings.c.tenant_id,
+                            ),
+                        )
+                    )
+                    .where(
+                        g.model_bindings.c.tenant_id == tenant_id,
+                        g.model_bindings.c.enabled.is_(True),
+                        t.models.c.active.is_(True),
+                        g.deployments.c.status == "active",
+                        or_(
+                            g.deployments.c.owner_scope == "platform",
+                            g.deployments.c.owner_tenant_id == tenant_id,
+                        ),
+                    )
+                )
+            )
+        )
+        limits = _limits(binding["limits"])
+        entitlement = (
+            connection.execute(
+                select(nt.entitlements).where(nt.entitlements.c.tenant_id == tenant_id)
+            )
+            .mappings()
+            .first()
+        )
+        if entitlement is None:
+            return [], limits
+        for gateway_field, plan_field in (
+            ("rpm_limit", "rpm"),
+            ("tpm_limit", "tpm"),
+            ("max_parallel_requests", "max_concurrent_runs"),
+        ):
+            ceiling = entitlement[plan_field]
+            if ceiling <= 0:
+                return [], limits
+            limits[gateway_field] = min(limits[gateway_field], ceiling)
+        if entitlement["max_budget"] is not None:
+            ceiling = _price(entitlement["max_budget"])
+            if ceiling <= 0:
+                return [], limits
+            limits["max_budget"] = min(limits["max_budget"], float(ceiling))
+        return routes, limits
+
+    @staticmethod
+    def _credential_within_limits(credential, limits):
+        return all(
+            credential["limits"].get(field, float("inf")) <= ceiling
+            for field, ceiling in limits.items()
+        )
+
+    def _discard_unsent(self, connection, binding):
+        """Fence obsolete intents that have never dispatched a key creation."""
+        jobs = (
+            connection.execute(
+                select(g.outbox).where(
+                    g.outbox.c.binding_id == binding["id"],
+                    g.outbox.c.action == "provision",
+                    g.outbox.c.status.in_(LIVE_JOBS),
+                    g.outbox.c.phase.in_(
+                        ("user_pending", "user_sent", "user_rejected", "key_pending")
+                    ),
+                )
+            )
+            .mappings()
+            .all()
+        )
+        for job in jobs:
+            connection.execute(
+                g.outbox.update()
+                .where(g.outbox.c.id == job["id"])
+                .values(
+                    status="cancelled",
+                    owner=None,
+                    lease_until=None,
+                    error_code="configuration_superseded_before_key_dispatch",
+                    updated_at=_now(),
+                )
+            )
+            connection.execute(
+                g.credentials.update()
+                .where(g.credentials.c.id == job["credential_version_id"])
+                .values(status="revoked", secret_ciphertext=None, revoked_at=_now())
+            )
+
+    def converge_configuration(self, connection, tenant_id):
+        """Continue a prior authorized enrollment after an authorized policy write.
+
+        Call only inside the caller's tenant transaction, after its current actor
+        and mutation have been authorized. This hook neither enrolls a tenant nor
+        impersonates a platform operator; legacy and explicitly revoked bindings
+        require a new explicit enrollment. Its outbox is part of the same commit.
+        """
+        if not connection.in_transaction():
+            raise RuntimeError("Gateway convergence requires the policy transaction")
+        binding = self._binding(connection, tenant_id)
+        if (
+            not binding
+            or binding["mode"] != "enrolled"
+            or binding["status"] in {"revoking", "revoked"}
+        ):
+            return self._safe_binding(binding)
+        return self._converge_configuration(connection, tenant_id, binding)
+
+    def _converge_configuration(self, connection, tenant_id, binding, *, force=False):
+        routes, limits = self._desired_configuration(connection, tenant_id, binding)
+        desired = (
+            connection.execute(
+                select(g.credentials).where(
+                    g.credentials.c.binding_id == binding["id"],
+                    g.credentials.c.generation == binding["desired_version"],
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if not force and (
+            (
+                desired
+                and desired["status"] not in {"revoked", "retiring", "failed"}
+                and desired["routes"] == routes
+                and desired["limits"] == limits
+                and (
+                    desired["status"] != "active"
+                    or (desired["expires_at"] and desired["expires_at"] > _now())
+                )
+            )
+            or (not routes and binding["status"] == "disabled")
+        ):
+            return self._safe_binding(binding)
+        generation = binding["desired_version"] + 1
+        self._discard_unsent(connection, binding)
+        changes = {
+            "mode": "enrolled",
+            "desired_version": generation,
+            "error_code": "",
+            "status": (
+                "ready" if binding["active_credential_version_id"] else "provisioning"
+            )
+            if routes
+            else "disabled",
+        }
+        operation_id = None
+        if routes:
+            key, identifier = "sk-" + secrets.token_urlsafe(36), _id()
+            credential = {
+                "id": identifier,
+                "tenant_id": tenant_id,
+                "binding_id": binding["id"],
+                "generation": generation,
+                "external_user_id": "agent-platform-" + identifier,
+                "external_key_id": _hash(key),
+                "key_alias": "agent-platform-" + identifier,
+                "secret_ciphertext": self._cipher().encrypt(key.encode()).decode(),
+                "fingerprint": _hash(key),
+                "routes": routes,
+                "limits": limits,
+                "status": "pending",
+                "created_at": _now(),
+                "expires_at": None,
+                "activated_at": None,
+                "retired_at": None,
+                "revoked_at": None,
+            }
+            connection.execute(g.credentials.insert().values(**credential))
+            operation_id = self._job(connection, binding, credential, "provision")
+        else:
+            changes["active_credential_version_id"] = None
+            credentials = (
+                connection.execute(
+                    select(g.credentials).where(
+                        g.credentials.c.binding_id == binding["id"],
+                        g.credentials.c.status.in_(("active", "retiring")),
+                    )
+                )
+                .mappings()
+                .all()
+            )
+            for credential in credentials:
+                if not connection.scalar(
+                    select(g.outbox.c.id).where(
+                        g.outbox.c.credential_version_id == credential["id"],
+                        g.outbox.c.action == "revoke",
+                    )
+                ):
+                    self._job(connection, binding, dict(credential), "revoke")
+                connection.execute(
+                    g.credentials.update()
+                    .where(g.credentials.c.id == credential["id"])
+                    .values(status="retiring", retired_at=_now())
+                )
+        connection.execute(
+            g.bindings.update()
+            .where(g.bindings.c.id == binding["id"])
+            .values(**changes)
+        )
+        self._audit(
+            connection,
+            tenant_id,
+            "gateway-policy-convergence",
+            "gateway.configuration_requested",
+            binding["id"],
+            generation=generation,
+            operation_id=operation_id,
+        )
+        result = self._safe_binding({**binding, **changes})
+        if operation_id:
+            result["operation_id"] = operation_id
+        return result
+
+    def availability(self, tenant_id, model_row, *, connection=None):
+        """Expose route-specific readiness without returning transient secrets."""
+        try:
+            self.resolve(tenant_id, model_row, connection=connection)
+        except PlatformError as error:
+            return {"ready": False, "status": "unavailable", "reason": error.code}
+        return {"ready": True, "status": "ready", "reason": ""}
+
     def resolve(self, tenant_id, model_row, *, connection=None):
         """Return transient inference-only credentials. Never serialize this result."""
         if model_row.get("tenant_id") != tenant_id:
@@ -926,9 +1253,12 @@ class GatewayService:
             if (
                 not binding
                 or binding["mode"] != "enrolled"
-                or binding["status"] != "ready"
+                or binding["status"] in {"revoking", "revoked", "disabled"}
             ):
                 raise PlatformError(503, "gateway_not_ready", "组织网关授权尚未就绪。")
+            desired_routes, desired_limits = self._desired_configuration(
+                connection, tenant_id, binding
+            )
             credential = (
                 connection.execute(
                     select(g.credentials).where(
@@ -943,7 +1273,9 @@ class GatewayService:
             if (
                 not credential
                 or credential["status"] != "active"
+                or deployment["internal_route"] not in desired_routes
                 or deployment["internal_route"] not in credential["routes"]
+                or not self._credential_within_limits(credential, desired_limits)
             ):
                 raise PlatformError(
                     503, "gateway_authorization_pending", "当前模型的网关授权尚未完成。"
@@ -996,71 +1328,17 @@ class GatewayService:
         limits: dict | None = None,
         _force_rotation: bool = False,
     ):
-        cipher = self._cipher()
         if not actor_id:
             raise PlatformError(422, "actor_required", "需要操作主体。")
         with self._transaction(tenant_id) as connection:
             self._authorize(connection, actor_id, "platform.gateway.manage")
             self._tenant(connection, tenant_id)
             binding = self._binding(connection, tenant_id)
-            if binding:
-                pending = connection.scalar(
-                    select(func.count())
-                    .select_from(g.outbox)
-                    .where(
-                        g.outbox.c.binding_id == binding["id"],
-                        g.outbox.c.status.in_(LIVE_JOBS),
-                    )
-                )
-                if pending:
-                    return self._safe_binding(binding)
-            rows = connection.execute(
-                select(g.deployments.c.internal_route)
-                .select_from(
-                    g.model_bindings.join(
-                        g.deployments,
-                        g.model_bindings.c.deployment_id == g.deployments.c.id,
-                    )
-                )
-                .where(
-                    g.model_bindings.c.tenant_id == tenant_id,
-                    g.model_bindings.c.enabled.is_(True),
-                    g.deployments.c.status == "active",
-                    or_(
-                        g.deployments.c.owner_scope == "platform",
-                        g.deployments.c.owner_tenant_id == tenant_id,
-                    ),
-                )
-            ).scalars()
-            routes = sorted(set(rows))
-            if not routes:
-                raise PlatformError(400, "no_available_model", "请先授权至少一个模型。")
             selected_limits = _limits(
                 limits
                 if limits is not None
                 else (binding["limits"] if binding else None)
             )
-            if binding and binding["status"] == "ready" and not _force_rotation:
-                active = (
-                    connection.execute(
-                        select(g.credentials).where(
-                            g.credentials.c.id
-                            == binding["active_credential_version_id"],
-                            g.credentials.c.tenant_id == tenant_id,
-                        )
-                    )
-                    .mappings()
-                    .first()
-                )
-                if (
-                    active
-                    and active["status"] == "active"
-                    and active["routes"] == routes
-                    and active["limits"] == selected_limits
-                    and active["expires_at"]
-                    and active["expires_at"] > _now()
-                ):
-                    return self._safe_binding(binding)
             if not binding:
                 binding = {
                     "id": _id(),
@@ -1077,57 +1355,36 @@ class GatewayService:
                     "created_at": _now(),
                 }
                 connection.execute(g.bindings.insert().values(**binding))
-            generation = binding["desired_version"] + 1
-            key = "sk-" + secrets.token_urlsafe(36)
-            identifier = _id()
-            credential = {
-                "id": identifier,
-                "tenant_id": tenant_id,
-                "binding_id": binding["id"],
-                "generation": generation,
-                "external_user_id": "agent-platform-" + identifier,
-                "external_key_id": _hash(key),
-                "key_alias": "agent-platform-" + identifier,
-                "secret_ciphertext": cipher.encrypt(key.encode()).decode(),
-                "fingerprint": _hash(key),
-                "routes": routes,
-                "limits": selected_limits,
-                "status": "pending",
-                "created_at": _now(),
-                "expires_at": None,
-                "activated_at": None,
-                "retired_at": None,
-                "revoked_at": None,
-            }
-            connection.execute(g.credentials.insert().values(**credential))
-            changes = {
-                "mode": "enrolled",
-                "desired_version": generation,
-                "limits": selected_limits,
-                "status": "ready"
-                if binding["active_credential_version_id"]
-                else "provisioning",
-                "error_code": "",
-            }
-            connection.execute(
-                g.bindings.update()
-                .where(g.bindings.c.id == binding["id"])
-                .values(**changes)
+            else:
+                # Explicit re-enrollment is the only path allowed to reopen a
+                # revoked/legacy binding. Policy convergence never does this.
+                binding = {**binding, "mode": "enrolled", "limits": selected_limits}
+                connection.execute(
+                    g.bindings.update()
+                    .where(g.bindings.c.id == binding["id"])
+                    .values(mode="enrolled", limits=selected_limits)
+                )
+            if not self._desired_configuration(connection, tenant_id, binding)[0]:
+                raise PlatformError(
+                    400, "no_available_model", "请先授权至少一个模型并配置可用套餐。"
+                )
+            result = self._converge_configuration(
+                connection,
+                tenant_id,
+                binding,
+                force=_force_rotation
+                or binding["status"] in {"revoking", "revoked", "legacy"},
             )
-            operation_id = self._job(connection, binding, credential, "provision")
             self._audit(
                 connection,
                 tenant_id,
                 actor_id,
                 "gateway.enroll_requested",
                 binding["id"],
-                generation=generation,
-                operation_id=operation_id,
+                generation=result["desired_version"],
+                operation_id=result.get("operation_id"),
             )
-            return {
-                **self._safe_binding({**binding, **changes}),
-                "operation_id": operation_id,
-            }
+            return result
 
     def rotate(self, tenant_id, *, actor_id: str):
         return self.enroll(tenant_id, actor_id=actor_id, _force_rotation=True)
@@ -1530,9 +1787,14 @@ class GatewayService:
         with self._transaction(job["tenant_id"]) as connection:
             self._guard(connection, job)
             binding = self._binding(connection, job["tenant_id"])
+            routes, limits = self._desired_configuration(
+                connection, job["tenant_id"], binding
+            )
             if (
-                binding["status"] in ("revoking", "revoked")
+                binding["status"] in ("revoking", "revoked", "disabled")
                 or binding["desired_version"] != credential["generation"]
+                or credential["routes"] != routes
+                or credential["limits"] != limits
             ):
                 connection.execute(
                     g.credentials.update()
@@ -1611,6 +1873,10 @@ class GatewayService:
                 credential["id"],
                 operation_id=job["id"],
             )
+            # A newer policy may have committed during remote HTTP. It must not
+            # be overwritten by this completed snapshot, even if a caller missed
+            # the hook; ensure the latest persisted policy has a durable intent.
+            self.converge_configuration(connection, job["tenant_id"])
 
     def _revoked(self, job, credential):
         with self._transaction(job["tenant_id"]) as connection:
@@ -1644,7 +1910,8 @@ class GatewayService:
                     g.credentials.c.status != "revoked",
                 )
             )
-            if not remaining:
+            binding = self._binding(connection, job["tenant_id"])
+            if not remaining and binding["status"] == "revoking":
                 connection.execute(
                     g.bindings.update()
                     .where(g.bindings.c.id == job["binding_id"])
@@ -1652,6 +1919,12 @@ class GatewayService:
                         status="revoked",
                         active_credential_version_id=None,
                     )
+                )
+            elif not remaining and binding["status"] == "disabled":
+                connection.execute(
+                    g.bindings.update()
+                    .where(g.bindings.c.id == job["binding_id"])
+                    .values(applied_version=binding["desired_version"])
                 )
             self._audit(
                 connection,
@@ -1865,9 +2138,17 @@ class GatewayService:
             self._control()
         interval = max(0.2, float(getattr(self.settings, "gateway_sync_interval", 2.0)))
         last_report = time.monotonic()
+        metering = None
+        if self.settings.gateway_control_url and self.settings.gateway_control_key:
+            from agent_platform.modules.metering import MeteringReconciler
+
+            metering = MeteringReconciler(self.db, self.settings, self._control())
         while not stop.is_set():
             try:
                 worked = await asyncio.to_thread(self.process_one)
+                if metering is not None:
+                    metered = await asyncio.to_thread(metering.process_one)
+                    worked = worked or metered
             except Exception:  # noqa: BLE001 - keep the provisioner alive without logging credentials
                 # Do not emit exception repr: HTTP/DB objects can hold secrets.
                 self._stats["internal_errors"] += 1

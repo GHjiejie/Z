@@ -22,7 +22,6 @@ from sqlalchemy import (
     Column,
     Index,
     Integer,
-    Numeric,
     String,
     Table,
     Text,
@@ -31,36 +30,17 @@ from sqlalchemy import (
     select,
 )
 from sqlalchemy.engine import Connection
-from sqlalchemy.types import TypeDecorator
 
+from agent_platform.infrastructure import metering_tables as mt
 from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.db import Database, metadata
 from agent_platform.infrastructure.errors import PlatformError
+from agent_platform.infrastructure.money import ExactMoney
 
 ZERO = Decimal(0)
 PRECISION = Decimal("0.000000000001")
 MAX_MONEY = Decimal(1000000000)
 ACTIVE = ("reserved", "unresolved")
-
-
-class ExactMoney(TypeDecorator):
-    """NUMERIC in PostgreSQL; lossless decimal text in SQLite."""
-
-    impl = Numeric(30, 12)
-    cache_ok = True
-
-    def load_dialect_impl(self, dialect):
-        if dialect.name == "sqlite":
-            return dialect.type_descriptor(String(64))
-        return dialect.type_descriptor(Numeric(30, 12))
-
-    def process_bind_param(self, value, dialect):
-        if value is None:
-            return None
-        return format(Decimal(value), "f") if dialect.name == "sqlite" else value
-
-    def process_result_value(self, value, dialect):
-        return None if value is None else Decimal(value)
 
 
 wallets = Table(
@@ -586,6 +566,9 @@ class BillingService:
         max_output_tokens: int,
         input_price: Any,
         output_price: Any,
+        *,
+        deployment_id: str | None = None,
+        require_cost_policy: bool = False,
     ) -> dict:
         input_tokens = _tokens(input_tokens, "input_tokens")
         max_output_tokens = _tokens(max_output_tokens, "max_output_tokens")
@@ -613,6 +596,8 @@ class BillingService:
                 max_output_tokens,
                 format(input_price.normalize(), "f"),
                 format(output_price.normalize(), "f"),
+                deployment_id,
+                require_cost_policy,
             ]
         )
         admitted_scopes = None
@@ -653,6 +638,9 @@ class BillingService:
                     or (quota["scope"] == "user" and quota["subject_id"] == user_id)
                     or (quota["scope"] == "model" and quota["subject_id"] == model_id)
                 ]
+                from agent_platform.modules.costs import CostService
+
+                cost_service = CostService(self.db)
                 cutoff = (datetime.now(UTC) - timedelta(seconds=60)).isoformat()
                 token_count = input_tokens + max_output_tokens
                 for quota in policies:
@@ -696,15 +684,8 @@ class BillingService:
                     budget = quota["max_budget"]
                     committed = ZERO
                     if budget is not None:
-                        committed = Decimal(
-                            str(
-                                conn.scalar(
-                                    select(aggregate(reservations_table.c.cost)).where(
-                                        *filters
-                                    )
-                                )
-                                or 0
-                            )
+                        committed = self._budget_spent(
+                            conn, tenant_id, quota["scope"], quota["subject_id"]
                         )
                     reserved = Decimal(str(active[1] or 0))
                     if budget is not None and (
@@ -750,6 +731,15 @@ class BillingService:
                     "updated_at": now,
                 }
                 conn.execute(reservations_table.insert().values(**values))
+                cost_service.reserve(
+                    conn,
+                    tenant_id,
+                    call_id,
+                    deployment_id,
+                    input_tokens,
+                    max_output_tokens,
+                    required=require_cost_policy,
+                )
                 conn.execute(
                     wallets.update()
                     .where(wallets.c.tenant_id == tenant_id)
@@ -780,6 +770,157 @@ class BillingService:
                 404, "reservation_not_found", "Model call reservation not found"
             )
         return dict(row)
+
+    def _budget_spent(self, conn, tenant_id, scope, subject_id):
+        scope, subject_id = (
+            ("tenant", tenant_id) if scope == "entitlement" else (scope, subject_id)
+        )
+        row = (
+            conn.execute(
+                select(mt.budget_totals).where(
+                    mt.budget_totals.c.tenant_id == tenant_id,
+                    mt.budget_totals.c.scope == scope,
+                    mt.budget_totals.c.subject_id == subject_id,
+                )
+            )
+            .mappings()
+            .first()
+        )
+        if row:
+            return row["spent"]
+        # One-time bootstrap for old records; the migration prebuilds existing
+        # projections. New subjects start at zero and never scan on later calls.
+        filters = [reservations_table.c.tenant_id == tenant_id]
+        if scope in {"user", "model"}:
+            filters.append(reservations_table.c[scope + "_id"] == subject_id)
+        aggregate = func.exact_sum if self.db.sqlite else func.sum
+        spent = Decimal(
+            str(
+                conn.scalar(
+                    select(aggregate(reservations_table.c.cost)).where(*filters)
+                )
+                or 0
+            )
+        )
+        conn.execute(
+            mt.budget_totals.insert().values(
+                tenant_id=tenant_id, scope=scope, subject_id=subject_id, spent=spent
+            )
+        )
+        return spent
+
+    def rebuild_budget_totals(self, tenant_id, actor_id, reason):
+        """Administrative repair from immutable charge postings, under tenant lock."""
+        self._require_manual_reason(actor_id, reason)
+        with (
+            self.db.tenant_scope(tenant_id),
+            self.db.transaction(f"tenant:{tenant_id}") as conn,
+        ):
+            self._authorize(conn)
+            rows = conn.execute(
+                select(
+                    ledger_transactions.c.call_id,
+                    ledger_transactions.c.amount,
+                    reservations_table.c.user_id,
+                    reservations_table.c.model_id,
+                )
+                .select_from(
+                    ledger_transactions.outerjoin(
+                        reservations_table,
+                        (
+                            ledger_transactions.c.tenant_id
+                            == reservations_table.c.tenant_id
+                        )
+                        & (
+                            ledger_transactions.c.call_id
+                            == reservations_table.c.call_id
+                        ),
+                    )
+                )
+                .where(
+                    ledger_transactions.c.tenant_id == tenant_id,
+                    ledger_transactions.c.type == "charge",
+                )
+            ).mappings()
+            totals = {("tenant", tenant_id): ZERO}
+            for row in rows:
+                if not row["user_id"] or not row["model_id"] or row["amount"] > ZERO:
+                    raise PlatformError(
+                        503, "accounting_invariant", "账本与调用归属需人工核实。"
+                    )
+                for dimension in (
+                    ("tenant", tenant_id),
+                    ("user", row["user_id"]),
+                    ("model", row["model_id"]),
+                ):
+                    totals[dimension] = totals.get(dimension, ZERO) - row["amount"]
+            existing = {
+                (row["scope"], row["subject_id"])
+                for row in conn.execute(
+                    select(mt.budget_totals).where(
+                        mt.budget_totals.c.tenant_id == tenant_id
+                    )
+                ).mappings()
+            }
+            conn.execute(
+                mt.budget_totals.update()
+                .where(mt.budget_totals.c.tenant_id == tenant_id)
+                .values(spent=ZERO)
+            )
+            for (scope, subject), spent in totals.items():
+                if (scope, subject) in existing:
+                    conn.execute(
+                        mt.budget_totals.update()
+                        .where(
+                            mt.budget_totals.c.tenant_id == tenant_id,
+                            mt.budget_totals.c.scope == scope,
+                            mt.budget_totals.c.subject_id == subject,
+                        )
+                        .values(spent=spent)
+                    )
+                else:
+                    conn.execute(
+                        mt.budget_totals.insert().values(
+                            tenant_id=tenant_id,
+                            scope=scope,
+                            subject_id=subject,
+                            spent=spent,
+                        )
+                    )
+            self._audit(
+                conn,
+                tenant_id,
+                actor_id,
+                "billing.budget.rebuild",
+                tenant_id,
+                {
+                    "reason": reason,
+                    "dimensions": len(totals),
+                    "spent": format(totals[("tenant", tenant_id)], "f"),
+                },
+            )
+            return {
+                "tenant_id": tenant_id,
+                "spent": format(totals[("tenant", tenant_id)], "f"),
+                "dimensions": len(totals),
+            }
+
+    def _add_budget_spent(self, conn, row, charged):
+        for scope, subject_id in [
+            ("tenant", row["tenant_id"]),
+            ("user", row["user_id"]),
+            ("model", row["model_id"]),
+        ]:
+            previous = self._budget_spent(conn, row["tenant_id"], scope, subject_id)
+            conn.execute(
+                mt.budget_totals.update()
+                .where(
+                    mt.budget_totals.c.tenant_id == row["tenant_id"],
+                    mt.budget_totals.c.scope == scope,
+                    mt.budget_totals.c.subject_id == subject_id,
+                )
+                .values(spent=previous + charged)
+            )
 
     def settle(
         self,
@@ -812,14 +953,63 @@ class BillingService:
             ) from None
         with self.db.transaction(f"tenant:{tenant_id}") as conn:
             self._authorize(conn)
-            row = self._settle_locked(
+            previous = self._get_reservation(conn, tenant_id, call_id)
+            conflict = previous["status"] == "settled" and (
+                previous["input_tokens"],
+                previous["output_tokens"],
+            ) != (input_tokens, output_tokens)
+            from agent_platform.modules.metering import record_receipt
+
+            _, receipt_conflict = record_receipt(
                 conn,
                 tenant_id,
                 call_id,
                 input_tokens,
                 output_tokens,
                 provider_cost,
-                raw,
+                raw_usage,
+                conflict=conflict,
+            )
+            conflict = conflict or receipt_conflict
+            row = (
+                previous
+                if conflict
+                else self._settle_locked(
+                    conn,
+                    tenant_id,
+                    call_id,
+                    input_tokens,
+                    output_tokens,
+                    provider_cost,
+                    raw,
+                )
+            )
+            if not conflict:
+                from agent_platform.modules.costs import CostService
+
+                CostService(self.db).finalize(
+                    conn,
+                    tenant_id,
+                    call_id,
+                    action="settle",
+                    input_tokens=input_tokens,
+                    output_tokens=output_tokens,
+                    provider_cost=provider_cost,
+                )
+                if (
+                    previous["status"] == "settled"
+                    and provider_cost is not None
+                    and previous["provider_cost"] is None
+                ):
+                    conn.execute(
+                        reservations_table.update()
+                        .where(reservations_table.c.id == previous["id"])
+                        .values(provider_cost=provider_cost)
+                    )
+                    row["provider_cost"] = provider_cost
+        if conflict:
+            raise PlatformError(
+                409, "settlement_conflict", "用量证据已保存，差异需核实；未重复收费。"
             )
         self._finish_rate(row, input_tokens + output_tokens)
         return _serialize(row)
@@ -881,6 +1071,7 @@ class BillingService:
             if overage
             else "",
         }
+        self._add_budget_spent(conn, row, charged)
         conn.execute(
             reservations_table.update()
             .where(reservations_table.c.id == row["id"])
@@ -948,6 +1139,9 @@ class BillingService:
                     "Unconfirmed calls require settlement or explicit reconciliation",
                 )
             wallet = self._get_wallet(conn, tenant_id)
+            from agent_platform.modules.costs import CostService
+
+            CostService(self.db).finalize(conn, tenant_id, call_id, action="release")
             conn.execute(
                 wallets.update()
                 .where(wallets.c.tenant_id == tenant_id)
@@ -980,6 +1174,9 @@ class BillingService:
             if row["status"] != "reserved":
                 return _serialize(row)
             row.update(status="unresolved", reason=reason, updated_at=_now())
+            from agent_platform.modules.costs import CostService
+
+            CostService(self.db).finalize(conn, tenant_id, call_id, action="unresolved")
             conn.execute(
                 reservations_table.update()
                 .where(reservations_table.c.id == row["id"])
@@ -1070,6 +1267,17 @@ class BillingService:
                 else None,
             }
             if action == "confirm":
+                from agent_platform.modules.metering import record_receipt
+
+                record_receipt(
+                    conn,
+                    tenant_id,
+                    call_id,
+                    input_tokens,
+                    output_tokens,
+                    row["provider_cost"],
+                    evidence,
+                )
                 row = self._settle_locked(
                     conn,
                     tenant_id,
@@ -1103,6 +1311,17 @@ class BillingService:
                     .values(**changes)
                 )
                 row.update(changes)
+            from agent_platform.modules.costs import CostService
+
+            CostService(self.db).finalize(
+                conn,
+                tenant_id,
+                call_id,
+                action="settle" if action == "confirm" else "write_off",
+                input_tokens=input_tokens or 0,
+                output_tokens=output_tokens or 0,
+                provider_cost=row["provider_cost"],
+            )
             conn.execute(
                 reconciliations.insert().values(
                     id=_id(),

@@ -6,6 +6,7 @@ from uuid import uuid4
 from sqlalchemy import func, insert, select
 
 from agent_platform.infrastructure import tables as t
+from agent_platform.infrastructure.events import commit_notification
 
 
 def now() -> str:
@@ -36,4 +37,5 @@ def append_event(connection, run_id: str, kind: str, data: dict) -> dict:
         "created_at": now(),
     }
     connection.execute(insert(t.run_events).values(**event))
+    commit_notification(connection, event["tenant_id"], run_id, sequence)
     return event

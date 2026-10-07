@@ -12,19 +12,23 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
+from cryptography.fernet import Fernet
 from sqlalchemy import select, update
 
 from agent_platform.apps.worker.main import Worker
 from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
-from agent_platform.modules.platform import Platform, public_user, uid
+from agent_platform.modules.gateway_control import GatewayService
+from agent_platform.modules.platform import Platform, uid
 from agent_platform.modules.runtime.gateway import (
     Gateway,
     GatewayEvent,
     ModelReply,
     UsageUnavailable,
 )
+from agent_platform.tests.fixtures import MultiTenantFixture, migrate
+from agent_platform.tests.test_execution_lifecycle import OfflineControl
 
 
 def result(
@@ -103,28 +107,23 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             admin_password="worker-offline-password",
             embedded_worker=False,
             run_timeout=5,
+            queue_timeout=5,
+            secret_encryption_key=Fernet.generate_key().decode(),
         )
         self.db = Database(self.settings.database_url)
-        self.db.create_schema()
-        self.platform = Platform(self.db, self.settings)
-        self.platform.bootstrap()
-        with self.db.read() as connection:
-            self.user = public_user(
-                connection.execute(select(t.users)).mappings().one()
-            )
-        self.tenant = self.user["tenant_id"]
-        self.model = self.platform.save_model(
-            self.user,
-            {
-                "name": "Offline model",
-                "alias": "offline-model",
-                "active": True,
-                "input_price": "1",
-                "output_price": "2",
-                "context_window": 32000,
-                "max_output_tokens": 256,
-            },
+        migrate(self.settings.database_url)
+        self.fixture = MultiTenantFixture(self.db, self.settings)
+        self.settings = self.fixture.settings
+        self.platform = self.fixture.platform
+        self.user = self.fixture.owner
+        self.tenant = self.fixture.tenant_id
+        self.platform.gateway = GatewayService(
+            self.db, self.settings, adapter=OfflineControl()
         )
+        self.model = self.fixture.create_model()
+        self.platform.gateway.enroll(self.tenant, actor_id=self.user["id"])
+        while self.platform.gateway.process_one():
+            pass
         self.agent = self.platform.save_agent(
             self.user,
             {
@@ -140,6 +139,17 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         )
         self.platform.publish(self.user, self.agent["id"])
         self.session = self.platform.create_session(self.user, self.agent["id"], None)
+
+    def update_model(self, values):
+        result = self.platform.gateway.grant_model(
+            self.tenant,
+            self.fixture._deployment_id,
+            {"model_id": self.model["id"], **values},
+            actor_id=self.user["id"],
+        )
+        while self.platform.gateway.process_one():
+            pass
+        return result
 
     def tearDown(self) -> None:
         self.db.close()
@@ -201,7 +211,7 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 finished = self.platform.get_run(self.user, queued["id"])
                 self.assertEqual(finished["status"], "succeeded", finished)
                 call = gateway.calls[0]
-                self.assertEqual(call["model"], self.model["alias"])
+                self.assertEqual(call["model"], "fixture-offline-route")
                 self.assertEqual(call["tools"], [])
                 self.assertEqual(call["max_tokens"], self.model["max_output_tokens"])
                 self.assertEqual(call["messages"][0]["content"], agent["system_prompt"])
@@ -377,7 +387,8 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 update(t.runs)
                 .where(t.runs.c.id == queued["id"])
                 .values(
-                    created_at=(datetime.now(UTC) - timedelta(seconds=10)).isoformat()
+                    created_at=(datetime.now(UTC) - timedelta(seconds=10)).isoformat(),
+                    queue_expires_at=time.time() - 1,
                 )
             )
         gateway = FakeGateway()
@@ -491,13 +502,9 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
         self.credit()
         for change in [{"active": False}, {"active": True, "max_output_tokens": 32}]:
             with self.subTest(change=change):
-                self.platform.save_model(
-                    self.user,
-                    {"active": True, "max_output_tokens": 256},
-                    self.model["id"],
-                )
+                self.update_model({"active": True, "max_output_tokens": 256})
                 self.enqueue()
-                self.platform.save_model(self.user, change, self.model["id"])
+                self.update_model(change)
                 gateway = FakeGateway()
                 _, run = await self.execute(gateway)
                 self.assertEqual(gateway.calls, [])
@@ -541,9 +548,7 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_price_change_does_not_reprice_enqueued_run(self) -> None:
         self.credit()
         self.enqueue()
-        self.platform.save_model(
-            self.user, {"input_price": "100", "output_price": "200"}, self.model["id"]
-        )
+        self.update_model({"input_price": "100", "output_price": "200"})
         _, run = await self.execute(FakeGateway())
         self.assertEqual(
             Decimal(self.platform.get_run(self.user, run["id"])["cost"]),

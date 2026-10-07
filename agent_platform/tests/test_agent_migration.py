@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from alembic import command
 from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import inspect, text
 
 from agent_platform.infrastructure.db import Database
@@ -91,6 +92,6 @@ class AgentMigrationTest(unittest.TestCase):
                     self.assertTrue(model_column["nullable"])
                     self.assertEqual(
                         conn.scalar(text("SELECT version_num FROM alembic_version")),
-                        "0002",
+                        ScriptDirectory.from_config(config).get_current_head(),
                     )
                 db.close()

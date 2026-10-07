@@ -9,6 +9,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from alembic.config import Config
+from alembic.script import ScriptDirectory
 from sqlalchemy import Column, MetaData, Table, inspect, text
 
 from agent_platform.infrastructure.db import Database
@@ -53,7 +55,7 @@ class LocalStartupTests(unittest.TestCase):
         self.assertIn('["uv", "sync", "--frozen", "--all-groups"]', source.read_text())
         self.assertTrue(hasattr(Supervisor, "start"))
 
-    def test_runtime_environment_uses_root_openai_fallback_without_copying_secret(self):
+    def test_root_upstream_credentials_stay_available_only_for_managed_gateway(self):
         root_env = self.root / "root.env"
         platform_env = self.root / "platform.env"
         root_env.write_text(
@@ -69,8 +71,10 @@ class LocalStartupTests(unittest.TestCase):
 
         env = load_runtime_environment(platform_env, root_env, {})
 
-        self.assertEqual(env["PLATFORM_LITELLM_URL"], "https://gateway.example/v1")
-        self.assertEqual(env["PLATFORM_LITELLM_KEY"], "root-secret")
+        self.assertEqual(env["PLATFORM_LITELLM_URL"], "")
+        self.assertEqual(env["OPENAI_BASE_URL"], "https://gateway.example/v1")
+        self.assertEqual(env["PLATFORM_LITELLM_KEY"], "")
+        self.assertEqual(env["OPENAI_API_KEY"], "root-secret")
         self.assertEqual(env["PLATFORM_DEFAULT_MODEL"], "root-model")
         self.assertNotIn("root-secret", platform_env.read_text())
 
@@ -132,7 +136,9 @@ class LocalStartupTests(unittest.TestCase):
                 self.assertIn("platform_users", inspect(connection).get_table_names())
                 self.assertEqual(
                     connection.scalar(text("SELECT version_num FROM alembic_version")),
-                    "0002",
+                    ScriptDirectory.from_config(
+                        Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+                    ).get_current_head(),
                 )
         finally:
             db.close()
@@ -158,7 +164,9 @@ class LocalStartupTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     connection.scalar(text("SELECT version_num FROM alembic_version")),
-                    "0002",
+                    ScriptDirectory.from_config(
+                        Config(str(Path(__file__).resolve().parents[1] / "alembic.ini"))
+                    ).get_current_head(),
                 )
         finally:
             db.close()

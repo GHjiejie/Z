@@ -42,6 +42,40 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
     async def emit(self, name: str, data: dict) -> None:
         self.events.append((name, data))
 
+    async def test_unknown_or_coerced_snapshot_version_rejected_before_invocation(self):
+        async def invoke(messages, tools):
+            self.fail("unsupported snapshot must not invoke a model")
+
+        for version in (0, 3, "2", 2.0, True, None):
+            with (
+                self.subTest(version=version),
+                self.assertRaises(RuntimeFailure) as caught,
+            ):
+                await execute_agent(
+                    {"snapshot_schema_version": version},
+                    [],
+                    invoke,
+                    self.emit,
+                    never_cancel,
+                )
+            self.assertEqual(caught.exception.code, "unsupported_run_snapshot")
+        self.assertEqual(self.events, [])
+
+    async def test_legacy_and_current_snapshot_versions_execute(self):
+        async def invoke(messages, tools):
+            return reply("supported")
+
+        for spec in (
+            {},
+            {"snapshot_schema_version": 1},
+            {"snapshot_schema_version": 2},
+        ):
+            with self.subTest(spec=spec):
+                self.assertEqual(
+                    await execute_agent(spec, [], invoke, self.emit, never_cancel),
+                    "supported",
+                )
+
     async def test_actual_graph_calls_tool_and_returns_final(self) -> None:
         calls: list[tuple[list[dict], list[dict]]] = []
 

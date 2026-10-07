@@ -11,6 +11,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from .contracts import ToolContract
+
 
 class CalculatorArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
@@ -20,6 +22,46 @@ class CalculatorArguments(BaseModel):
 class CurrentTimeArguments(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     timezone: str = Field(default="UTC", min_length=1, max_length=64)
+
+
+class CalculatorResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True, allow_inf_nan=False)
+    result: int | float
+
+
+class CurrentTimeResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+    time: str = Field(min_length=1, max_length=64)
+    timezone: str = Field(min_length=1, max_length=64)
+
+
+_TOOL_CONTRACTS = {
+    "calculator": ToolContract(
+        name="calculator",
+        implementation_version=1,
+        effect="pure",
+        replay="recompute",
+        input_schema=CalculatorArguments.model_json_schema(),
+        output_schema=CalculatorResult.model_json_schema(),
+    ),
+    # Time is an observation, even though it performs no network or write I/O.
+    # A recovered conversation must reuse its recorded value, not observe again.
+    "current_time": ToolContract(
+        name="current_time",
+        implementation_version=1,
+        effect="observation",
+        replay="recorded_result",
+        input_schema=CurrentTimeArguments.model_json_schema(),
+        output_schema=CurrentTimeResult.model_json_schema(),
+    ),
+}
+
+
+def tool_contract(name: str) -> ToolContract:
+    """Return an isolated, serializable versioned declaration for a known tool."""
+    if name not in _TOOL_CONTRACTS:
+        raise ValueError("工具未获此 Agent 授权。")
+    return ToolContract.model_validate_json(_TOOL_CONTRACTS[name].model_dump_json())
 
 
 _ARGUMENTS = {
@@ -51,7 +93,7 @@ def tool_definitions(names: list[str]) -> list[dict]:
             "function": {
                 "name": name,
                 "description": _DESCRIPTIONS[name],
-                "parameters": _ARGUMENTS[name].model_json_schema(),
+                "parameters": tool_contract(name).input_schema,
             },
         }
         for name in dict.fromkeys(names)

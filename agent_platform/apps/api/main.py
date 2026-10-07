@@ -9,10 +9,12 @@ import json
 import logging
 import secrets
 import time
+from collections.abc import Awaitable, Callable
 from contextlib import asynccontextmanager, suppress
 from urllib.parse import urlsplit
 from uuid import uuid4
 
+from anyio import CancelScope
 from fastapi import Depends, FastAPI, Header, Query, Request
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
@@ -20,6 +22,7 @@ from fastapi.routing import APIRoute
 from sqlalchemy import delete, select
 from starlette.middleware.base import BaseHTTPMiddleware
 
+from agent_platform.apps.api import responses as r
 from agent_platform.apps.api import schemas as s
 from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure import tenancy_tables as nt
@@ -31,6 +34,7 @@ from agent_platform.modules.authorization import require_capability
 from agent_platform.modules.billing.service import BillingService
 from agent_platform.modules.builtin_agents import builtin_metadata
 from agent_platform.modules.platform import (
+    STREAM_LEASE_SECONDS,
     TERMINAL_STATUSES,
     Platform,
     audit,
@@ -39,6 +43,116 @@ from agent_platform.modules.platform import (
 
 logger = logging.getLogger(__name__)
 COOKIE = "agent_platform_session"
+
+
+class _StreamLeaseLost(Exception):
+    pass
+
+
+class LeasedStreamingResponse(StreamingResponse):
+    """Keep quota admission alive independently of a blocked response send."""
+
+    def __init__(
+        self,
+        content,
+        *,
+        renew: Callable[[], Awaitable[None]],
+        release: Callable[[], Awaitable[None]],
+        valid_until: float,
+        lease_seconds: float = STREAM_LEASE_SECONDS,
+        renew_seconds: float = 10,
+        authorize: Callable[[], Awaitable[None]] | None = None,
+        authorize_seconds: float = 0.25,
+        **kwargs,
+    ):
+        super().__init__(content, **kwargs)
+        self._renew = renew
+        self._release = release
+        self._valid_until = valid_until
+        self._lease_seconds = lease_seconds
+        self._renew_seconds = renew_seconds
+        self._authorize = authorize
+        self._authorize_seconds = authorize_seconds
+        self._authority_until = time.monotonic() + 2 * authorize_seconds
+
+    async def _keep_authority(self):
+        while True:
+            await asyncio.sleep(self._authorize_seconds)
+            checked_at = time.monotonic()
+            try:
+                await asyncio.wait_for(
+                    self._authorize(), timeout=self._authorize_seconds
+                )
+            except Exception as exc:  # noqa: BLE001 - fail closed after response starts
+                logger.info("stream authority ended error=%s", type(exc).__name__)
+                return
+            self._authority_until = checked_at + 2 * self._authorize_seconds
+
+    async def _keep_lease(self):
+        while True:
+            remaining = self._valid_until - time.monotonic()
+            if remaining <= 0:
+                return
+            await asyncio.sleep(min(self._renew_seconds, remaining))
+            started_at = time.monotonic()
+            remaining = self._valid_until - started_at
+            if remaining <= 0:
+                return
+            try:
+                # A blocked database renewal cannot leave a sender alive beyond
+                # its last confirmed lease. CAS also rejects late thread results.
+                await asyncio.wait_for(self._renew(), timeout=remaining)
+            except Exception as exc:  # noqa: BLE001 - fail closed after response starts
+                logger.info("stream lease ended error=%s", type(exc).__name__)
+                return
+            self._valid_until = started_at + self._lease_seconds
+
+    async def stream_response(self, send):
+        async def leased_send(message):
+            if time.monotonic() >= self._valid_until:
+                raise _StreamLeaseLost()
+            if self._authorize and time.monotonic() >= self._authority_until:
+                raise _StreamLeaseLost()
+            await send(message)
+
+        sender = asyncio.create_task(super().stream_response(leased_send))
+        keeper = asyncio.create_task(self._keep_lease())
+        authority = (
+            asyncio.create_task(self._keep_authority()) if self._authorize else None
+        )
+        tasks = {sender, keeper} | ({authority} if authority else set())
+        try:
+            done, _ = await asyncio.wait(tasks, return_when=asyncio.FIRST_COMPLETED)
+            if sender in done:
+                try:
+                    await sender
+                    return
+                except _StreamLeaseLost:
+                    pass
+            sender.cancel()
+            await asyncio.gather(sender, return_exceptions=True)
+            # Close writable connections cleanly; a stalled client cannot block
+            # cancellation or keep an unadmitted stream alive during cleanup.
+            with suppress(TimeoutError, OSError):
+                await asyncio.wait_for(
+                    send(
+                        {"type": "http.response.body", "body": b"", "more_body": False}
+                    ),
+                    timeout=0.1,
+                )
+        finally:
+            sender.cancel()
+            keeper.cancel()
+            if authority:
+                authority.cancel()
+            # Starlette cancels its response scope on disconnect/completion.
+            # Shield cleanup so that cancellation cannot strand quota admission.
+            with CancelScope(shield=True):
+                await asyncio.gather(*tasks, return_exceptions=True)
+                if close := getattr(self.body_iterator, "aclose", None):
+                    await close()
+                with suppress(Exception):
+                    await asyncio.wait_for(self._release(), timeout=1)
 
 
 class BoundaryMiddleware(BaseHTTPMiddleware):
@@ -274,7 +388,7 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             platform.require_platform(connection, actor, "platform.tenants.manage")
         return platform_status(db, settings)
 
-    @app.post("/api/v1/auth/login")
+    @app.post("/api/v1/auth/login", response_model=r.AuthResponse)
     def login(body: s.Login, request: Request):
         result = platform.login(
             body.email,
@@ -282,7 +396,9 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             request.client.host if request.client else "unknown",
         )
         token = result.pop("token")
-        response = JSONResponse(result)
+        response = JSONResponse(
+            r.AuthResponse.model_validate(result).model_dump(mode="json")
+        )
         response.set_cookie(
             COOKIE,
             token,
@@ -294,7 +410,7 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
         )
         return response
 
-    @app.get("/api/v1/auth/me")
+    @app.get("/api/v1/auth/me", response_model=r.AuthResponse)
     def me(request: Request, _user=Depends(principal)):
         return platform.authenticate(request.cookies.get(COOKIE))
 
@@ -421,7 +537,7 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
     def publish(agent_id: str, user=Depends(admin)):
         return platform.publish(user, agent_id)
 
-    @app.get("/api/v1/sessions")
+    @app.get("/api/v1/sessions", response_model=r.SessionsResponse)
     def sessions(
         user=Depends(auth),
         limit: int = Query(default=100, ge=1, le=200),
@@ -438,15 +554,24 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             else None,
         }
 
-    @app.post("/api/v1/sessions", status_code=201)
+    @app.post("/api/v1/sessions", status_code=201, response_model=r.SessionResponse)
     def create_session(body: s.SessionCreate, user=Depends(auth)):
         return platform.create_session(user, body.agent_id, body.title)
 
-    @app.get("/api/v1/sessions/{session_id}")
+    @app.get(
+        "/api/v1/sessions/{session_id}",
+        response_model=r.SessionDetailResponse,
+        response_model_exclude_unset=True,
+    )
     def session_detail(session_id: str, user=Depends(auth)):
         return platform.session_detail(user, session_id)
 
-    @app.post("/api/v1/sessions/{session_id}/runs", status_code=202)
+    @app.post(
+        "/api/v1/sessions/{session_id}/runs",
+        status_code=202,
+        response_model=r.RunResponse,
+        response_model_exclude_unset=True,
+    )
     def create_run(
         session_id: str,
         body: s.RunCreate,
@@ -457,7 +582,9 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             user, session_id, body.message, idempotency(idempotency_key), body.model_id
         )
 
-    @app.get("/api/v1/runs")
+    @app.get(
+        "/api/v1/runs", response_model=r.RunsResponse, response_model_exclude_unset=True
+    )
     def runs(
         user=Depends(auth),
         limit: int = Query(default=100, ge=1, le=200),
@@ -473,11 +600,19 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             else None,
         }
 
-    @app.get("/api/v1/runs/{run_id}")
+    @app.get(
+        "/api/v1/runs/{run_id}",
+        response_model=r.RunResponse,
+        response_model_exclude_unset=True,
+    )
     def run(run_id: str, user=Depends(auth)):
         return platform.get_run(user, run_id)
 
-    @app.post("/api/v1/runs/{run_id}/cancel")
+    @app.post(
+        "/api/v1/runs/{run_id}/cancel",
+        response_model=r.RunResponse,
+        response_model_exclude_unset=True,
+    )
     def cancel(run_id: str, user=Depends(auth)):
         return platform.cancel_run(user, run_id)
 
@@ -496,59 +631,116 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             except ValueError:
                 raise PlatformError(400, "invalid_cursor", "事件游标无效。") from None
 
+        valid_until = time.monotonic() + STREAM_LEASE_SECONDS
         stream_id = await asyncio.to_thread(platform.acquire_stream, user, run_id)
 
+        from agent_platform.infrastructure.events import configure_notifications
+
+        notifier = configure_notifications(db, settings.redis_url)
+
+        def validate_authority():
+            # A single read composition avoids rebuilding the global principal
+            # twice per poll, while enforcing session expiry and both versions.
+            with db.tenant_scope(user["tenant_id"]), db.read() as connection:
+                session = connection.scalar(
+                    select(t.auth_sessions.c.user_id).where(
+                        t.auth_sessions.c.token_hash
+                        == digest(request.cookies.get(COOKIE) or ""),
+                        t.auth_sessions.c.user_id == user["id"],
+                        t.auth_sessions.c.expires_at > time.time(),
+                    )
+                )
+                if session is None:
+                    raise PlatformError(401, "session_expired", "登录已失效。")
+                # SSE stops on suspension even though ordinary read-only API
+                # pages may keep access to completed tenant resources.
+                platform.identity.assert_current(
+                    connection, {**user, "_allow_suspended": False}, "runs.read_own"
+                )
+
+        async def authorize_stream():
+            await asyncio.to_thread(validate_authority)
+
+        def replay(cursor):
+            with db.tenant_scope(user["tenant_id"]), db.read() as connection:
+                run = platform.owned(connection, t.runs, user, run_id, own=True)
+                rows = [
+                    dict(row)
+                    for row in connection.execute(
+                        select(t.run_events)
+                        .where(
+                            t.run_events.c.tenant_id == user["tenant_id"],
+                            t.run_events.c.run_id == run_id,
+                            t.run_events.c.sequence > cursor,
+                        )
+                        .order_by(t.run_events.c.sequence)
+                        .limit(200)
+                    ).mappings()
+                ]
+                return rows, run["status"]
+
+        async def renew_stream():
+            # Revocation and session expiry remain enforceable even when the
+            # client stops consuming and the event generator is suspended.
+            await authorize_stream()
+            await asyncio.to_thread(platform.update_stream, user, stream_id)
+
+        async def release_stream():
+            await asyncio.to_thread(
+                platform.update_stream, user, stream_id, release=True
+            )
+
         async def stream():
-            try:
-                cursor = after
-                idle = 0
+            cursor = after
+            heartbeat_at = time.monotonic()
+            # Subscribe before the DB read to close the read/wait race. Every
+            # wakeup replays persisted rows from the caller's durable cursor.
+            async with notifier.watch(user["tenant_id"], run_id) as watch:
+                try:
+                    await authorize_stream()
+                except PlatformError:
+                    return
                 while not await request.is_disconnected():
+                    observed = watch.version
                     try:
-                        # Recheck expiry/revocation during long-lived connections.
-                        current = await asyncio.to_thread(
-                            platform.authenticate, request.cookies.get(COOKIE)
-                        )
-                        context = await asyncio.to_thread(
-                            platform.identity.context,
-                            current["user"]["id"],
-                            user["tenant_id"],
-                        )
-                        require_capability(context, "runs.read_own")
-                        rows = await asyncio.to_thread(
-                            platform.events, context, run_id, cursor
-                        )
+                        rows, status = await asyncio.to_thread(replay, cursor)
                     except PlatformError:
                         return
                     for row in rows:
                         cursor = row["sequence"]
                         payload = json.dumps(row, ensure_ascii=False)
                         yield f"id: {cursor}\nevent: {row['type']}\ndata: {payload}\n\n"
-                    detail = await asyncio.to_thread(platform.get_run, context, run_id)
-                    if detail["status"] in TERMINAL_STATUSES and len(rows) < 200:
-                        # Re-read once: final event and status share one transaction.
-                        tail = await asyncio.to_thread(
-                            platform.events, context, run_id, cursor
-                        )
+                    if status in TERMINAL_STATUSES and len(rows) < 200:
+                        # Final status and event commit atomically. The extra
+                        # replay covers SQLite's separate read snapshots too.
+                        tail, _ = await asyncio.to_thread(replay, cursor)
                         for row in tail:
                             yield f"id: {row['sequence']}\nevent: {row['type']}\ndata: {json.dumps(row, ensure_ascii=False)}\n\n"
                         return
-                    idle += 1
-                    if idle % 40 == 0:
-                        await asyncio.to_thread(platform.update_stream, user, stream_id)
+                    if len(rows) == 200:
+                        continue
+                    if time.monotonic() - heartbeat_at >= 10:
+                        heartbeat_at = time.monotonic()
                         yield ": heartbeat\n\n"
-                    await asyncio.sleep(0.25)
-            finally:
-                await asyncio.to_thread(
-                    platform.update_stream, user, stream_id, release=True
-                )
+                    # Lost wakeups, Redis outages and absent Redis recover with
+                    # bounded low-frequency DB replay. Authority is independent.
+                    await watch.wait(observed, timeout=2.0)
 
-        return StreamingResponse(
+        return LeasedStreamingResponse(
             stream(),
+            renew=renew_stream,
+            release=release_stream,
+            valid_until=valid_until,
+            authorize=authorize_stream,
             media_type="text/event-stream",
             headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
         )
 
-    @app.get("/api/v1/usage/calls")
+    @app.get(
+        "/api/v1/usage/calls",
+        response_model=r.CallsResponse,
+        response_model_exclude_unset=True,
+    )
     def calls(
         user=Depends(auth),
         limit: int = Query(default=100, ge=1, le=200),
@@ -562,7 +754,7 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             else None,
         }
 
-    @app.get("/api/v1/billing/wallet")
+    @app.get("/api/v1/billing/wallet", response_model=r.WalletResponse)
     def wallet(user=Depends(auth)):
         return platform.billing.wallet(user["tenant_id"])
 
@@ -686,6 +878,8 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                 route.endpoint,
                 methods=list(route.methods),
                 status_code=route.status_code,
+                response_model=route.response_model,
+                response_model_exclude_unset=route.response_model_exclude_unset,
                 name="tenant_" + route.name,
             )
 
@@ -699,7 +893,7 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
 
     register_support(app, platform, principal, auth)
 
-    @app.get("/api/v2/me")
+    @app.get("/api/v2/me", response_model=r.AuthResponse)
     def me_v2(request: Request, _user=Depends(principal)):
         return platform.authenticate(request.cookies.get(COOKIE))
 

@@ -5,6 +5,7 @@ from fastapi import Depends, Header
 from sqlalchemy import insert, select
 from sqlalchemy.exc import IntegrityError
 
+from agent_platform.apps.api import responses as r
 from agent_platform.apps.api import schemas as s
 from agent_platform.infrastructure import (
     gateway_tables as gt,
@@ -23,6 +24,99 @@ from agent_platform.modules.platform import hasher, now, uid
 def register(app, platform, principal, auth, idempotency):
     db, settings = platform.db, platform.settings
     identity = platform.identity
+
+    def cost_service(actor, capability="platform.billing.manage"):
+        from agent_platform.modules.costs import CostService
+
+        return CostService(
+            db,
+            authorize=lambda connection: platform.require_platform(
+                connection, actor, capability
+            ),
+        )
+
+    @app.get("/api/v2/platform/costs", response_model=r.CostsResponse)
+    def costs(actor=Depends(principal)):
+        return cost_service(actor, "platform.costs.read").summary()
+
+    @app.put(
+        "/api/v2/platform/costs/budgets/{scope}/{subject_id}",
+        response_model=r.CostBudgetResponse,
+    )
+    def cost_budget(
+        scope: str, subject_id: str, body: s.CostBudget, actor=Depends(principal)
+    ):
+        return cost_service(actor).configure_budget(
+            scope, subject_id, body.limit, actor["id"], body.expected_version
+        )
+
+    @app.post(
+        "/api/v2/platform/costs/budgets/{scope}/{subject_id}/review",
+        response_model=r.CostBudgetResponse,
+    )
+    def cost_review(
+        scope: str, subject_id: str, body: s.CostReview, actor=Depends(principal)
+    ):
+        return cost_service(actor).review_budget(
+            scope, subject_id, actor["id"], body.reason, body.expected_version
+        )
+
+    @app.post(
+        "/api/v2/platform/tenants/{tenant_id}/billing/budget-projection/rebuild",
+        response_model=r.BudgetRebuildResponse,
+    )
+    def rebuild_budgets(
+        tenant_id: str, body: s.ProjectionRebuild, actor=Depends(principal)
+    ):
+        with db.tenant_scope(tenant_id):
+            return billing(actor, tenant_id).rebuild_budget_totals(
+                tenant_id, actor["id"], body.reason
+            )
+
+    @app.post(
+        "/api/v2/platform/deployments/{deployment_id}/cost-prices",
+        status_code=201,
+        response_model=r.CostPriceResponse,
+    )
+    def cost_price(deployment_id: str, body: s.CostPrice, actor=Depends(principal)):
+        return cost_service(actor).configure_price(
+            deployment_id,
+            body.input_price,
+            body.output_price,
+            actor["id"],
+            body.expected_version,
+        )
+
+    @app.patch("/api/v2/platform/deployments/{deployment_id}")
+    def deployment_update(
+        deployment_id: str, body: s.DeploymentPatch, actor=Depends(principal)
+    ):
+        return platform.gateway.update_deployment(
+            deployment_id, body.model_dump(exclude_none=True), actor_id=actor["id"]
+        )
+
+    @app.get(
+        "/api/v2/platform/tenants/{tenant_id}/billing/calls/{call_id}/receipts",
+        response_model=r.UsageReceiptsResponse,
+    )
+    def usage_receipts(tenant_id: str, call_id: str, actor=Depends(principal)):
+        from agent_platform.infrastructure import metering_tables as mt
+
+        with db.tenant_scope(tenant_id), db.read() as connection:
+            require_target(connection, actor, tenant_id, "platform.billing.manage")
+            return {
+                "items": [
+                    dict(row)
+                    for row in connection.execute(
+                        select(mt.usage_receipts)
+                        .where(
+                            mt.usage_receipts.c.tenant_id == tenant_id,
+                            mt.usage_receipts.c.call_id == call_id,
+                        )
+                        .order_by(mt.usage_receipts.c.created_at)
+                    ).mappings()
+                ]
+            }
 
     def require(actor, capability):
         with db.read() as connection:
@@ -61,6 +155,16 @@ def register(app, platform, principal, auth, idempotency):
             raise PlatformError(
                 409, "model_configuration_conflict", "模型配置已变化，请刷新后重试。"
             ) from None
+
+    @app.get("/api/v2/platform/tenants/{tenant_id}/diagnostics")
+    def diagnostics(tenant_id: str, actor=Depends(principal)):
+        from agent_platform.modules.operational_metrics import operational_snapshot
+
+        def authorize(connection):
+            require_target(connection, actor, tenant_id, "platform.tenants.manage")
+            platform.require_platform(connection, actor, "platform.costs.read")
+
+        return operational_snapshot(db, tenant_id, authorize=authorize)
 
     @app.get("/api/v2/tenants/{tenant_id}")
     def tenant(tenant_id: str, actor=Depends(principal)):
@@ -281,7 +385,10 @@ def register(app, platform, principal, auth, idempotency):
                 idempotency(idempotency_key),
             )
 
-    @app.get("/api/v2/platform/tenants/{tenant_id}/billing/wallet")
+    @app.get(
+        "/api/v2/platform/tenants/{tenant_id}/billing/wallet",
+        response_model=r.WalletResponse,
+    )
     def platform_wallet(tenant_id: str, actor=Depends(principal)):
         with db.tenant_scope(tenant_id), db.read() as connection:
             require_target(connection, actor, tenant_id, "platform.billing.manage")
@@ -402,7 +509,15 @@ def register(app, platform, principal, auth, idempotency):
                 .order_by(t.models.c.created_at, t.models.c.id)
             ).mappings()
             return {
-                "items": [{**dict(row), "sync_status": sync["status"]} for row in rows],
+                "items": [
+                    {
+                        **dict(row),
+                        "sync_status": platform.gateway.availability(
+                            tenant_id, dict(row), connection=connection
+                        )["status"],
+                    }
+                    for row in rows
+                ],
                 "gateway": sync,
             }
 

@@ -121,7 +121,7 @@ class ApplicationChartTests(unittest.TestCase):
                     "PLATFORM_DATABASE_URL": {
                         "name": "platform-migrator-secret"
                         if role == "migration"
-                        else "platform-database-secret",
+                        else f"platform-{role}-database-secret",
                         "key": "PLATFORM_DATABASE_URL",
                     },
                 }

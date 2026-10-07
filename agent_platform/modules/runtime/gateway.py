@@ -112,6 +112,9 @@ class Gateway:
         max_tokens: int,
         temperature: float,
         tools: list[dict],
+        *,
+        attempt_id: str | None = None,
+        logical_call_id: str | None = None,
     ) -> AsyncIterator[GatewayEvent]:
         if not self.configured:
             raise GatewayError(
@@ -126,6 +129,7 @@ class Gateway:
         aggregate: AIMessageChunk | None = None
         usage: dict | None = None
         finish_reason: str | None = None
+        gateway_response_id: str | None = None
         transport: httpx.AsyncHTTPTransport | None = None
         http_client: httpx.AsyncClient | None = None
         request_sent = False
@@ -151,6 +155,21 @@ class Gateway:
                 temperature=temperature,
                 timeout=self.timeout,
                 use_responses_api=False,
+                **(
+                    {
+                        "default_headers": {"x-litellm-call-id": attempt_id},
+                        "extra_body": {
+                            "user": "agent-platform-attempt-" + attempt_id,
+                            "metadata": {
+                                "platform_attempt_id": attempt_id,
+                                "platform_logical_call_id": logical_call_id,
+                                "tags": ["agent-platform-attempt:" + attempt_id],
+                            },
+                        },
+                    }
+                    if attempt_id
+                    else {}
+                ),
                 **transport_options,
             )
             runnable = client.bind_tools(tools) if tools else client
@@ -158,6 +177,16 @@ class Gateway:
             async for chunk in runnable.astream(messages):
                 if not isinstance(chunk, AIMessageChunk):
                     raise GatewayError("invalid_gateway_response", "模型返回格式无效。")
+                provider_id = chunk.response_metadata.get(
+                    "platform_gateway_response_id"
+                )
+                if isinstance(provider_id, str) and provider_id:
+                    if (
+                        gateway_response_id is not None
+                        and gateway_response_id != provider_id
+                    ):
+                        raise UsageUnavailable("模型网关响应标识不一致，费用等待核实。")
+                    gateway_response_id = provider_id
                 raw_usage = chunk.response_metadata.get("platform_raw_usage")
                 if isinstance(raw_usage, dict):
                     # Streaming usage is a cumulative snapshot, never a delta.
@@ -217,6 +246,19 @@ class Gateway:
                     **usage,
                     "finish_reason": finish_reason,
                     "usage_source": "litellm_gateway",
+                    **(
+                        {
+                            "attempt_id": attempt_id,
+                            "logical_call_id": logical_call_id,
+                            "gateway_call_id": attempt_id,
+                            "gateway_response_id": gateway_response_id,
+                            "gateway_response_id_source": "provider_sse"
+                            if gateway_response_id
+                            else None,
+                        }
+                        if attempt_id
+                        else {}
+                    ),
                 },
             ),
         )

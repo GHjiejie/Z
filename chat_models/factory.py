@@ -23,6 +23,15 @@ class UsageAwareChatOpenAI(ChatOpenAI):
         result = super()._convert_chunk_to_generation_chunk(
             chunk, default_chunk_class, base_generation_info
         )
+        if result is not None:
+            # Chat Completions conversion discards the raw response id and the
+            # framework later assigns a local lc_run id. Preserve only the
+            # identifier actually supplied by the provider's SSE envelope.
+            provider_id = chunk.get("id")
+            if isinstance(provider_id, str) and provider_id:
+                result.message.response_metadata["platform_gateway_response_id"] = (
+                    provider_id
+                )
         if result is not None and isinstance(chunk.get("usage"), dict):
             result.message.response_metadata["platform_raw_usage"] = dict(
                 chunk["usage"]

@@ -20,7 +20,7 @@ KUBE_OPTIONS := --context "$(KUBE_CONTEXT)" --namespace "$(KUBE_NAMESPACE)" --im
 
 .DEFAULT_GOAL := start
 
-.PHONY: start run stop resume deploy status help install migrate init dev worker gateway-sync maintenance web build test infra gateway-key up down k8s-import k8s-deploy k8s-status k8s-stop k8s-logs helm-adopt charts-validate local-start local-stop local-status local-migrate local-init compose-up compose-down
+.PHONY: api-contract api-contract-check start run stop resume deploy status help install migrate init dev worker gateway-sync maintenance web build test infra gateway-key up down k8s-import k8s-deploy k8s-status k8s-stop k8s-logs helm-adopt charts-validate local-start local-stop local-status local-migrate local-init compose-up compose-down
 
 start: k8s-deploy
 
@@ -130,3 +130,9 @@ compose-up:
 
 compose-down:
 	$(COMPOSE) down
+
+api-contract:
+	cd "$(ROOT)" && uv run --no-sync python -m agent_platform.scripts.api_contract
+
+api-contract-check:
+	cd "$(ROOT)" && uv run --no-sync python -m agent_platform.scripts.api_contract --check

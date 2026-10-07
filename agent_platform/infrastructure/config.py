@@ -1,5 +1,6 @@
 """Explicit platform configuration, separate from existing demos."""
 
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
@@ -38,6 +39,7 @@ class Settings:
     secure_cookies: bool = False
     embedded_worker: bool = False
     session_hours: int = 24
+    queue_timeout: int = 300
     run_timeout: int = 300
     model_timeout: int = 90
     max_run_cost: str = "1"
@@ -57,6 +59,10 @@ class Settings:
             raise ValueError("PLATFORM_MODE must be local or saas")
         if self.worker_concurrency < 1:
             raise ValueError("PLATFORM_WORKER_CONCURRENCY must be positive")
+        for name in ("queue_timeout", "run_timeout"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
+                raise ValueError(f"PLATFORM_{name.upper()} must be finite and positive")
         if self.mode == "saas":
             if not self.database_url.startswith("postgresql"):
                 raise ValueError("SaaS mode requires PostgreSQL")
@@ -156,6 +162,7 @@ class Settings:
             == "true",
             embedded_worker=os.getenv("PLATFORM_EMBEDDED_WORKER", "false").lower()
             == "true",
+            queue_timeout=int(os.getenv("PLATFORM_QUEUE_TIMEOUT", "300")),
             run_timeout=int(os.getenv("PLATFORM_RUN_TIMEOUT", "300")),
             model_timeout=int(os.getenv("PLATFORM_MODEL_TIMEOUT", "90")),
             max_run_cost=os.getenv("PLATFORM_MAX_RUN_COST", "1"),

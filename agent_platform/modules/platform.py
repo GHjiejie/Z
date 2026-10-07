@@ -38,6 +38,7 @@ from agent_platform.modules.run_records import append_event, now, uid
 
 ACTIVE_STATUSES = ("queued", "running", "cancelling")
 TERMINAL_STATUSES = ("succeeded", "failed", "cancelled", "expired")
+STREAM_LEASE_SECONDS = 30
 hasher = PasswordHasher()
 _DUMMY_HASH = hasher.hash(secrets.token_urlsafe(32))
 
@@ -476,25 +477,32 @@ class Platform:
                     tenant_id=user["tenant_id"],
                     user_id=user["id"],
                     run_id=run_id,
-                    expires_at=time.time() + 30,
+                    expires_at=time.time() + STREAM_LEASE_SECONDS,
                 )
             )
             return identifier
 
     def update_stream(self, user, identifier, *, release=False):
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
+            if not release:
+                self.identity.assert_current(connection, user, "runs.read_own")
+            checked_at = time.time()
             query = (
                 delete(rt.stream_leases)
                 if release
-                else update(rt.stream_leases).values(expires_at=time.time() + 30)
+                else update(rt.stream_leases)
+                .where(rt.stream_leases.c.expires_at > checked_at)
+                .values(expires_at=checked_at + STREAM_LEASE_SECONDS)
             )
-            connection.execute(
+            result = connection.execute(
                 query.where(
                     rt.stream_leases.c.id == identifier,
                     rt.stream_leases.c.tenant_id == user["tenant_id"],
                     rt.stream_leases.c.user_id == user["id"],
                 )
             )
+            if not release and result.rowcount != 1:
+                raise PlatformError(409, "stream_lease_lost", "实时连接租约已失效。")
 
     def change_password(self, user: dict, old: str, new: str) -> None:
         with self.db.transaction(f"identity:{user['id']}") as connection:
@@ -820,6 +828,7 @@ class Platform:
                 "tenant_id": user["tenant_id"],
                 "user_id": user["id"],
                 "created_at": now(),
+                "queue_expires_at": time.time() + self.settings.queue_timeout,
                 "session_id": session_id,
                 "agent_name": agent["name"],
                 "spec": spec,

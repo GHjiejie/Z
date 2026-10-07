@@ -15,11 +15,13 @@ import secrets
 import subprocess
 import sys
 import tempfile
+import time
 import uuid
 from decimal import Decimal
 from pathlib import Path
 
 import httpx
+from cryptography.fernet import Fernet
 
 from agent_platform.modules.runtime.engine import execute_agent
 from agent_platform.modules.runtime.gateway import Gateway, GatewayError
@@ -29,7 +31,7 @@ DEPLOY = ROOT / "agent_platform/deploy"
 
 
 def command(args: list[str], **kwargs) -> str:
-    if args[:2] == ["docker", "compose"]:
+    if args[0] == "docker":
         # Shell variables override Compose --env-file values. Exclude any real
         # deployment credentials and force this run's generated test settings.
         process_env = {
@@ -44,13 +46,17 @@ def command(args: list[str], **kwargs) -> str:
                     "POSTGRES_",
                     "COMPOSE_",
                     "UI_",
+                    "OPENAI_",
+                    "ANTHROPIC_",
+                    "DOCKER_",
                 )
             )
         }
-        env_file = Path(args[args.index("--env-file") + 1])
-        process_env.update(
-            line.split("=", 1) for line in env_file.read_text().splitlines()
-        )
+        if args[:2] == ["docker", "compose"]:
+            env_file = Path(args[args.index("--env-file") + 1])
+            process_env.update(
+                line.split("=", 1) for line in env_file.read_text().splitlines()
+            )
         kwargs["env"] = process_env
     result = subprocess.run(args, capture_output=True, text=True, check=False, **kwargs)
     if result.returncode:
@@ -145,38 +151,93 @@ async def verify_gateway(base: str, key: str) -> None:
 
 
 def verify_platform(base: str, password: str) -> None:
-    """Exercise public HTTP only; the independent container worker owns execution."""
+    """Exercise current v2 grants/cost APIs; the container Worker owns execution."""
     with httpx.Client(base_url=base, timeout=45) as client:
-        assert client.get("/").status_code == 200
+        assert client.get("/api/v1/ready").status_code == 200
         login = client.post(
             "/api/v1/auth/login",
             json={"email": "admin@example.com", "password": password},
         )
         login.raise_for_status()
+        actor = login.json()["user"]
+        assert {"platform_admin", "platform_finance"} <= set(actor["platform_roles"])
         client.headers["X-CSRF-Token"] = login.json()["csrf_token"]
+        # Containers keep SaaS Secure cookies. This loopback-only fixture has no
+        # TLS proxy, so explicitly send its freshly issued test cookie over HTTP.
+        cookie = client.cookies.get("agent_platform_session")
+        assert cookie and "secure" in login.headers["set-cookie"].lower()
+        client.headers["Cookie"] = "agent_platform_session=" + cookie
+        memberships = actor["memberships"]
+        assert memberships
+        tenant_id = memberships[0]["tenant_id"]
+        tenant_path = "/api/v2/tenants/" + tenant_id
+        platform_path = "/api/v2/platform/tenants/" + tenant_id
 
         def api(method: str, path: str, **kwargs):
-            response = client.request(method, "/api/v1" + path, **kwargs)
+            response = client.request(method, path, **kwargs)
             response.raise_for_status()
             return response.json()
 
-        wallet = api("GET", "/billing/wallet")
-        assert Decimal(wallet["balance"]) == 0, wallet
+        wallet = api("GET", tenant_path + "/billing/wallet")
+        assert Decimal(wallet["balance"]) == 0
+        deployment = api(
+            "POST",
+            "/api/v2/platform/deployments",
+            json={
+                "name": "Free smoke deployment",
+                "internal_route": "platform-chat",
+                "base_url": "http://litellm:4000/v1",
+                "capabilities": ["chat", "tools"],
+            },
+        )
+        # Customer prices and supplier prices are configured independently.
+        api(
+            "PUT",
+            "/api/v2/platform/costs/budgets/platform/platform",
+            json={"limit": "10", "expected_version": 0},
+        )
+        api(
+            "PUT",
+            "/api/v2/platform/costs/budgets/deployment/" + deployment["id"],
+            json={"limit": "5", "expected_version": 0},
+        )
+        api(
+            "POST",
+            "/api/v2/platform/deployments/" + deployment["id"] + "/cost-prices",
+            json={"input_price": "3", "output_price": "4", "expected_version": 0},
+        )
         model = api(
             "POST",
-            "/models",
+            platform_path + "/models",
             json={
+                "deployment_id": deployment["id"],
                 "name": "Smoke model",
-                "alias": "platform-chat",
+                "alias": "smoke-customer-alias",
                 "input_price": "1",
                 "output_price": "2",
                 "context_window": 32768,
                 "max_output_tokens": 256,
             },
         )
+        initial_grants = api("GET", platform_path + "/model-grants")
+        assert initial_grants["gateway"]["status"] == "not_enrolled"
+        api("POST", platform_path + "/gateway/enroll")
+        deadline = time.monotonic() + 45
+        while time.monotonic() < deadline:
+            grants = api("GET", platform_path + "/model-grants")
+            ready = next(row for row in grants["items"] if row["id"] == model["id"])
+            if ready["sync_status"] == "ready":
+                assert (
+                    grants["gateway"]["applied_version"]
+                    == grants["gateway"]["desired_version"]
+                )
+                break
+            time.sleep(0.2)
+        else:
+            raise AssertionError("Tenant gateway grant did not converge")
         agent = api(
             "POST",
-            "/agents",
+            tenant_path + "/agents",
             json={
                 "name": "Smoke Agent",
                 "model_id": model["id"],
@@ -186,72 +247,147 @@ def verify_platform(base: str, password: str) -> None:
                 "tools": ["calculator"],
             },
         )
-        assert api("POST", f"/agents/{agent['id']}/publish")["version"] == 1
+        assert (
+            api("POST", tenant_path + f"/agents/{agent['id']}/publish")["version"] == 1
+        )
         api(
             "POST",
-            "/billing/credits",
+            platform_path + "/credits",
             headers={"Idempotency-Key": "smoke-credit"},
-            json={"amount": "10", "description": "Container smoke credit"},
+            json={"amount": "10", "description": "Free container smoke credit"},
         )
-        session = api("POST", "/sessions", json={"agent_id": agent["id"]})
+        session = api("POST", tenant_path + "/sessions", json={"agent_id": agent["id"]})
         run = api(
             "POST",
-            f"/sessions/{session['id']}/runs",
+            tenant_path + f"/sessions/{session['id']}/runs",
             headers={"Idempotency-Key": "smoke-run"},
             json={"message": "calculate 2+2"},
         )
-        stream = client.get(f"/api/v1/runs/{run['id']}/events")
+        stream = client.get(tenant_path + f"/runs/{run['id']}/events")
         stream.raise_for_status()
-        assert "event: tool.finished" in stream.text, stream.text
-        assert "event: run.completed" in stream.text, stream.text
-        assert "Answer: 4" in stream.text, stream.text
+        assert "event: tool.finished" in stream.text
+        assert "event: run.completed" in stream.text
+        assert "Answer: 4" in stream.text
         event_ids = [
             int(line[4:])
             for line in stream.text.splitlines()
             if line.startswith("id: ")
         ]
-        assert event_ids == list(range(1, len(event_ids) + 1)), event_ids
+        assert event_ids == list(range(1, len(event_ids) + 1))
         replay = client.get(
-            f"/api/v1/runs/{run['id']}/events",
+            tenant_path + f"/runs/{run['id']}/events",
             headers={"Last-Event-ID": str(event_ids[-2])},
         )
         replay.raise_for_status()
-        assert "event: run.completed" in replay.text
-        assert "event: run.queued" not in replay.text
-        saved = api("GET", f"/runs/{run['id']}")
-        assert saved["status"] == "succeeded", saved
-        assert Decimal(saved["cost"]) == Decimal("0.000040"), saved
-        usage = api("GET", "/usage/calls")["items"]
-        assert len(usage) == 2, usage
+        assert (
+            "event: run.completed" in replay.text
+            and "event: run.queued" not in replay.text
+        )
+        saved = api("GET", tenant_path + f"/runs/{run['id']}")
+        assert saved["status"] == "succeeded"
+        assert Decimal(saved["cost"]) == Decimal("0.000040")
+        usage = api("GET", tenant_path + "/usage/calls")["items"]
+        assert len(usage) == 2
         assert all(
             item["status"] == "confirmed"
             and item["input_tokens"] == 12
             and item["output_tokens"] == 4
             and item["usage_source"] == "litellm_gateway"
             for item in usage
-        ), usage
-        wallet = api("GET", "/billing/wallet")
-        assert Decimal(wallet["balance"]) == Decimal("9.999960"), wallet
-        assert Decimal(wallet["reserved"]) == 0, wallet
-        ledger = api("GET", "/billing/ledger")["items"]
-        assert len(ledger) == 3, ledger
-        detail = api("GET", f"/sessions/{session['id']}")
+        )
+        for call in usage:
+            receipts = api(
+                "GET", platform_path + f"/billing/calls/{call['id']}/receipts"
+            )["items"]
+            assert len(receipts) == 1 and receipts[0]["attempt_id"]
+            assert (
+                receipts[0]["input_tokens"] == 12 and receipts[0]["output_tokens"] == 4
+            )
+        wallet = api("GET", tenant_path + "/billing/wallet")
+        assert (
+            Decimal(wallet["balance"]) == Decimal("9.999960")
+            and Decimal(wallet["reserved"]) == 0
+        )
+        ledger = api("GET", tenant_path + "/billing/ledger")["items"]
+        assert len(ledger) == 3
+        detail = api("GET", tenant_path + f"/sessions/{session['id']}")
         assert [message["role"] for message in detail["messages"]] == [
             "user",
             "assistant",
-        ], detail
-        assert detail["messages"][-1]["content"] == "Answer: 4", detail
-        dashboard = api("GET", "/dashboard")
-        assert dashboard["requests"] == 2 and dashboard["tokens"] == 32, dashboard
-        assert Decimal(dashboard["cost"]) == Decimal("0.000040"), dashboard
+        ]
+        assert detail["messages"][-1]["content"] == "Answer: 4"
+        dashboard = api("GET", tenant_path + "/dashboard")
+        assert dashboard["requests"] == 2 and dashboard["tokens"] == 32
+        assert Decimal(dashboard["cost"]) == Decimal("0.000040")
+        costs = api("GET", "/api/v2/platform/costs")
+        assert len(costs["budgets"]) == 2
+        assert all(
+            Decimal(row["spent"]) == Decimal("0.000104")
+            and Decimal(row["reserved"]) == 0
+            and not row["blocked"]
+            for row in costs["budgets"]
+        )
+        diagnostics = api("GET", platform_path + "/diagnostics")
+        assert diagnostics["queue"]["count"] == 0
+        assert diagnostics["unresolved"]["count"] == 0
+        assert diagnostics["supplier_frozen"]["count"] == 0
     print(
-        "PASS: separate API/Worker containers login → publish → credit → run/tool/SSE → gateway usage → billing/history/dashboard",
+        "PASS: independent API/Worker/gateway-sync roles, v2 grant → enroll → tool/SSE → immutable usage → customer/supplier accounting",
+        flush=True,
+    )
+
+
+def verify_runtime_roles(compose: list[str]) -> None:
+    for service, role in (
+        ("api", "platform_api"),
+        ("worker", "platform_worker"),
+        ("gateway-sync", "platform_gateway_sync"),
+        ("maintenance", "platform_maintenance"),
+    ):
+        code = f"""
+import os
+from urllib.parse import urlsplit
+from agent_platform.infrastructure.config import Settings
+from agent_platform.infrastructure.db import Database
+settings = Settings.from_env(role={service!r})
+assert settings.mode == 'saas' and not settings.embedded_worker
+assert urlsplit(settings.database_url).username == {role!r}
+assert not settings.litellm_key
+for variable in ('LITELLM_MASTER_KEY', 'UPSTREAM_API_KEY', 'OPENAI_API_KEY',
+                 'PLATFORM_ADMIN_PASSWORD', 'POSTGRES_PASSWORD',
+                 'PLATFORM_MIGRATION_DB_PASSWORD'):
+    assert variable not in os.environ
+if {service!r} != 'gateway-sync':
+    assert 'PLATFORM_GATEWAY_CONTROL_KEY' not in os.environ
+else:
+    assert settings.gateway_control_key
+db = Database(settings.database_url)
+try:
+    db.assert_schema(saas=True)
+finally:
+    db.close()
+print('isolated')
+"""
+        assert (
+            command([*compose, "exec", "-T", service, "python", "-c", code])
+            == "isolated"
+        )
+    print(
+        "PASS: each service uses its own non-owner/RLS database identity; API/Worker receive no gateway master or legacy runtime key",
         flush=True,
     )
 
 
 def main() -> None:
+    transport = command(
+        ["docker", "context", "inspect", "--format", "{{.Endpoints.docker.Host}}"]
+    )
+    if not transport.startswith(("unix://", "npipe://")):
+        raise RuntimeError(
+            "Smoke requires a local Docker socket, not a remote Docker context"
+        )
     project = "agent-platform-smoke-" + uuid.uuid4().hex[:10]
+    image = project + ":local"
     with tempfile.TemporaryDirectory(prefix=project) as directory:
         root = Path(directory)
         bootstrap = root / "bootstrap"
@@ -260,7 +396,11 @@ def main() -> None:
             name: secrets.token_hex(24)
             for name in [
                 "POSTGRES_PASSWORD",
-                "PLATFORM_DB_PASSWORD",
+                "PLATFORM_API_DB_PASSWORD",
+                "PLATFORM_WORKER_DB_PASSWORD",
+                "PLATFORM_GATEWAY_SYNC_DB_PASSWORD",
+                "PLATFORM_MAINTENANCE_DB_PASSWORD",
+                "PLATFORM_MIGRATION_DB_PASSWORD",
                 "LITELLM_DB_PASSWORD",
                 "LITELLM_SALT_KEY",
                 "PLATFORM_ADMIN_PASSWORD",
@@ -277,7 +417,9 @@ def main() -> None:
             "PLATFORM_HTTP_PORT": "0",
             "LITELLM_HTTP_PORT": "0",
             "GATEWAY_BOOTSTRAP_DIR": str(bootstrap),
-            "PLATFORM_SECURE_COOKIES": "false",
+            "PLATFORM_SECRET_ENCRYPTION_KEY": Fernet.generate_key().decode(),
+            "PLATFORM_OPERATOR_EMAILS": "admin@example.com",
+            "PLATFORM_TOMBSTONE_VOLUME": project + "-tombstones",
         }
         env_file = root / ".env"
         env_file.write_text("".join(f"{key}={value}\n" for key, value in env.items()))
@@ -287,20 +429,15 @@ def main() -> None:
             json.dumps(
                 {
                     "services": {
-                        "api": {
-                            "environment": {
-                                "PLATFORM_LITELLM_KEY": "${SMOKE_RUNTIME_KEY:-}"
-                            }
-                        },
-                        "worker": {
-                            "environment": {
-                                "PLATFORM_LITELLM_KEY": "${SMOKE_RUNTIME_KEY:-}"
-                            }
-                        },
-                        "init": {
-                            "environment": {
-                                "PLATFORM_LITELLM_KEY": "${SMOKE_RUNTIME_KEY:-}"
-                            }
+                        **{
+                            role: {"image": image}
+                            for role in (
+                                "api",
+                                "worker",
+                                "init",
+                                "gateway-sync",
+                                "maintenance",
+                            )
                         },
                         "postgres": {"ports": ["127.0.0.1::5432"]},
                         "mock": {
@@ -308,7 +445,13 @@ def main() -> None:
                             "command": ["python", "/mock.py"],
                             "volumes": [f"{DEPLOY / 'mock_provider.py'}:/mock.py:ro"],
                         },
-                    }
+                    },
+                    "volumes": {
+                        "tenant-tombstones": {
+                            "external": False,
+                            "name": env["PLATFORM_TOMBSTONE_VOLUME"],
+                        }
+                    },
                 }
             )
         )
@@ -324,6 +467,7 @@ def main() -> None:
             "-f",
             str(override),
         ]
+        image_built = False
         try:
             command([*compose, "config", "--quiet"])
             print(
@@ -396,9 +540,22 @@ def main() -> None:
 
             address = command([*compose, "port", "postgres", "5432"])
             db_env = {
-                **os.environ,
-                "PLATFORM_DATABASE_URL": f"postgresql+psycopg://platform:{passwords['PLATFORM_DB_PASSWORD']}@{address}/platform",
+                key: value
+                for key, value in os.environ.items()
+                if not key.startswith(
+                    (
+                        "PLATFORM_",
+                        "LITELLM_",
+                        "UPSTREAM_",
+                        "POSTGRES_",
+                        "OPENAI_",
+                        "ANTHROPIC_",
+                    )
+                )
             }
+            db_env["PLATFORM_DATABASE_URL"] = (
+                f"postgresql+psycopg://platform_migrator:{passwords['PLATFORM_MIGRATION_DB_PASSWORD']}@{address}/platform"
+            )
             for action in [
                 ("upgrade", "head"),
                 ("check",),
@@ -423,7 +580,7 @@ def main() -> None:
                 flush=True,
             )
             print(
-                "Building final application image from root uv.lock and React source…",
+                "Building isolated backend image from root uv.lock…",
                 flush=True,
             )
             command(
@@ -433,15 +590,12 @@ def main() -> None:
                     "-f",
                     str(DEPLOY / "Dockerfile"),
                     "-t",
-                    "agent-platform:0.1.0",
+                    image,
                     str(ROOT),
                 ],
                 timeout=600,
             )
-            env["SMOKE_RUNTIME_KEY"] = key
-            env_file.write_text(
-                "".join(f"{name}={value}\n" for name, value in env.items())
-            )
+            image_built = True
             command(
                 [
                     *compose,
@@ -453,43 +607,20 @@ def main() -> None:
                     "120",
                     "api",
                     "worker",
+                    "gateway-sync",
+                    "maintenance",
                 ],
                 timeout=180,
             )
-            assert (
-                command(
-                    [
-                        *compose,
-                        "exec",
-                        "-T",
-                        "api",
-                        "python",
-                        "-c",
-                        "import os; assert os.environ['PLATFORM_EMBEDDED_WORKER'] == 'false'; assert 'LITELLM_MASTER_KEY' not in os.environ; print('isolated')",
-                    ]
-                )
-                == "isolated"
-            )
-            assert (
-                command(
-                    [
-                        *compose,
-                        "exec",
-                        "-T",
-                        "worker",
-                        "python",
-                        "-c",
-                        "import os; assert 'LITELLM_MASTER_KEY' not in os.environ; print('isolated')",
-                    ]
-                )
-                == "isolated"
-            )
+            verify_runtime_roles(compose)
             api_address = command([*compose, "port", "api", "8000"])
             verify_platform(
                 "http://" + api_address, passwords["PLATFORM_ADMIN_PASSWORD"]
             )
         finally:
             command([*compose, "down", "--volumes", "--remove-orphans"], timeout=120)
+            if image_built:
+                command(["docker", "image", "rm", image], timeout=30)
 
 
 if __name__ == "__main__":
