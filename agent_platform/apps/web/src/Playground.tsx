@@ -1,47 +1,18 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
-  AlertCircle,
-  ArrowUp,
-  Bot,
-  Check,
-  ChevronDown,
-  CircleStop,
-  LoaderCircle,
-  MessageSquare,
-  Plus,
-  RefreshCw,
-  Sparkles,
-  Terminal,
-  UserRound,
-  Wrench,
+  AlertCircle, ArrowDown, ArrowUp, Bot, Check, ChevronRight, CircleStop,
+  Copy, History, LoaderCircle, MessageSquare, Plus, Search,
+  Sparkles, Terminal, Wrench,
 } from "lucide-react";
-import { api, apiUrl, dateTime, getScopeRevision, getTenantId, scopeIsCurrent, tenantLink, terminal, write } from "./api";
-import { Badge, Button, PageTitle, useResource, useToast } from "./components";
-import type { Agent, Model, Run, RunEvent, Session, SessionDetail } from "./types";
+import { api, dateTime, getScopeRevision, getTenantId, scopeIsCurrent, tenantLink, terminal, write } from "./api";
+import { Button, Modal, Select, useResource, useToast } from "./components";
+import type { Agent, Model, Run, Session, SessionDetail } from "./types";
+import type { AGUIEvent } from "./ag-ui";
+import { useAgentRun } from "./useAgentRun";
 
 const query = () => new URLSearchParams(location.hash.split("?")[1] ?? "");
-const eventNames = [
-  "run.started",
-  "run.queued",
-  "run.completed",
-  "run.failed",
-  "run.cancelled",
-  "run.canceled",
-  "run.interrupted",
-  "run.expired",
-  "run.succeeded",
-  "message.delta",
-  "tool.started",
-  "tool.finished",
-  "usage.updated",
-  "step.started",
-  "step.completed",
-  "step.finished",
-  "model.started",
-  "model.completed",
-];
-export function Playground() {
+export function Playground({ name }: { name?: string }) {
   const tenantScope = useRef(getTenantId()).current;
   const scopeRevision = useRef(getScopeRevision()).current;
   const agents = useResource<{ items: Agent[] }>("/agents");
@@ -53,27 +24,25 @@ export function Playground() {
     query().get("session"),
   );
   const [detail, setDetail] = useState<SessionDetail | null>(null);
-  const [activeRun, setActiveRun] = useState<Run | null>(null);
   const [draft, setDraft] = useState("");
   const [liveText, setLiveText] = useState("");
-  const [events, setEvents] = useState<RunEvent[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState("");
-  const [connection, setConnection] = useState<
-    "closed" | "connecting" | "open" | "retrying"
-  >("closed");
-  const [reconnect, setReconnect] = useState(0);
   const [showEvents, setShowEvents] = useState(false);
-  const lastSequence = useRef(0);
-  const streamRun = useRef("");
-  const bottom = useRef<HTMLDivElement>(null);
+  const viewport = useRef<HTMLDivElement>(null);
+  const input = useRef<HTMLTextAreaElement>(null);
+  const following = useRef(true);
+  const [showLatest, setShowLatest] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyQuery, setHistoryQuery] = useState("");
   const sendKey = useRef<{
     message: string;
     session: string;
     model: string;
     key: string;
+    messageId: string;
   } | null>(null);
   const selection = useRef(0);
   const toast = useToast();
@@ -85,13 +54,29 @@ export function Playground() {
   const latestRun = detail?.runs
     .slice()
     .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
+  const { run: activeRun, events, connection, error: streamError, start, attach, reset, reconnect } = useAgentRun(tenantScope, {
+    messages: (messages, runId) => {
+      const livePrefix = `assistant:${runId}:`;
+      setLiveText(messages.filter((message) => message.role === "assistant" && message.id.startsWith(livePrefix))
+        .map((message) => typeof message.content === "string" ? message.content : "").filter(Boolean).join("\n\n"));
+      const confirmed = messages.flatMap((message) => ["user", "assistant"].includes(message.role) && typeof message.content === "string" && message.content && !message.id.startsWith(livePrefix)
+        ? [{ id: message.id, role: message.role, content: message.content }] : []);
+      setDetail((current) => current ? { ...current, messages: confirmed } : current);
+    },
+    finished: (id, _status, message) => {
+      setCanceling(false);
+      if (message) setError(message);
+      void loadSession(id, false);
+      void sessions.reload();
+    },
+  });
   useEffect(() => {
     if (!agentId && published.length) setAgentId(published[0].id);
   }, [agentId, published]);
   useEffect(() => {
     const listener = () => {
       const next = query();
-      if (next.has("session")) setSessionId(next.get("session"));
+      setSessionId(next.get("session"));
       if (next.has("agent")) {
         setAgentId(next.get("agent")!);
         setModelId("");
@@ -110,21 +95,20 @@ export function Playground() {
       if (current !== selection.current) return;
       setDetail(result);
       setAgentId(result.agent_id);
-      if (updateRun)
-        setActiveRun(
-          [...result.runs].reverse().find((run) => !terminal(run.status)) ??
-            null,
-        );
+      if (updateRun) {
+        const running = result.runs.find((run) => !terminal(run.status));
+        if (running) attach(running);
+      }
+      return result;
     } catch (err) {
       if (current === selection.current) setError((err as Error).message);
     } finally {
       if (current === selection.current) setLoading(false);
     }
-  }, []);
+  }, [attach]);
   useEffect(() => {
-    setActiveRun(null);
+    reset();
     setLiveText("");
-    setEvents([]);
     setDetail(null);
     setError("");
     if (sessionId) void loadSession(sessionId);
@@ -135,133 +119,23 @@ export function Playground() {
     return () => {
       selection.current++;
     };
-  }, [sessionId, loadSession]);
-  useEffect(() => {
-    bottom.current?.scrollIntoView({ behavior: "smooth", block: "end" });
-  }, [detail?.messages.length, liveText, events.length]);
-  useEffect(() => {
-    if (!activeRun || terminal(activeRun.status)) {
-      setConnection("closed");
-      return;
-    }
-    const runId = activeRun.id;
-    const runSession = activeRun.session_id;
-    if (streamRun.current !== runId) {
-      streamRun.current = runId;
-      lastSequence.current = 0;
-      setLiveText("");
-      setEvents([]);
-    }
-    let disposed = false;
-    let finishing = false;
-    let pollBusy = false;
-    setConnection("connecting");
-    const source = new EventSource(
-      apiUrl(`/runs/${runId}/events?after=${lastSequence.current}`, tenantScope),
-      { withCredentials: true },
-    );
-    const finish = async (status: string, message?: string) => {
-      if (disposed || finishing) return;
-      finishing = true;
-      source.close();
-      setConnection("closed");
-      try {
-        const result = await api<SessionDetail>(`/sessions/${runSession}`, {}, tenantScope);
-        if (!disposed) {
-          setDetail(result);
-          setLiveText("");
-        }
-      } catch (err) {
-        if (!disposed) setError((err as Error).message);
-      }
-      if (!disposed) {
-        setActiveRun(null);
-        setCanceling(false);
-        if (status === "failed" && message) setError(message);
-        void sessions.reload();
-      }
-    };
-    const stopForScope = () => { disposed = true; source.close(); };
-    window.addEventListener("tenant-scope-changed", stopForScope);
-    const receive = (message: MessageEvent<string>) => {
-      if (disposed || !scopeIsCurrent(scopeRevision)) return;
-      let event: RunEvent;
-      try {
-        event = JSON.parse(message.data) as RunEvent;
-      } catch {
-        return;
-      }
-      if (!event.type || event.sequence <= lastSequence.current) return;
-      lastSequence.current = event.sequence;
-      setConnection("open");
-      const payload = event.data ?? {};
-      if (event.type === "message.delta") {
-        const text = payload.text ?? payload.delta ?? payload.content;
-        if (typeof text === "string") setLiveText((value) => value + text);
-      } else setEvents((previous) => [...previous.slice(-79), event]);
-      if (event.type === "run.started")
-        setActiveRun((value) =>
-          value ? { ...value, status: "running" } : value,
-        );
-      if (
-        [
-          "run.completed",
-          "run.failed",
-          "run.cancelled",
-          "run.canceled",
-          "run.interrupted",
-          "run.expired",
-          "run.succeeded",
-        ].includes(event.type)
-      )
-        void finish(
-          event.type.slice(4),
-          typeof payload.error === "string"
-            ? payload.error
-            : typeof payload.message === "string"
-              ? payload.message
-              : undefined,
-        );
-    };
-    source.onmessage = receive;
-    eventNames.forEach((name) =>
-      source.addEventListener(name, receive as EventListener),
-    );
-    source.onopen = () => {
-      if (!disposed) setConnection("open");
-    };
-    source.onerror = () => {
-      if (!disposed && !finishing) setConnection("retrying");
-    };
-    const poll = setInterval(() => {
-      if (pollBusy || disposed || finishing) return;
-      pollBusy = true;
-      void api<Run>(`/runs/${runId}`, {}, tenantScope)
-        .then((run) => {
-          if (!disposed && terminal(run.status))
-            void finish(run.status, run.error);
-        })
-        .catch(() => {
-          /* EventSource retries; keep the last visible result. */
-        })
-        .finally(() => {
-          pollBusy = false;
-        });
-    }, 5000);
-    return () => {
-      disposed = true;
-      source.close();
-      clearInterval(poll);
-      window.removeEventListener("tenant-scope-changed", stopForScope);
-    };
-    // Only a different run or explicit reconnect should rebuild the stream.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeRun?.id, reconnect]);
+  }, [sessionId, loadSession, reset]);
+  useLayoutEffect(() => {
+    const element = viewport.current;
+    if (element && following.current) element.scrollTop = element.scrollHeight;
+  }, [detail?.messages.length, liveText, sessionId]);
+  useLayoutEffect(() => {
+    if (!input.current) return;
+    input.current.style.height = "auto";
+    input.current.style.height = `${Math.min(input.current.scrollHeight, 180)}px`;
+  }, [draft]);
   async function send(event: FormEvent) {
     event.preventDefault();
     const message = draft.trim();
     if (!scopeIsCurrent(scopeRevision) || !message || activeRun || busy || loading || !agentId) return;
     setBusy(true);
+    following.current = true;
+    setShowLatest(false);
     setError("");
     try {
       let id = sessionId;
@@ -288,23 +162,21 @@ export function Playground() {
           session: id,
           model: modelId,
           key: crypto.randomUUID(),
+          messageId: crypto.randomUUID(),
         };
-      const run = await api<Run>(`/sessions/${id}/runs`, {
-        method: "POST",
-        body: JSON.stringify({ message, model_id: modelId || null }),
-        headers: { "Idempotency-Key": sendKey.current.key },
+      const restored = await loadSession(id, false);
+      if (!restored || !scopeIsCurrent(scopeRevision)) return;
+      await start({
+        threadId: id, runId: sendKey.current.key, protocolVersion: "1.0",
+        messages: [{ id: sendKey.current.messageId, role: "user", content: message }],
+        state: {}, tools: [], context: [], forwardedProps: { modelId: modelId || null },
       });
       if (!scopeIsCurrent(scopeRevision)) return;
       setDraft("");
       sendKey.current = null;
-      await loadSession(id, false);
-      if (!scopeIsCurrent(scopeRevision)) return;
-      setActiveRun(run);
-      setLiveText("");
-      setEvents([]);
-      setShowEvents(true);
+      setShowEvents(false);
     } catch (err) {
-      setError((err as Error).message);
+      if (scopeIsCurrent(scopeRevision)) setError((err as Error).message);
     } finally {
       setBusy(false);
     }
@@ -315,470 +187,187 @@ export function Playground() {
     try {
       const run = await write<Run>(`/runs/${activeRun.id}/cancel`);
       toast("已请求取消，正在等待运行停止");
-      if (terminal(run.status)) {
-        await loadSession(run.session_id);
-        setLiveText("");
-        setCanceling(false);
-      }
+      // The AG-UI terminal event confirms the worker has stopped. Closing
+      // the HTTP stream alone would only detach this browser.
+      if (terminal(run.status)) setCanceling(false);
     } catch (err) {
       setError((err as Error).message);
       setCanceling(false);
     }
   }
   function newSession() {
+    following.current = true;
+    setShowLatest(false);
+    setHistoryOpen(false);
+    setShowEvents(false);
     setSessionId(null);
     setDetail(null);
-    setActiveRun(null);
+    reset();
+    selection.current++;
     setLiveText("");
-    setEvents([]);
     setError("");
     setDraft("");
     setCanceling(false);
     location.hash = tenantLink(`playground${agentId ? `?agent=${agentId}` : ""}`, tenantScope);
   }
   function chooseSession(session: Session) {
+    reset();
+    selection.current++;
+    following.current = true;
+    setShowLatest(false);
+    setHistoryOpen(false);
+    setShowEvents(false);
     setSessionId(session.id);
     setModelId("");
     setDraft("");
     setCanceling(false);
     location.hash = tenantLink(`playground?session=${session.id}`, tenantScope);
   }
-  const effectiveError = error || agents.error || models.error;
-  return (
-    <>
-      <PageTitle
-        eyebrow="PLAYGROUND"
-        title="对话实验室"
-        description="与已发布的 Agent 对话，实时观察模型与工具的协作。"
-        action={
-          <Button variant="secondary" onClick={newSession} disabled={busy}>
-            <Plus size={16} />
-            新建对话
-          </Button>
-        }
-      />
-      <div className="playground-layout">
-        <aside className="session-sidebar">
-          <div className="session-heading">
-            <span>最近会话</span>
-            <button
-              className="icon-button"
-              aria-label="刷新会话"
-              onClick={() => void sessions.reload()}
-            >
-              <RefreshCw size={14} />
-            </button>
-          </div>
-          {sessions.error && (
-            <div className="session-error">{sessions.error}</div>
-          )}
-          {sessions.loading && !sessions.data ? (
-            <div className="session-loading">
-              <LoaderCircle className="spin" size={18} />
-            </div>
-          ) : sessions.data?.items.length ? (
-            <div className="session-list">
-              {sessions.data.items.map((session) => (
-                <button
-                  key={session.id}
-                  className={`session-item ${session.id === sessionId ? "selected" : ""}`}
-                  onClick={() => chooseSession(session)}
-                  disabled={busy}
-                >
-                  <MessageSquare size={16} />
-                  <span>
-                    <strong>{session.title || "新会话"}</strong>
-                    <small>{dateTime(session.created_at)}</small>
-                  </span>
-                </button>
-              ))}
-            </div>
-          ) : (
-            <div className="session-empty">
-              <MessageSquare size={22} />
-              <p>你的会话将保存在这里</p>
-            </div>
-          )}
-          <div className="session-foot">
-            <ShieldNote />
-          </div>
-        </aside>
-        <section className="chat-panel">
-          <div className="mobile-session-picker">
-            <MessageSquare size={14} />
-            <select
-              aria-label="切换最近会话"
-              value={sessionId ?? ""}
-              disabled={busy}
-              onChange={(event) => {
-                const session = sessions.data?.items.find(
-                  (item) => item.id === event.target.value,
-                );
-                if (session) chooseSession(session);
-                else newSession();
-              }}
-            >
-              <option value="">新对话</option>
-              {sessions.data?.items.map((session) => (
-                <option key={session.id} value={session.id}>
-                  {session.title || "新会话"}
-                </option>
-              ))}
-            </select>
-          </div>
-          <div className="chat-heading">
-            <div className="chat-agent-icon">
-              <Bot size={23} />
-            </div>
-            <div className="chat-agent-select">
-              <label htmlFor="active-agent">当前 Agent</label>
-              <div>
-                <select
-                  id="active-agent"
-                  value={detail?.agent_id ?? agentId}
-                  disabled={Boolean(sessionId) || busy || Boolean(activeRun)}
-                  onChange={(event) => {
-                    setAgentId(event.target.value);
-                    setModelId("");
-                  }}
-                >
-                  <option value="" disabled>
-                    选择已发布的 Agent
-                  </option>
-                  {published.map((agent) => (
-                    <option value={agent.id} key={agent.id}>
-                      {agent.name}
-                    </option>
-                  ))}
-                </select>
-                <ChevronDown size={14} />
-              </div>
-            </div>
-            <div className="chat-heading-right">
-              {activeRun ? (
-                <Badge status={activeRun.status} />
-              ) : selectedAgent?.published_version ? (
-                <span className="chat-version">
-                  已发布 v{selectedAgent.published_version}
-                </span>
-              ) : null}
-              {activeRun && (
-                <span
-                  className={`connection ${connection}`}
-                  title={
-                    connection === "retrying"
-                      ? "正在恢复连接，运行仍在服务端继续"
-                      : "实时事件连接"
-                  }
-                >
-                  <i />
-                  {connection === "open"
-                    ? "实时连接"
-                    : connection === "retrying"
-                      ? "重新连接中"
-                      : "连接中"}
-                </span>
-              )}
-            </div>
-          </div>
-          <div className="chat-model-bar">
-            <label htmlFor="run-model">本次使用模型</label>
-            <select
-              id="run-model"
-              value={modelId}
-              disabled={busy || Boolean(activeRun)}
-              onChange={(event) => setModelId(event.target.value)}
-            >
-              <option value="">
-                {selectedAgent?.model_id ? "跟随 Agent 设置" : "自动选择（优先默认模型）"}
-              </option>
-              {models.data?.items.filter((model) => model.active).map((model) => (
-                <option key={model.id} value={model.id}>
-                  {model.name}{model.is_default ? " · 默认" : ""}
-                </option>
-              ))}
-            </select>
-            <button
-              type="button"
-              className="icon-button"
-              aria-label="刷新可用模型"
-              onClick={() => void models.reload()}
-            >
-              <RefreshCw size={14} />
-            </button>
-            {(activeRun?.model_alias || latestRun?.model_alias) && (
-              <small>最近运行：{activeRun?.model_alias || latestRun?.model_alias}</small>
-            )}
-            {!models.loading && models.data &&
-              !models.data.items.some((model) => model.active) && (
-                <a href={tenantLink("models", tenantScope)}>请联系管理员授予可用模型</a>
-              )}
-          </div>
-          <div
-            className="chat-messages"
-            aria-live="polite"
-            aria-busy={Boolean(activeRun)}
-          >
-            {loading && !detail ? (
-              <div className="loading">
-                <LoaderCircle className="spin" size={22} />
-                正在恢复会话…
-              </div>
-            ) : !detail?.messages.length && !liveText ? (
-              <div className="chat-welcome">
-                <div className="chat-welcome-icon">
-                  <Sparkles size={33} strokeWidth={1.6} />
-                </div>
-                <span className="eyebrow">A SPACE FOR YOUR IDEAS</span>
-                <h2>
-                  {selectedAgent
-                    ? `与${selectedAgent.name}一起探索`
-                    : "从一个好问题开始"}
-                </h2>
-                <p>
-                  {selectedAgent?.description ||
-                    "选择已发布的 Agent，开始一段新的对话。"}
-                  <br />
-                  每次调用的用量和费用都将自动记录。
-                </p>
-                {published.length === 0 && !agents.loading ? (
-                  <div className="inline-note">
-                    还没有已发布的 Agent。请先创建并发布 Agent。
-                  </div>
-                ) : (
-                  <div className="prompt-suggestions">
-                    {(selectedAgent?.starter_prompts?.length
-                      ? selectedAgent.starter_prompts
-                      : [
-                          "请介绍你可以帮助我完成哪些工作",
-                          "帮我把一个想法拆解成可执行的计划",
-                        ]).map((prompt) => (
-                      <button
-                        key={prompt}
-                        onClick={() => setDraft(prompt)}
-                        disabled={Boolean(activeRun)}
-                      >
-                        <MessageSquare size={15} />
-                        {prompt}
-                        <ArrowUp size={14} />
-                      </button>
-                    ))}
-                  </div>
-                )}
-              </div>
-            ) : (
-              <div className="message-list">
-                {detail?.messages
-                  .filter((message) =>
-                    ["user", "assistant"].includes(message.role),
-                  )
-                  .map((message, index) => (
-                    <div
-                      key={`${sessionId}-${index}`}
-                      className={`chat-message ${message.role}`}
-                    >
-                      <span className={`message-avatar ${message.role}`}>
-                        {message.role === "user" ? (
-                          <UserRound size={17} />
-                        ) : (
-                          <Bot size={18} />
-                        )}
-                      </span>
-                      <div>
-                        <div className="message-meta">
-                          <strong>
-                            {message.role === "user"
-                              ? "你"
-                              : (selectedAgent?.name ?? "Agent")}
-                          </strong>
-                          {message.created_at && (
-                            <time>{dateTime(message.created_at)}</time>
-                          )}
-                        </div>
-                        <div className="message-body">{message.content}</div>
-                      </div>
-                    </div>
-                  ))}
-                {activeRun && (
-                  <div className="chat-message assistant">
-                    <span className="message-avatar assistant">
-                      <Bot size={18} />
-                    </span>
-                    <div>
-                      <div className="message-meta">
-                        <strong>{selectedAgent?.name ?? "Agent"}</strong>
-                        <span className="muted">
-                          {activeRun.status === "queued"
-                            ? "等待执行"
-                            : "正在回复"}
-                        </span>
-                      </div>
-                      <div className="message-body">
-                        {liveText || (
-                          <span className="thinking-dots">
-                            <i />
-                            <i />
-                            <i />
-                          </span>
-                        )}
-                        {liveText && <span className="typing-cursor" />}
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {latestRun?.error && !activeRun && (
-              <div className="run-error-summary">
-                <AlertCircle size={15} />
-                <span>{latestRun.error}</span>
-              </div>
-            )}
-            <div ref={bottom} />
-          </div>
-          {(events.length > 0 || activeRun) && (
-            <div className="run-events">
-              <button onClick={() => setShowEvents((value) => !value)}>
-                <Terminal size={14} />
-                <span>运行过程</span>
-                <span className="event-count">{events.length}</span>
-                <ChevronDown
-                  size={14}
-                  className={showEvents ? "rotated" : ""}
-                />
-              </button>
-              {showEvents && (
-                <div className="event-list">
-                  {events.length ? (
-                    events.map((event) => (
-                      <div className="event-row" key={event.sequence}>
-                        {event.type.startsWith("tool.") ? (
-                          <Wrench size={13} />
-                        ) : event.type === "run.completed" ? (
-                          <Check size={13} />
-                        ) : (
-                          <span className="event-dot" />
-                        )}
-                        <span>{eventLabel(event)}</span>
-                        <small>#{event.sequence}</small>
-                      </div>
-                    ))
-                  ) : (
-                    <span className="muted">等待 Worker 开始执行…</span>
-                  )}
-                </div>
-              )}
-            </div>
-          )}
-          {effectiveError && (
-            <div className="chat-error" role="alert">
-              <AlertCircle size={16} />
-              <span>{effectiveError}</span>
-              {sessionId && (
-                <button onClick={() => void loadSession(sessionId)}>
-                  重新加载
-                </button>
-              )}
-            </div>
-          )}
-          {connection === "retrying" && (
-            <div className="chat-reconnect">
-              <LoaderCircle size={14} className="spin" />
-              <span>连接暂时中断，正在自动恢复；Agent 会继续运行。</span>
-              <button onClick={() => setReconnect((value) => value + 1)}>
-                立即重连
-              </button>
-            </div>
-          )}
-          <form className="chat-composer" onSubmit={send}>
-            <div className="composer-input">
-              <textarea
-                aria-label="发送给 Agent 的消息"
-                placeholder={
-                  selectedAgent
-                    ? `发送消息给${selectedAgent.name}…`
-                    : "请先选择一个已发布的 Agent"
-                }
-                rows={2}
-                value={draft}
-                disabled={busy || loading || !agentId}
-                maxLength={32000}
-                onChange={(event) => setDraft(event.target.value)}
-                onKeyDown={(event) => {
-                  if (
-                    event.key === "Enter" &&
-                    !event.shiftKey &&
-                    !event.nativeEvent.isComposing
-                  ) {
-                    event.preventDefault();
-                    if (!activeRun) void send(event);
-                  }
-                }}
-              />
-              <div className="composer-bottom">
-                <span>Enter 发送 · Shift + Enter 换行</span>
-                {activeRun ? (
-                  <Button
-                    type="button"
-                    variant="secondary"
-                    onClick={() => void cancel()}
-                    busy={canceling}
-                  >
-                    <CircleStop size={15} />
-                    停止生成
-                  </Button>
-                ) : (
-                  <Button
-                    type="submit"
-                    disabled={!draft.trim() || !agentId || loading}
-                    busy={busy}
-                    aria-label="发送消息"
-                  >
-                    <ArrowUp size={18} />
-                  </Button>
-                )}
-              </div>
-            </div>
-            <div className="composer-note">
-              回答由模型生成，请核实关键信息。取消不会自动免除已产生的费用。
-            </div>
-          </form>
-        </section>
+  const effectiveError = error || streamError || agents.error || models.error || (!activeRun && latestRun && ["failed", "expired", "interrupted"].includes(latestRun.status) ? latestRun.error : "");
+  const hasMessages = Boolean(detail?.messages.length || activeRun || liveText);
+  const availableModels = models.data?.items.filter((model) => model.active) ?? [];
+  const automaticModel = availableModels.find((model) => model.id === selectedAgent?.model_id) ?? availableModels.find((model) => model.is_default);
+  const recentSessions = sessions.data?.items.filter((session) => (session.title || "新对话").toLocaleLowerCase().includes(historyQuery.toLocaleLowerCase())) ?? [];
+  const suggestions = selectedAgent?.starter_prompts?.length ? selectedAgent.starter_prompts.slice(0, 3) : [
+    "请介绍你可以帮我完成哪些工作", "帮我把一个想法整理成行动计划", "把复杂的问题解释得简单一些",
+  ];
+  return <section className="pg-workspace" aria-label="Playground">
+    <div className="pg-toolbar">
+      <h1 className="sr-only">Playground</h1>
+      <Select id="active-agent" className="pg-agent-picker" variant="quiet" icon={<Bot size={18} />} aria-label="当前 Agent"
+        value={detail?.agent_id ?? agentId} disabled={Boolean(sessionId) || busy || Boolean(activeRun) || agents.loading}
+        title={sessionId ? "新建对话后可切换 Agent" : "选择已发布的 Agent"} searchable
+        onChange={(event) => { setAgentId(event.target.value); setModelId(""); }}>
+        <option value="" disabled>选择 Agent</option>
+        {published.map((agent) => <option value={agent.id} key={agent.id} data-description={agent.description}>{agent.name}</option>)}
+      </Select>
+      <div className="pg-toolbar-actions">
+        {(events.length > 0 || activeRun) && <button className="pg-toolbar-button" onClick={() => setShowEvents(true)} aria-label="运行详情">
+          <Terminal size={17} /><span>运行详情</span>
+        </button>}
+        <button className="pg-toolbar-button" onClick={() => { setHistoryQuery(""); setHistoryOpen(true); void sessions.reload(); }} aria-label="历史对话">
+          <History size={18} /><span>历史对话</span>
+        </button>
+        <button className="pg-toolbar-button pg-new-chat" onClick={newSession} disabled={busy} aria-label="新建对话">
+          <Plus size={18} /><span>新建对话</span>
+        </button>
       </div>
-    </>
-  );
+    </div>
+    <div className={`pg-body ${hasMessages ? "has-messages" : "is-empty"}`}>
+      <div ref={viewport} className="pg-messages" aria-live="polite" aria-busy={Boolean(activeRun) || loading}
+        onScroll={(event) => {
+          const element = event.currentTarget;
+          following.current = element.scrollHeight - element.scrollTop - element.clientHeight < 80;
+          setShowLatest(!following.current);
+        }}>
+        {loading && !detail ? <div className="pg-loading" role="status"><LoaderCircle size={21} className="spin" />正在恢复对话…</div>
+          : !hasMessages ? <div className="pg-welcome">
+            <div className="pg-greeting">你好{name ? `，${name}` : ""}</div>
+            <h2>今天想聊些什么？</h2>
+            {!agents.loading && !published.length && <p className="pg-empty-note">还没有已发布的 Agent。<a href={tenantLink("agents", tenantScope)}>先去创建并发布</a></p>}
+          </div> : <div className="pg-message-list">
+            {detail?.messages.filter((message) => ["user", "assistant"].includes(message.role)).map((message, index) => <article
+              key={message.id ?? `${sessionId}-${message.role}-${message.created_at ?? index}`}
+              className={`pg-message ${message.role}`} aria-label={message.role === "user" ? "你的消息" : "Agent 的回复"}>
+              {message.role === "assistant" && <span className="pg-assistant-icon"><Sparkles size={22} strokeWidth={1.7} /></span>}
+              <div className="pg-message-content">
+                <div className="pg-message-text">{message.content}</div>
+                {message.role === "assistant" && <button className="pg-copy icon-button" aria-label="复制回复" onClick={() => {
+                  void navigator.clipboard.writeText(message.content).then(() => toast("回复已复制")).catch(() => toast("无法复制，请手动选择文本", "error"));
+                }}><Copy size={15} /></button>}
+              </div>
+            </article>)}
+            {activeRun && <article className="pg-message assistant" aria-label="Agent 正在回复">
+              <span className="pg-assistant-icon"><Sparkles size={22} strokeWidth={1.7} /></span>
+              <div className="pg-message-content">
+                {liveText ? <div className="pg-message-text">{liveText}<span className="typing-cursor" /></div>
+                  : <div className="pg-thinking" role="status"><span className="thinking-dots"><i /><i /><i /></span>{activeRun.status === "queued" ? "等待执行" : "正在思考"}</div>}
+              </div>
+            </article>}
+          </div>}
+      </div>
+      {showLatest && hasMessages && <button className="pg-jump-latest" aria-label="回到最新消息" onClick={() => {
+        following.current = true; setShowLatest(false);
+        if (viewport.current) viewport.current.scrollTop = viewport.current.scrollHeight;
+      }}><ArrowDown size={17} />最新消息</button>}
+      <div className="pg-compose-area">
+        {effectiveError && <div className="pg-notice error" role="alert"><AlertCircle size={17} /><span>{effectiveError}</span>
+          <button onClick={() => { if (sessionId) void loadSession(sessionId); void agents.reload(); void models.reload(); }}>重新加载</button>
+        </div>}
+        {connection === "retrying" && <div className="pg-notice reconnect" role="status"><LoaderCircle size={16} className="spin" />
+          <span>正在恢复连接，Agent 仍在运行。</span><button onClick={() => reconnect()}>立即重连</button>
+        </div>}
+        <form className="pg-composer" onSubmit={send}>
+          <textarea ref={input} aria-label="发送给 Agent 的消息" placeholder={selectedAgent ? `向${selectedAgent.name}提问` : "选择一个 Agent，开始对话"}
+            rows={2} value={draft} disabled={busy || loading || !agentId} maxLength={32000}
+            onChange={(event) => setDraft(event.target.value)} onKeyDown={(event) => {
+              if (event.key === "Enter" && !event.shiftKey && !event.nativeEvent.isComposing) {
+                event.preventDefault(); if (!activeRun) void send(event);
+              }
+            }} />
+          <div className="pg-composer-toolbar">
+            <Select id="run-model" variant="quiet" className="pg-model-picker" aria-label="本次使用模型" icon={<Sparkles size={15} />}
+              value={modelId} disabled={busy || Boolean(activeRun) || models.loading} searchable onChange={(event) => setModelId(event.target.value)}>
+              <option value="">{automaticModel ? `${automaticModel.name} · 自动` : selectedAgent?.model_id ? "跟随 Agent 设置" : "自动选择模型"}</option>
+              {availableModels.map((model) => <option key={model.id} value={model.id} data-description={model.alias}>{model.name}{model.is_default ? " · 默认" : ""}</option>)}
+            </Select>
+            <span className="pg-keyboard-hint">Enter 发送</span>
+            {activeRun ? <Button type="button" variant="secondary" className="pg-stop" onClick={() => void cancel()} busy={canceling}
+              title="停止生成不会免除已产生的费用"><CircleStop size={17} /><span>停止生成</span></Button>
+              : <Button type="submit" className="pg-send" aria-label="发送消息" disabled={!draft.trim() || !agentId || loading} busy={busy}>
+                {!busy && <ArrowUp size={21} />}
+              </Button>}
+          </div>
+        </form>
+        {!hasMessages && published.length > 0 && <div className="pg-suggestions" aria-label="推荐问题">
+          {suggestions.map((prompt) => <button key={prompt} disabled={busy || loading} onClick={() => { setDraft(prompt); input.current?.focus(); }}>
+            <MessageSquare size={15} /><span>{prompt}</span>
+          </button>)}
+        </div>}
+        {!models.loading && models.data && !availableModels.length && <p className="pg-empty-note"><a href={tenantLink("models", tenantScope)}>暂无可用模型，请联系管理员授权</a></p>}
+        <p className="pg-disclaimer">AI 的回答可能不准确，请核实关键信息。</p>
+      </div>
+    </div>
+    {historyOpen && <Modal title="历史对话" close={() => setHistoryOpen(false)}>
+      <div className="pg-history-body">
+        <label className="pg-history-search"><Search size={17} /><input aria-label="搜索历史对话" placeholder="搜索对话" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} /></label>
+        {sessions.error && <div className="pg-notice error" role="alert"><span>{sessions.error}</span><button onClick={() => void sessions.reload()}>重试</button></div>}
+        {sessions.loading && !sessions.data ? <div className="pg-loading"><LoaderCircle size={20} className="spin" />正在加载…</div>
+          : recentSessions.length ? <div className="pg-history-list">{recentSessions.map((session) => <button key={session.id} className={session.id === sessionId ? "selected" : ""} disabled={busy} onClick={() => chooseSession(session)}>
+            <MessageSquare size={17} /><span><strong>{session.title || "新对话"}</strong><small>{dateTime(session.created_at)}</small></span><ChevronRight size={16} />
+          </button>)}</div> : <div className="pg-history-empty">{historyQuery ? "没有找到相关对话，试试其他关键词。" : "开始聊天后，对话会保存在这里。"}</div>}
+      </div>
+    </Modal>}
+    {showEvents && <Modal title="运行详情" close={() => setShowEvents(false)}>
+      <div className="pg-run-details">
+        <p className="pg-run-status">{activeRun ? connection === "retrying" ? "正在恢复实时连接" : "运行进行中" : "本次运行已结束"}</p>
+        {events.length ? events.map((event) => <div className="pg-event" key={event.id}>
+          {event.event.type.startsWith("TOOL_CALL_") ? <Wrench size={15} /> : event.event.type === "RUN_FINISHED" ? <Check size={15} /> : <span className="pg-event-dot" />}
+          <span>{eventLabel(event.event)}</span>
+        </div>) : <div className="pg-loading">等待 Agent 开始执行…</div>}
+        <a className="pg-run-link" href={tenantLink("runs", tenantScope)}>查看运行记录<ChevronRight size={15} /></a>
+      </div>
+    </Modal>}
+  </section>;
 }
-function ShieldNote() {
-  return (
-    <>
-      <Check size={14} />
-      <span>
-        会话与运行事件持续保存
-        <br />
-        关闭页面不会取消运行
-      </span>
-    </>
-  );
-}
-function eventLabel(event: RunEvent) {
-  const data = event.data ?? {};
-  const label: Record<string, string> = {
-    "run.started": "Agent 开始执行",
-    "run.queued": "运行已进入队列",
-    "run.completed": "运行完成",
-    "run.failed": "运行失败",
-    "run.cancelled": "运行已取消",
-    "run.interrupted": "运行已中断",
-    "run.expired": "运行已超时",
-    "run.succeeded": "运行完成",
-    "usage.updated": "调用用量与费用已更新",
-    "step.started": "开始下一步骤",
-    "step.completed": "步骤完成",
-    "step.finished": "步骤完成",
-    "model.started": "正在调用模型",
-    "model.completed": "模型调用完成",
-  };
-  if (event.type.startsWith("tool."))
-    return `${event.type === "tool.started" ? "正在调用" : "工具完成"}：${String(data.name ?? data.tool ?? "工具")}`;
-  return label[event.type] ?? event.type;
+function eventLabel(event: AGUIEvent): string {
+  switch (event.type) {
+    case "RUN_STARTED": return "运行已接收";
+    case "RUN_FINISHED": return event.outcome?.type === "cancelled" ? "运行已取消" : "运行完成";
+    case "RUN_ERROR": return "运行失败";
+    case "STEP_STARTED": return "开始下一步骤";
+    case "STEP_FINISHED": return "步骤结束";
+    case "TOOL_CALL_START": return `正在调用：${event.toolCallName}`;
+    case "TOOL_CALL_RESULT": return "工具已返回结果";
+    case "STATE_SNAPSHOT": {
+      const value: unknown = event.snapshot;
+      if (value && typeof value === "object" && "run" in value && value.run && typeof value.run === "object" && "status" in value.run) {
+        const status: Record<string, string> = { queued: "运行已进入队列", running: "Agent 开始执行", cancelling: "正在停止运行", cancelled: "运行已取消", succeeded: "运行完成", failed: "运行失败", expired: "运行已超时" };
+        return status[String(value.run.status)] ?? "运行状态已更新";
+      }
+      return "运行状态已更新";
+    }
+    case "CUSTOM": return ({ "platform.queued": "运行已进入队列", "platform.model": "正在调用模型", "platform.usage": "调用用量与费用已更新" } as Record<string, string>)[event.name] ?? "运行进度已更新";
+    default: return event.type;
+  }
 }

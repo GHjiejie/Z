@@ -25,6 +25,7 @@ dependencies = [
     "redis>=5,<7",
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.35.0",
+    "ag-ui-protocol==1.0.0",
 ]
 
 [dependency-groups]

@@ -9,6 +9,7 @@ import threading
 import time
 import unittest
 from concurrent.futures import ThreadPoolExecutor
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -45,6 +46,25 @@ class LogsAdapter:
             callback, self.callback = self.callback, None
             callback()
         return copy.deepcopy(self.payload)
+
+
+class DateFilteredLogsAdapter(LogsAdapter):
+    """LiteLLM v2 parses UTC dates and applies inclusive startTime bounds."""
+
+    def _request(self, path):
+        query = parse_qs(urlsplit(path).query)
+        start, end = (
+            datetime.strptime(query[name][0], "%Y-%m-%d").replace(tzinfo=UTC)
+            for name in ("start_date", "end_date")
+        )
+        payload = super()._request(path)
+        payload["data"] = [
+            row
+            for row in payload["data"]
+            if start <= datetime.fromisoformat(row["startTime"]) <= end
+        ]
+        payload["total"] = len(payload["data"])
+        return payload
 
 
 class MeteringCostTests(unittest.TestCase):
@@ -438,6 +458,74 @@ class MeteringCostTests(unittest.TestCase):
             metering.apply_ready_evidence(self.db, self.tenant, "worker-test")
         )
         self.assertEqual(len(self.billing.ledger(self.tenant)), 2)
+
+    def test_log_dates_recover_fractional_usage_across_utc_day_boundaries(self):
+        cases = (
+            (
+                "2026-10-10T00:00:00.000001+08:00",
+                "2026-10-09T23:59:59.999999+00:00",
+                "2026-10-09T16:00:00.000001+00:00",
+                "2026-10-09",
+                "2026-10-10",
+            ),
+            (
+                "2026-10-09T23:59:59.999999-07:00",
+                "2026-10-10T07:00:00.000001+00:00",
+                "2026-10-10T07:00:00.000001+00:00",
+                "2026-10-10",
+                "2026-10-11",
+            ),
+            (
+                "2026-10-09T23:59:59.999999+00:00",
+                "2026-10-10T00:00:00.000001+00:00",
+                "2026-10-10T00:00:00.000001+00:00",
+                "2026-10-09",
+                "2026-10-11",
+            ),
+            (
+                "2026-10-09T23:59:59.999999",
+                "2026-10-10T00:00:00.000001+00:00",
+                "2026-10-09T23:59:59.999999+00:00",
+                "2026-10-09",
+                "2026-10-11",
+            ),
+        )
+        for index, (created, clock, log_time, start, end) in enumerate(cases):
+            with self.subTest(created=created, clock=clock):
+                attempt = self.prepare_log_job(f"date-boundary-{index}")
+                with self.db.transaction("tenant:" + self.tenant) as connection:
+                    connection.execute(
+                        rt.call_attempts.update()
+                        .where(rt.call_attempts.c.id == attempt)
+                        .values(created_at=created)
+                    )
+                adapter = DateFilteredLogsAdapter(
+                    {"data": [self.log(attempt, startTime=log_time)]}
+                )
+                reconciler = metering.MeteringReconciler(
+                    self.db, self.settings, adapter
+                )
+                with patch.object(metering, "datetime", wraps=datetime) as frozen:
+                    frozen.now.return_value = datetime.fromisoformat(clock)
+                    self.assertTrue(reconciler.process_one())
+                query = parse_qs(urlsplit(adapter.requests[0]).query)
+                self.assertEqual(query["start_date"], [start])
+                self.assertEqual(query["end_date"], [end])
+                self.assertEqual(
+                    query["end_user"], ["agent-platform-attempt-" + attempt]
+                )
+                job = next(
+                    row
+                    for row in self.rows(mt.reconciliation_jobs)
+                    if row["attempt_id"] == attempt
+                )
+                self.assertEqual(job["status"], "evidence_ready")
+                self.assertEqual(
+                    self.billing.reservations(self.tenant)[index]["status"],
+                    "unresolved",
+                )
+        self.assertEqual(len(self.rows(mt.usage_receipts)), len(cases))
+        self.assertEqual(len(self.billing.ledger(self.tenant)), 1)
 
     def test_logs_with_wrong_attempt_or_route_do_not_settle(self):
         self.prepare_log_job()

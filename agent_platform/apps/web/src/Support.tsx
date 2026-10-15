@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { useEffect, useRef, useState } from "react";
 import { RefreshCw, ShieldCheck, UserCog } from "lucide-react";
 import { api, dateTime, write } from "./api";
@@ -218,15 +219,15 @@ export function PlatformRolesPanel({ changed }: { changed: () => Promise<void> }
     {editing && user && <Modal title={`平台角色：${user.email}`} close={() => setEditing(false)}>
       <Form close={() => setEditing(false)} label="确认变更" submit={async (form) => { await write(`/api/v2/platform/users/${user.id}/roles`, { role: formValue(form, "role"), active: formValue(form, "active") === "true", reason: formValue(form, "reason") }); setEditing(false); await Promise.all([find(user.email), changed()]); toast("平台角色已更新"); }}>
         <Field label="平台角色">
-          <select name="role" defaultValue="platform_support">
+          <Select name="role" defaultValue="platform_support">
             {Object.entries(roleNames).map(([role, label]) => <option key={role} value={role}>
-              {label}</option>)}</select>
+              {label}</option>)}</Select>
         </Field>
         <Field label="操作">
-          <select name="active" defaultValue="true">
+          <Select name="active" defaultValue="true">
             <option value="true">授予角色</option>
             <option value="false">撤销角色</option>
-          </select>
+          </Select>
         </Field>
         <Field label="变更原因">
           <textarea name="reason" minLength={5} maxLength={500} rows={3} required />

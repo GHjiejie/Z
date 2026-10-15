@@ -17,11 +17,11 @@ flowchart TB
     WEB -.->|管理员打开独立登录页面| UI
 
     subgraph PLATFORM["Agent 平台：共享 Python 业务模块"]
-        API["FastAPI API<br/>登录会话、CSRF、权限、REST / SSE"]
+        API["FastAPI API<br/>登录会话、CSRF、权限、REST / AG-UI"]
         BUSINESS["业务管理<br/>用户、模型目录、Agent 发布、会话、统计"]
         WORKER["Worker + LangGraph Runtime<br/>任务领取、租约、工具循环、取消"]
         BILLING["准入与计费<br/>权限复核、限流、预算、预占、结算、人工对账"]
-        CLIENT["模型客户端<br/>Chat Completions 流式调用、usage 校验"]
+        CLIENT["模型客户端<br/>Responses 流式调用、usage 校验"]
         TOOLS["白名单工具<br/>calculator / current_time"]
         API --> BUSINESS
         API --> BILLING
@@ -31,7 +31,7 @@ flowchart TB
     end
 
     WEB -->|同源 Cookie / REST| API
-    API -->|持久事件经 SSE 输出| WEB
+    API -->|持久事件转为 AG-UI SSE| WEB
     BUSINESS --> DB[("平台数据库<br/>用户、模型、Agent、Run、事件、调用")]
     API -->|读取事件和运行状态| DB
     WORKER -->|领取 Run、心跳、写入结果与事件| DB
@@ -89,9 +89,9 @@ flowchart TB
         START -->|启动并等待健康检查| LLM
         START -->|引导或验证受限运行 Key| LLM
         START -->|只注入运行 Key 和网关地址| API
-        API -->|HTTP /v1/chat/completions| LLM
+        API -->|HTTP /v1/responses| LLM
     end
-    BROWSER -->|平台页面 / REST / SSE| API
+    BROWSER -->|平台页面 / REST / AG-UI| API
     BROWSER -->|独立登录 /ui| LLM
     LLM -->|HTTPS| UPSTREAM["上游模型服务"]
 ```
@@ -138,7 +138,7 @@ flowchart TB
     LLM -->|HTTPS| PROVIDER["模型供应商 / 私有兼容服务"]
 ```
 
-图中虚线表示启动依赖。API 和 Worker 通过数据库中的 Run、事件和状态协作，没有另设消息队列。SSE 当前每 250ms 轮询持久事件并支持游标重放，没有 Redis Pub/Sub 唤醒链路。
+图中虚线表示启动依赖。API 和 Worker 通过数据库中的 Run、事件和状态协作，没有另设消息队列。AG-UI SSE 按持久游标重放，提交后通知负责唤醒，通知丢失时以 2 秒回放间隔恢复；独立租约与撤权检查不依赖客户端消费速度。
 
 PostgreSQL、Redis 不向宿主机发布端口；API 与 LiteLLM 默认只绑定本机回环地址。平台迁移与 LiteLLM 自身迁移分离。对外部署所需的 HTTPS 入口、备份调度和监控系统属于额外部署工作，当前 Compose 未包含这些服务。
 
@@ -158,10 +158,10 @@ sequenceDiagram
     participant G as LiteLLM Proxy
     participant P as 上游模型
 
-    U->>A: 创建 Run（会话、输入、Idempotency-Key）
-    A->>D: 权限检查；事务写入 Run、配置价格快照、初始事件
-    A-->>U: run_id 和 queued 状态
-    U->>A: 订阅 SSE（重连携带事件游标）
+    U->>A: POST 会话 AG-UI 地址（RunAgentInput、固定 runId）
+    A->>D: 权限检查；事务写入 Run、配置价格快照、初始事件和 SSE 名额
+    A-->>U: RUN_STARTED、STATE_SNAPSHOT、MESSAGES_SNAPSHOT
+    Note over U,A: 断线通过 GET AG-UI 扩展和复合游标恢复同一次运行
     W->>D: 领取 queued Run，设置租约与 fencing token
     loop 每轮模型调用，受步数 / 时间 / 费用上限约束
         W->>D: 注册模型调用 call_id
@@ -178,13 +178,13 @@ sequenceDiagram
             W->>B: 释放预占并记录原因
             B->>D: reservation 变为 released
         else 已开始发送请求
-            W->>G: 受限 Key + 模型别名 + Chat Completions 请求
+            W->>G: 受限 Key + 模型别名 + Responses 请求
             G->>P: 使用上游凭据转发
             P-->>G: 输出 / 工具调用 / usage（可能中断）
             G-->>W: 流式响应和网关用量（可能不完整）
             W->>D: 批量写入已收到的 message.delta 等持久事件
             A->>D: 按游标读取事件并复核访问权限
-            A-->>U: SSE 增量事件
+            A-->>U: AG-UI 文本、工具与用量事件
             alt 收到完整结果和网关用量
                 W->>B: 按 call_id 幂等结算
                 B->>D: 同事务扣费、释放预占差额、记录账本与用量
@@ -200,7 +200,7 @@ sequenceDiagram
     end
     W->>D: 同事务保存最终运行状态与终态事件
     A->>D: 读取剩余事件和最终状态
-    A-->>U: 输出终态事件并结束 SSE
+    A-->>U: RUN_FINISHED 或 RUN_ERROR，结束 SSE
 ```
 
 计费模块在结算/释放时也调整已启用的 Redis 限流记录，图中省略了这些收尾请求。数据库负责持久费用事实；Redis 与数据库之间不是分布式事务，准入失败时执行 Redis 回滚补偿。

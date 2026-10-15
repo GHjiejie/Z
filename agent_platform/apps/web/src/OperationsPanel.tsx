@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Download, FileDown, RefreshCw, Trash2 } from "lucide-react";
 import {
@@ -142,16 +143,16 @@ export function TenantExportsPanel({ user }: { user: User }) {
         toast("导出申请已提交。");
         await resource.reload();
       }}>
-        <Field label="数据类型"><select value={kind} onChange={(event) => {
+        <Field label="数据类型"><Select value={kind} onChange={(event) => {
           const value = event.target.value as "calls" | "runs";
           setKind(value);
           if (value === "runs") setScope("self");
-        }}><option value="calls">调用元数据与费用</option><option value="runs">运行元数据</option></select></Field>
-        <Field label="数据范围" hint="组织范围仅导出调用元数据；运行记录只可导出自己的。"><select value={kind === "runs" ? "self" : scope}
+        }}><option value="calls">调用元数据与费用</option><option value="runs">运行元数据</option></Select></Field>
+        <Field label="数据范围" hint="组织范围仅导出调用元数据；运行记录只可导出自己的。"><Select value={kind === "runs" ? "self" : scope}
           onChange={(event) => setScope(event.target.value as "self" | "tenant")}>
           <option value="self">仅本人</option>
           {kind === "calls" && organizationAllowed && <option value="tenant">当前组织全部调用</option>}
-        </select></Field>
+        </Select></Field>
       </Form>
     </Modal>}
   </>;

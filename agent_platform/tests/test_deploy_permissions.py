@@ -6,7 +6,11 @@ from pathlib import Path
 
 import yaml
 
+from agent_platform.deploy.bootstrap_gateway_key import (
+    ALLOWED_ROUTES as BOOTSTRAP_ALLOWED_ROUTES,
+)
 from agent_platform.deploy.database_permissions import ROLE_NAMES, ROLE_PRIVILEGES
+from agent_platform.modules.gateway_control import ALLOWED_ROUTES
 
 
 class ComposeStoragePermissionsTests(unittest.TestCase):
@@ -15,6 +19,11 @@ class ComposeStoragePermissionsTests(unittest.TestCase):
         path = Path(__file__).resolve().parents[1] / "deploy/compose.yml"
         cls.compose = yaml.safe_load(path.read_text())
         cls.services = cls.compose["services"]
+
+    def test_bootstrap_and_managed_runtime_keys_only_allow_responses(self):
+        expected = ["/responses", "/v1/responses"]
+        self.assertEqual(BOOTSTRAP_ALLOWED_ROUTES, expected)
+        self.assertEqual(ALLOWED_ROUTES, expected)
 
     def test_api_reads_same_export_volume_that_maintenance_writes(self):
         api_mounts = self.services["api"]["volumes"]

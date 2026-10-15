@@ -24,7 +24,11 @@ import httpx
 from cryptography.fernet import Fernet
 
 from agent_platform.modules.runtime.engine import execute_agent
-from agent_platform.modules.runtime.gateway import Gateway, GatewayError
+from agent_platform.modules.runtime.gateway import (
+    Gateway,
+    GatewayError,
+    UsageUnavailable,
+)
 
 ROOT = Path(__file__).resolve().parents[2]
 DEPLOY = ROOT / "agent_platform/deploy"
@@ -84,20 +88,22 @@ async def verify_gateway(base: str, key: str) -> None:
     assert result.content == "Answer: 4"
     assert (result.input_tokens, result.output_tokens) == (12, 4)
     print("PASS: actual LiteLLM streaming text and complete usage", flush=True)
-    estimated = [
-        event
-        async for event in gateway.stream(
-            [{"role": "user", "content": "missing-usage-test"}],
-            "platform-chat",
-            64,
-            0,
-            [],
-        )
-    ][-1].data
-    print(
-        f"OBSERVED: provider omitted usage; LiteLLM returned {estimated.input_tokens}/{estimated.output_tokens} tokens",
-        flush=True,
-    )
+    try:
+        _ = [
+            event
+            async for event in gateway.stream(
+                [{"role": "user", "content": "missing-usage-test"}],
+                "platform-chat",
+                64,
+                0,
+                [],
+            )
+        ]
+    except UsageUnavailable:
+        pass
+    else:
+        raise AssertionError("Responses without usage must remain unsettled")
+    print("PASS: native Responses without usage remain unsettled", flush=True)
 
     async def emit(_name: str, _data: dict) -> None:
         pass
@@ -129,14 +135,25 @@ async def verify_gateway(base: str, key: str) -> None:
         )
         assert denied.status_code in {401, 403}, denied.status_code
         denied = await client.post(
-            base + "/v1/chat/completions",
+            base + "/v1/responses",
             json={
                 "model": "forbidden-alias",
+                "input": "hello",
+            },
+        )
+        assert denied.status_code in {401, 403}, denied.status_code
+        denied = await client.post(
+            base + "/v1/chat/completions",
+            json={
+                "model": "platform-chat",
                 "messages": [{"role": "user", "content": "hello"}],
             },
         )
         assert denied.status_code in {401, 403}, denied.status_code
-    print("PASS: runtime virtual key rejects management and unlisted model", flush=True)
+    print(
+        "PASS: runtime virtual key rejects management, unlisted model and Chat Completions",
+        flush=True,
+    )
     try:
         _ = [
             event

@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { useRef, useState } from "react";
 import {
   CheckCircle2,
@@ -220,7 +221,7 @@ export function BillingReconciliation({
                 "上游用量尚未得到确认。请根据网关日志、供应商记录或明确核销决定处理。"}
             </div>
             <Field label="处理方式">
-              <select
+              <Select
                 value={action}
                 onChange={(event) => setAction(event.target.value)}
                 required
@@ -230,7 +231,7 @@ export function BillingReconciliation({
                 </option>
                 <option value="confirm">根据证据确认实际用量并结算</option>
                 <option value="write_off">人工核销此次调用并释放预占</option>
-              </select>
+              </Select>
             </Field>
             {action === "confirm" && (
               <>

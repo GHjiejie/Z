@@ -33,7 +33,7 @@ flowchart TD
     Context --> Workspace[工作空间]
     Workspace --> Overview[工作空间概览]
     Workspace --> Agents[Agent 列表与草稿发布]
-    Workspace --> Playground[对话实验室]
+    Workspace --> Playground[Playground]
     Workspace --> Runs[本人的运行记录]
     Context --> Resources[资源与费用]
     Resources --> Models[授权模型目录与选择策略]
@@ -67,7 +67,7 @@ flowchart TD
 | 组织选择/上下文 | `GET /api/v2/me` memberships；`GET T` | `App.tsx`、`types.ts` | 切换时取消请求、SSE、轮询，丢弃旧租户结果；平台身份没有默认组织 |
 | 概览 `#overview` | `GET T/dashboard` | `DashboardPage` | 汇总范围由后端决定，非任意日期或用户筛选；网关配置布尔值不能证明真实可用 |
 | Agent `#agents` | `GET/POST T/agents`、`PATCH T/agents/{id}`、`POST .../publish` | `AgentsPage`、内置 starter prompts | 成员只看到发布版；编辑只改草稿，发布生成版本；没有删除/复制/多 Agent 编排接口 |
-| 对话 `#playground` | 模型/Agent 列表、会话创建/分页/详情、Run 创建/事件/详情/取消 | `Playground.tsx` | Run 202 为排队；同一会话串行；工具仅 calculator/current_time；没有文件附件、RAG、语音或图片接口 |
+| 对话 `#playground` | 模型/Agent 列表、会话创建/分页/详情、AG-UI 运行/恢复、Run 详情/取消 | `Playground.tsx` | AG-UI 状态快照表达排队；同一会话串行；工具仅 calculator/current_time；没有文件附件、RAG、语音或图片接口 |
 | 运行 `#runs` | `GET T/runs`、`GET .../{id}`、会话跳转 | `RunsPage` | 本人运行，不能因是管理员就查看别人的正文；没有 retry/restart 接口 |
 | 模型 `#models` | `GET T/models`、`GET/PUT T/model-policy`、`PATCH T/models/{id}` 仅 active | `ModelsPage` 的非旧管理员分支、`TenantModelPolicy` | 注册/价格/部署在平台入口；模型策略 PUT 需发送完整状态 |
 | 调用 `#usage` | `GET T/usage/calls`，cursor 分页 | `UsagePage` | member 本人；`usage.read_all` 可全组织；页面文本搜索只能搜索已加载行 |
@@ -125,7 +125,7 @@ sequenceDiagram
 
 ```mermaid
 sequenceDiagram
-    participant UI as 对话实验室
+    participant UI as Playground
     participant API as FastAPI
     participant DB as 共享 SQL 数据库
     participant W as Worker
@@ -134,10 +134,9 @@ sequenceDiagram
     participant L as LiteLLM
     UI->>API: POST T/sessions {agent_id,title?}
     API-->>UI: 201 Session
-    UI->>API: POST T/sessions/{id}/runs + Idempotency-Key
+    UI->>API: POST T/sessions/{id}/ag-ui，RunAgentInput
     API->>DB: 校验并保存 queued Run、发布/模型/价格快照、user 消息
-    API-->>UI: 202 Run
-    UI->>API: GET T/runs/{run_id}/events?after=sequence
+    API-->>UI: AG-UI RUN_STARTED、STATE_SNAPSHOT、MESSAGES_SNAPSHOT
     W->>DB: 公平领取 Run、owner/lease/fence
     W->>G: execute_agent，历史 user/assistant
     loop 至多 max_steps 次模型调用
@@ -145,7 +144,7 @@ sequenceDiagram
         W->>DB: 重查执行身份、模型/路由与取消
         W->>B: 层级限流、预算、钱包预占
         B->>DB: 预占与调用证据
-        W->>L: Chat Completions 流，单次尝试
+        W->>L: Responses 流，单次尝试
         L-->>W: text chunks 与完整 usage
         W->>DB: message.delta / usage 事件
         W->>B: 有 usage 则结算；不确定则保留冻结
@@ -153,12 +152,12 @@ sequenceDiagram
     end
     W->>DB: assistant 消息、terminal Run 和终结事件
     API->>DB: 读取持久 run_events
-    API-->>UI: SSE id + {sequence,type,data}
-    UI->>API: 详情轮询/断线后 after 重放
+    API-->>UI: AG-UI 文本、工具、步骤及终结事件
+    UI->>API: 断线 GET T/runs/{id}/ag-ui + Last-Event-ID
     API-->>UI: 权威 Run、cost、error、消息
 ```
 
-浏览器 SSE 与 LangGraph v3 内部事件协议不同；UI 只消费平台持久事件。图中 `T` 仅为 URL 前缀缩写。取消、失败或断线不能显示为“零费用”；不确定 usage 必须保留 pending 财务状态。源码：[main.py:449](../apps/api/main.py#L449)、[engine.py:188](../modules/runtime/engine.py#L188)、[gateway.py:146](../modules/runtime/gateway.py#L146)。
+浏览器使用 [AG-UI 1.0](ag-ui-protocol.md)，与 LangGraph v3 内部事件及上游 Responses 协议分别适配；UI 消费持久事件转换后的官方 AG-UI 事件。图中 `T` 仅为 URL 前缀缩写。取消、失败或断线不能显示为“零费用”；不确定 usage 必须保留 pending 财务状态。源码：[main.py:449](../apps/api/main.py#L449)、[engine.py:188](../modules/runtime/engine.py#L188)、[gateway.py:146](../modules/runtime/gateway.py#L146)。
 
 ### 5.3 网关控制异步完成
 

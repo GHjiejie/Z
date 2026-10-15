@@ -1,10 +1,10 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
-import { Activity, ArrowRight, Bot, Boxes, Building2, CircleHelp, Command, Gauge, LayoutDashboard, LogOut, Menu, MessageSquare, ShieldCheck, SlidersHorizontal, Sparkles, Users, Wallet, X, Mail } from "lucide-react";
+import { Activity, ArrowRight, Bot, Boxes, Building2, Command, Gauge, LayoutDashboard, LogOut, Menu, MessageSquare, PanelLeftClose, PanelLeftOpen, ShieldCheck, SlidersHorizontal, Sparkles, Users, Wallet, X, Mail } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 import { api, getTenantId, resetSession, setCsrf, setTenantId, tenantLink, write } from "./api";
 import type { IdentityUser, Tenant, User } from "./types";
-import { Button, Empty, ErrorState, Field, Form, Loading, Modal, ToastProvider, formValue, useToast } from "./components";
+import { Button, Empty, ErrorState, Field, Form, Loading, Modal, Select, ToastProvider, formValue, useToast } from "./components";
 import { DashboardPage, AgentsPage, ModelsPage, UsagePage, BillingPage, QuotasPage, AuditPage, RunsPage } from "./pages";
 import { Playground } from "./Playground";
 import { InvitationPage, MembersPage, PlatformPage, PlatformGatewayPage, roleLabel } from "./Tenancy";
@@ -16,7 +16,7 @@ type Navigation = { route: Route; title: string; icon: LucideIcon; group: string
 const navigation: Navigation[] = [
   { route: "overview", title: "工作空间概览", icon: LayoutDashboard, group: "工作空间", capability: "runs.execute" },
   { route: "agents", title: "我的 Agent", icon: Bot, group: "工作空间", capability: "agents.read" },
-  { route: "playground", title: "对话实验室", icon: MessageSquare, group: "工作空间", capability: "runs.execute" },
+  { route: "playground", title: "Playground", icon: MessageSquare, group: "工作空间", capability: "runs.execute" },
   { route: "runs", title: "运行记录", icon: Activity, group: "工作空间", capability: "runs.read_own" },
   { route: "models", title: "模型目录", icon: Boxes, group: "资源与费用", capability: "models.read" },
   { route: "usage", title: "调用统计", icon: Gauge, group: "资源与费用", capability: "billing.read_own" },
@@ -52,6 +52,38 @@ function Workspace() {
   const [authError, setAuthError] = useState("");
   const [route, setRoute] = useState<Route>(getRoute);
   const [mobile, setMobile] = useState(false);
+  const [narrow, setNarrow] = useState(() => window.matchMedia("(max-width: 760px)").matches);
+  const [collapsed, setCollapsed] = useState(() => {
+    try { return localStorage.getItem("agent-platform.sidebar-collapsed") === "true"; } catch { return false; }
+  });
+  const sidebarRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    const media = window.matchMedia("(max-width: 760px)");
+    const change = () => { setNarrow(media.matches); setMobile(false); };
+    media.addEventListener("change", change);
+    return () => media.removeEventListener("change", change);
+  }, []);
+  useEffect(() => {
+    try { localStorage.setItem("agent-platform.sidebar-collapsed", String(collapsed)); } catch { /* Storage can be disabled by the browser. */ }
+  }, [collapsed]);
+  useEffect(() => {
+    if (!mobile || !narrow) return;
+    const previous = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overflow = document.body.style.overflow;
+    document.body.style.overflow = "hidden";
+    sidebarRef.current?.querySelector<HTMLElement>("button, a")?.focus();
+    const keydown = (event: KeyboardEvent) => {
+      if (event.key === "Escape") { event.preventDefault(); setMobile(false); }
+      if (event.key !== "Tab") return;
+      const focusable = sidebarRef.current?.querySelectorAll<HTMLElement>('a[href], button:not([disabled])');
+      if (!focusable?.length) return;
+      const first = focusable[0], last = focusable[focusable.length - 1];
+      if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last.focus(); }
+      else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first.focus(); }
+    };
+    window.addEventListener("keydown", keydown);
+    return () => { document.body.style.overflow = overflow; window.removeEventListener("keydown", keydown); previous?.focus(); };
+  }, [mobile, narrow]);
   const [password, setPassword] = useState(false);
   const [contextReload, setContextReload] = useState(0);
   const toast = useToast();
@@ -150,90 +182,60 @@ function Workspace() {
     return !item.capability || user.capabilities?.includes(item.capability) || item.route === "usage" && user.capabilities?.includes("usage.read_all");
   });
   const allowedRoute = visible.some((item) => item.route === route);
-  const safeRoute: Route = allowedRoute ? route : visible.find((item) => !item.platform && item.route !== "invite")?.route ?? (hasPlatform ? "platform" : "invite");
+  const pendingTenant = identity.memberships.some((item) => item.status === "active") && (!user || user.tenant_id !== selected) && !contextError;
+  const tenantRoute = !navigation.find((item) => item.route === route)?.platform;
+  const safeRoute: Route = allowedRoute || (pendingTenant && tenantRoute) ? route : visible.find((item) => !item.platform && item.route !== "invite")?.route ?? (hasPlatform ? "platform" : "invite");
   const current = navigation.find((item) => item.route === safeRoute)!;
   const isGlobal = current.platform || safeRoute === "invite";
   const identityName = identity.name || identity.email;
   const memberships = identity.memberships.filter((item) => item.status === "active");
   const currentMembership = memberships.find((item) => item.tenant_id === selected);
   const canManageAgents = user?.capabilities?.includes("agents.manage") ?? false;
-  return <div className="app-shell">
-    {mobile && <button className="sidebar-backdrop" aria-label="关闭导航" onClick={() => setMobile(false)} />}
-    <aside className={`sidebar ${mobile ? "open" : ""}`}>
-      <a className="brand" href={tenantLink("overview")}>
-        <span className="brand-symbol">
-          <Command size={22} />
-        </span>
-        <span>Agent<span className="brand-light"> Platform</span>
-          <small>BUILD. RUN. UNDERSTAND.</small>
-        </span>
-      </a>
-      <div className="workspace-switch tenant-switch">
-        <div className="workspace-icon">
-          <Building2 size={20} />
-        </div>
-        <label>
-          <span>当前组织</span>
-          <select aria-label="切换组织" value={selected} onChange={(event) => chooseTenant(event.target.value)} disabled={!memberships.length}>
-            {!memberships.length && <option value="">尚未加入组织</option>}
-            {memberships.map((item) => <option key={item.tenant_id} value={item.tenant_id}>
-              {item.tenant_name ?? item.tenant_id}{item.tenant_status !== "active" ? "（已暂停）" : ""}</option>)}
-          </select>
-          <small>
-            {currentMembership ? roleLabel(currentMembership.role) : "个人账号"}</small>
-        </label>
+  return <div className={`app-shell ${collapsed ? "sidebar-collapsed" : ""} ${safeRoute === "playground" ? "is-playground" : ""}`}>
+    {mobile && <button className="sidebar-backdrop" aria-label="关闭导航" tabIndex={-1} onClick={() => setMobile(false)} />}
+    <aside ref={sidebarRef} id="workspace-sidebar" className={`sidebar ${mobile ? "open" : ""}`} inert={narrow && !mobile} aria-hidden={narrow && !mobile ? true : undefined}>
+      <div className="sidebar-header">
+        <a className="brand" href={tenantLink("overview")} aria-label="Agent Platform 首页">
+          <span className="brand-symbol"><Command size={22} /></span>
+          <span className="brand-name">Agent<span className="brand-light"> Platform</span></span>
+        </a>
+        <button className="icon-button mobile-close" aria-label="关闭导航" onClick={() => setMobile(false)}><X size={20} /></button>
       </div>
       <nav aria-label="主导航">
         {["工作空间", "资源与费用", "组织管理", "平台管理", "账号"].map((group) => {
           const items = visible.filter((item) => item.group === group);
           return items.length ? <div className="nav-group" key={group}>
-            <div className="nav-label">
+            <div className="nav-label" aria-hidden={collapsed && !narrow}>
               {group}</div>
-            {items.map((item) => <a key={item.route} href={tenantLink(item.route)} className={`nav-link ${safeRoute === item.route ? "selected" : ""}`} aria-current={safeRoute === item.route ? "page" : undefined}>
+            {items.map((item) => <a key={item.route} href={tenantLink(item.route)} className={`nav-link ${safeRoute === item.route ? "selected" : ""}`} aria-current={safeRoute === item.route ? "page" : undefined} aria-label={item.title} title={collapsed && !narrow ? item.title : undefined}>
               <item.icon size={18} strokeWidth={1.8} />
-              {item.title}{safeRoute === item.route && <span className="nav-active-dot" />}</a>)}</div> : null;
+              <span className="nav-link-label">{item.title}</span>{safeRoute === item.route && <span className="nav-active-dot" />}</a>)}</div> : null;
         })}</nav>
-      <div className="sidebar-bottom">
-        <div className="workspace-note">
-          <ShieldCheck size={16} />
-          <span>每个组织独立管理<br />成员、Agent 与使用额度。</span>
-        </div>
-        <button className="profile" onClick={() => setPassword(true)} title="账号与密码">
-          <span className="avatar">
-            {identityName.slice(0, 1).toUpperCase()}</span>
-          <span>
-            <strong>
-              {identityName}</strong>
-            <small>
-              {hasPlatform ? "平台运营账号" : "我的账号"}</small>
-          </span>
-          <SlidersHorizontal size={16} />
-        </button>
-      </div>
     </aside>
-    <main className="main-shell">
-      <div className="topbar">
+    <main className="main-shell" inert={narrow && mobile} aria-hidden={narrow && mobile ? true : undefined}>
+      <header className="topbar">
         <div className="breadcrumb">
-          <button className="icon-button mobile-toggle" aria-label="打开导航" onClick={() => setMobile(true)}>
-            <Menu size={21} />
+          <button className="icon-button navigation-toggle" aria-label={narrow ? "打开导航" : collapsed ? "展开侧边栏" : "收起侧边栏"}
+            aria-controls="workspace-sidebar" aria-expanded={narrow ? mobile : !collapsed}
+            onClick={() => narrow ? setMobile(true) : setCollapsed((value) => !value)}>
+            {narrow ? <Menu size={21} /> : collapsed ? <PanelLeftOpen size={20} /> : <PanelLeftClose size={20} />}
           </button>
-          <span>
-            {isGlobal ? "账号与平台" : tenant?.name ?? currentMembership?.tenant_name ?? "工作空间"}</span>
-          <span className="breadcrumb-slash">/</span>
-          <strong>
-            {current.title}</strong>
+          <strong>{current.title}</strong>
         </div>
         <div className="topbar-right">
-          <span className="edition">
-            <span />多租户工作空间</span>
-          <button className="icon-button" aria-label="账号设置" onClick={() => setPassword(true)}>
-            <CircleHelp size={19} />
+          <Select className="organization-picker" variant="quiet" aria-label="切换组织" icon={<Building2 size={17} />}
+            value={selected} onChange={(event) => chooseTenant(event.target.value)} disabled={!memberships.length}
+            title={currentMembership ? roleLabel(currentMembership.role) : "个人账号"} searchable>
+            {!memberships.length && <option value="">尚未加入组织</option>}
+            {memberships.map((item) => <option key={item.tenant_id} value={item.tenant_id} data-description={roleLabel(item.role)}>
+              {item.tenant_name ?? item.tenant_id}{item.tenant_status !== "active" ? "（已暂停）" : ""}</option>)}
+          </Select>
+          <button className="account-button" aria-label="账号设置" onClick={() => setPassword(true)} title={`${identityName} · ${identity.email}`}>
+            <span className="avatar">{identityName.slice(0, 1).toUpperCase()}</span>
           </button>
-          <button className="icon-button" aria-label="退出登录" onClick={() => void logout()}>
-            <LogOut size={18} />
-          </button>
+          <button className="icon-button logout-button" aria-label="退出登录" onClick={() => void logout()}><LogOut size={18} /></button>
         </div>
-      </div>
+      </header>
       <div className={`page-content ${safeRoute === "playground" ? "playground-page" : ""}`} key={`${identity.id}:${selected}:${safeRoute}:${JSON.stringify(user?.capabilities)}:${platformKey}`}>
         {contextError && isGlobal && route !== "platform" && route !== "invite" && <div className="form-error" role="alert">
           {contextError}</div>}
@@ -253,7 +255,7 @@ function Workspace() {
         {!isGlobal && (contextLoading ? <Loading /> : contextError ? <ErrorState message={contextError} retry={() => setContextReload((value) => value + 1)} /> : !user || user.tenant_id !== selected ? <Empty title="选择一个组织" description="加入组织后即可使用组织授权的 Agent 和模型。" /> : tenant && !["active", "suspended", "closing"].includes(tenant.status) ? <Empty title="该组织当前不可用" description="组织已暂停或正在开通，请联系平台运营人员，或切换到其他组织。" /> : <>
           {safeRoute === "overview" && <DashboardPage user={user} navigate={navigate} />}
           {safeRoute === "agents" && <AgentsPage admin={canManageAgents} navigate={navigate} />}
-          {safeRoute === "playground" && <Playground />}
+          {safeRoute === "playground" && <Playground name={identityName} />}
           {safeRoute === "runs" && <RunsPage navigate={navigate} />}
           {safeRoute === "models" && <ModelsPage admin={false} canPolicy={!readOnlyTenant && (user.capabilities?.includes("models.policy") ?? false)} />}
           {safeRoute === "users" && <MembersPage user={user} changed={refreshIdentity} />}
@@ -264,10 +266,10 @@ function Workspace() {
           {safeRoute === "audit" && <AuditPage />}
         </>)}
       </div>
-      <footer className="footer">
+      {safeRoute !== "playground" && <footer className="footer">
         <span>Agent Platform</span>
         <span>金额以 USD 计价 · 时间按设备时区显示</span>
-      </footer>
+      </footer>}
     </main>
     {password && <Modal title="账号与密码" description={`${identityName} · ${identity.email}`} close={() => setPassword(false)}>
       <Form close={() => setPassword(false)} label="更新密码" submit={async (form) => { await write("/auth/password", { current_password: formValue(form, "current_password"), new_password: formValue(form, "new_password") }); toast("密码已更新，请重新登录"); clearSession(); }}>

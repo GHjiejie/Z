@@ -48,11 +48,11 @@ button:disabled {
 button,
 a {
   transition:
-    background 0.15s,
-    border-color 0.15s,
-    color 0.15s,
-    box-shadow 0.15s,
-    transform 0.15s;
+    background var(--motion-feedback, 140ms) var(--motion-ease, ease),
+    border-color var(--motion-feedback, 140ms) var(--motion-ease, ease),
+    color var(--motion-feedback, 140ms) var(--motion-ease, ease),
+    box-shadow var(--motion-feedback, 140ms) var(--motion-ease, ease),
+    transform var(--motion-feedback, 140ms) var(--motion-ease, ease);
 }
 button {
   color: inherit;
@@ -148,7 +148,7 @@ svg {
   text-overflow: ellipsis;
 }
 .spin {
-  animation: spin 1s linear infinite;
+  animation: spin var(--motion-spin, 1000ms) linear infinite;
 }
 @keyframes spin {
   to {
@@ -755,7 +755,7 @@ svg {
   width: 100%;
   border-radius: 4px 4px 0 0;
   background: linear-gradient(0deg, #9994f2, #c1bcfa);
-  transition: height 0.25s;
+  transition: height var(--motion-layout, 240ms) var(--motion-ease, ease);
 }
 .bar-column > span {
   font-size: 8px;
@@ -1137,9 +1137,9 @@ td .button {
   display: flex;
   flex-direction: column;
   transition:
-    border-color 0.15s,
-    transform 0.15s,
-    box-shadow 0.15s;
+    border-color var(--motion-feedback, 140ms) var(--motion-ease, ease),
+    transform var(--motion-feedback, 140ms) var(--motion-ease, ease),
+    box-shadow var(--motion-feedback, 140ms) var(--motion-ease, ease);
 }
 .agent-card:hover {
   border-color: #ddd8f6;
@@ -1482,7 +1482,7 @@ td .button {
   align-items: center;
   justify-content: center;
   padding: 24px;
-  animation: fade-in 0.14s ease;
+  animation: fade-in var(--motion-overlay, 180ms) ease;
 }
 @keyframes fade-in {
   from {
@@ -1999,7 +1999,7 @@ td .button {
   width: 4px;
   border-radius: 50%;
   background: #c6b4d6;
-  animation: pulse 1.2s infinite;
+  animation: pulse var(--motion-pulse, 1200ms) ease-in-out infinite;
 }
 .thinking-dots i:nth-child(2) {
   animation-delay: 0.15s;
@@ -2020,7 +2020,7 @@ td .button {
   background: #b2a0c9;
   margin-left: 4px;
   vertical-align: middle;
-  animation: pulse 1s infinite;
+  animation: pulse var(--motion-pulse, 1200ms) ease-in-out infinite;
 }
 .run-events {
   background: #fdfbff;
@@ -2042,7 +2042,7 @@ td .button {
 }
 .run-events > button > svg:last-child {
   margin-left: auto;
-  transition: transform 0.2s;
+  transition: transform var(--motion-overlay, 180ms) var(--motion-ease, ease);
 }
 .rotated {
   transform: rotate(180deg);
@@ -2674,7 +2674,7 @@ td .button {
 @media (max-width: 760px) {
   .sidebar {
     transform: translateX(-100%);
-    transition: transform 0.2s;
+    transition: transform var(--motion-overlay, 180ms) var(--motion-ease, ease);
     width: 235px;
   }
   .sidebar.open {

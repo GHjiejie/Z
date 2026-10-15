@@ -66,6 +66,63 @@ class GatewayBootstrapTests(unittest.TestCase):
         self.assertEqual(key_request["allowed_routes"], gateway.ALLOWED_ROUTES)
         self.assertEqual(key_request["duration"], "30d")
 
+    def test_multiple_models_scope_both_new_user_and_key(self):
+        with (
+            patch.dict(os.environ, {"GATEWAY_KEY_MODELS": "test-model, gpt-5.5"}),
+            patch.object(
+                gateway, "control_request", side_effect=[{}, {"key": "sk-test-runtime"}]
+            ) as control,
+        ):
+            self.assertEqual(gateway.bootstrap(), self.output)
+        for call in control.call_args_list:
+            self.assertEqual(call.args[3]["models"], ["test-model", "gpt-5.5"])
+        key_request = control.call_args_list[1].args[3]
+        self.assertEqual(key_request["allowed_routes"], gateway.ALLOWED_ROUTES)
+        self.assertEqual(key_request["max_budget"], 100)
+        self.assertEqual(key_request["duration"], "30d")
+
+    def test_invalid_model_allowlists_rejected_before_side_effects(self):
+        for configured in (
+            "",
+            " ",
+            "test-model,",
+            ",test-model",
+            "test-model,,gpt-5.5",
+            "test-model, ,gpt-5.5",
+            "test-model,*",
+            "test-model,gpt-*",
+            "test-model,test-model",
+            "test-model, test-model",
+            "gpt-5.5",
+            "test-model,invalid name",
+            "test-model,invalid?name",
+            "test-model,invalid;name",
+            "test-model,\ngpt-5.5",
+            "test-model,\x7fgpt-5.5",
+            "test-model," + "x" * 201,
+        ):
+            with (
+                self.subTest(configured=configured),
+                patch.dict(os.environ, {"GATEWAY_KEY_MODELS": configured}),
+                patch.object(gateway, "control_request") as control,
+            ):
+                with self.assertRaisesRegex(ValueError, "GATEWAY_KEY_MODELS"):
+                    gateway.bootstrap()
+                control.assert_not_called()
+                self.assertFalse(self.output.exists())
+
+    def test_invalid_default_model_alias_rejected_before_side_effects(self):
+        for alias in ("", "*", "invalid name", "test-model,second", "x" * 201):
+            with (
+                self.subTest(alias=alias),
+                patch.dict(os.environ, {"LITELLM_MODEL_ALIAS": alias}),
+                patch.object(gateway, "control_request") as control,
+            ):
+                with self.assertRaisesRegex(ValueError, "model alias"):
+                    gateway.bootstrap()
+                control.assert_not_called()
+                self.assertFalse(self.output.exists())
+
     def test_default_refuses_existing_file_without_network_or_overwrite(self):
         self.save_existing()
         with patch.object(gateway, "control_request") as control:
@@ -89,6 +146,67 @@ class GatewayBootstrapTests(unittest.TestCase):
         self.assertEqual(control.call_count, 2)
         self.assertTrue(control.call_args_list[1].args[2].startswith("/user/info?"))
 
+    def test_multiple_model_reuse_accepts_order_only_changes_without_rewriting(self):
+        self.save_existing()
+        previous = self.output.stat().st_mtime_ns
+        info = {**self.info, "models": ["gpt-5.5", "test-model"]}
+        owner = {
+            "user_info": {
+                "user_role": "internal_user",
+                "models": ["test-model", "gpt-5.5"],
+            }
+        }
+        with (
+            patch.dict(os.environ, {"GATEWAY_KEY_MODELS": "test-model,gpt-5.5"}),
+            patch.object(
+                gateway, "control_request", side_effect=[{"info": [info]}, owner]
+            ) as control,
+        ):
+            self.assertEqual(gateway.bootstrap(reuse_existing=True), self.output)
+        self.assertEqual(control.call_count, 2)
+        self.assertEqual(self.output.stat().st_mtime_ns, previous)
+
+    def test_multiple_model_reuse_rejects_invalid_key_or_owner_scopes(self):
+        self.save_existing()
+        expected = ["test-model", "gpt-5.5"]
+        invalid_models = (
+            None,
+            "test-model,gpt-5.5",
+            [],
+            ["test-model"],
+            ["test-model", "gpt-5.5", "extra-model"],
+            ["test-model", "gpt-5.5", "gpt-5.5"],
+            ["test-model", "*"],
+            ["test-model", {"model": "gpt-5.5"}],
+        )
+        for invalid in invalid_models:
+            for target in ("key", "owner"):
+                info = {
+                    **self.info,
+                    "models": invalid if target == "key" else expected,
+                }
+                owner = {
+                    "user_info": {
+                        "user_role": "internal_user",
+                        "models": invalid if target == "owner" else expected,
+                    }
+                }
+                with (
+                    self.subTest(target=target, models=invalid),
+                    patch.dict(os.environ, {"GATEWAY_KEY_MODELS": ",".join(expected)}),
+                    patch.object(
+                        gateway,
+                        "control_request",
+                        side_effect=[{"info": [info]}, owner],
+                    ) as control,
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "permissions"):
+                        gateway.bootstrap(reuse_existing=True)
+                    self.assertEqual(control.call_count, 1 if target == "key" else 2)
+        self.assertEqual(
+            self.output.read_text(), "PLATFORM_LITELLM_KEY=sk-test-runtime\n"
+        )
+
     def test_reuse_rejects_expired_missing_unrestricted_or_exhausted_keys(self):
         self.save_existing()
         changes = [
@@ -97,10 +215,11 @@ class GatewayBootstrapTests(unittest.TestCase):
             {"models": ["*"]},
             {"models": ["another-model"]},
             {"allowed_routes": ["llm_api_routes"]},
+            {"allowed_routes": ["/chat/completions", "/v1/chat/completions"]},
             {
                 "allowed_routes": [
-                    "/chat/completions",
-                    "/v1/chat/completions",
+                    "/responses",
+                    "/v1/responses",
                     "/key/generate",
                 ]
             },

@@ -30,6 +30,7 @@ from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.infrastructure.request_context import request_id
+from agent_platform.modules import ag_ui
 from agent_platform.modules.authorization import require_capability
 from agent_platform.modules.billing.service import BillingService
 from agent_platform.modules.builtin_agents import builtin_metadata
@@ -623,16 +624,72 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
         after: int = Query(default=0, ge=0),
         user=Depends(auth),
     ):
-        await asyncio.to_thread(platform.get_run, user, run_id)
         raw_cursor = request.headers.get("last-event-id")
         if raw_cursor:
             try:
                 after = max(after, int(raw_cursor))
             except ValueError:
                 raise PlatformError(400, "invalid_cursor", "事件游标无效。") from None
+        return await event_response(run_id, request, user, after=after)
 
-        valid_until = time.monotonic() + STREAM_LEASE_SECONDS
-        stream_id = await asyncio.to_thread(platform.acquire_stream, user, run_id)
+    @app.post(
+        "/api/v1/sessions/{session_id}/ag-ui",
+        response_class=StreamingResponse,
+        responses={
+            200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}}
+        },
+    )
+    async def run_agent(
+        session_id: str,
+        body: ag_ui.PlatformRunInput,
+        request: Request,
+        user=Depends(auth),
+    ):
+        cursor = ag_ui.parse_cursor(request.headers.get("last-event-id"))
+        run = await asyncio.to_thread(
+            ag_ui.enqueue, platform, user, session_id, body, cursor[0]
+        )
+        return await event_response(
+            run["id"],
+            request,
+            user,
+            protocol_cursor=cursor,
+            admitted_stream=run["_stream_id"],
+        )
+
+    @app.get(
+        "/api/v1/runs/{run_id}/ag-ui",
+        response_class=StreamingResponse,
+        responses={
+            200: {"content": {"text/event-stream": {"schema": {"type": "string"}}}}
+        },
+    )
+    async def connect_agent(
+        run_id: str,
+        request: Request,
+        after: str | None = Query(default=None, max_length=32),
+        user=Depends(auth),
+    ):
+        cursor = max(
+            ag_ui.parse_cursor(after),
+            ag_ui.parse_cursor(request.headers.get("last-event-id")),
+        )
+        return await event_response(run_id, request, user, protocol_cursor=cursor)
+
+    async def event_response(
+        run_id,
+        request,
+        user,
+        *,
+        after=0,
+        protocol_cursor=None,
+        admitted_stream=None,
+    ):
+        projection = None
+        pending = []
+        stream_id = admitted_stream
+        if protocol_cursor is not None:
+            after = protocol_cursor[0]
 
         from agent_platform.infrastructure.events import configure_notifications
 
@@ -679,6 +736,64 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                 ]
                 return rows, run["status"]
 
+        try:
+            await asyncio.to_thread(platform.get_run, user, run_id)
+            valid_until = time.monotonic() + STREAM_LEASE_SECONDS
+            stream_id = stream_id or await asyncio.to_thread(
+                platform.acquire_stream, user, run_id
+            )
+            if admitted_stream:
+                await asyncio.to_thread(platform.update_stream, user, stream_id)
+            if protocol_cursor is not None:
+                projection = await asyncio.to_thread(
+                    ag_ui.read_projection, platform, user, run_id
+                )
+                if after:
+                    # Restore both mapper state and UI messages at a composite
+                    # cursor. A single durable row can encode several AG-UI
+                    # events (e.g. TOOL_CALL_START / ARGS / END).
+                    scan, found = 0, False
+                    while not found:
+                        if time.monotonic() >= valid_until - 20:
+                            valid_until = time.monotonic() + STREAM_LEASE_SECONDS
+                            await authorize_stream()
+                            await asyncio.to_thread(
+                                platform.update_stream, user, stream_id
+                            )
+                        rows, _ = await asyncio.to_thread(replay, scan)
+                        for row in rows:
+                            if row["sequence"] > after:
+                                break
+                            mapped = projection.project(row)
+                            for part, event in enumerate(mapped):
+                                if (row["sequence"], part) <= protocol_cursor:
+                                    projection.apply(event)
+                                else:
+                                    pending.append((f"{row['sequence']}.{part}", event))
+                            scan = row["sequence"]
+                            if scan == after:
+                                if protocol_cursor[1] >= len(mapped):
+                                    raise PlatformError(
+                                        400, "invalid_cursor", "事件游标超出有效范围。"
+                                    )
+                                found = True
+                                break
+                        if not found and (not rows or scan < rows[-1]["sequence"]):
+                            raise PlatformError(
+                                400, "invalid_cursor", "事件游标超出有效范围。"
+                            )
+            valid_until = time.monotonic() + STREAM_LEASE_SECONDS
+            # Confirm a fresh lease after reconstruction as well as admission;
+            # replay preparation is covered by the same connection budget.
+            await asyncio.to_thread(platform.update_stream, user, stream_id)
+        except BaseException:
+            if stream_id:
+                with CancelScope(shield=True):
+                    await asyncio.to_thread(
+                        platform.update_stream, user, stream_id, release=True
+                    )
+            raise
+
         async def renew_stream():
             # Revocation and session expiry remain enforceable even when the
             # client stops consuming and the event generator is suspended.
@@ -693,6 +808,22 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
         async def stream():
             cursor = after
             heartbeat_at = time.monotonic()
+            sent_terminal = False
+
+            def frames(row):
+                nonlocal sent_terminal
+                if projection is None:
+                    payload = json.dumps(row, ensure_ascii=False)
+                    return [
+                        f"id: {row['sequence']}\nevent: {row['type']}\ndata: {payload}\n\n"
+                    ]
+                result = []
+                for part, event in enumerate(projection.project(row)):
+                    projection.apply(event)
+                    sent_terminal |= event is projection.terminal
+                    result.append(ag_ui.encode(event, f"{row['sequence']}.{part}"))
+                return result
+
             # Subscribe before the DB read to close the read/wait race. Every
             # wakeup replays persisted rows from the caller's durable cursor.
             async with notifier.watch(user["tenant_id"], run_id) as watch:
@@ -700,6 +831,13 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                     await authorize_stream()
                 except PlatformError:
                     return
+                if projection is not None:
+                    for event in projection.prefix():
+                        yield ag_ui.encode(event)
+                    for identifier, event in pending:
+                        projection.apply(event)
+                        sent_terminal |= event is projection.terminal
+                        yield ag_ui.encode(event, identifier)
                 while not await request.is_disconnected():
                     observed = watch.version
                     try:
@@ -708,14 +846,23 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                         return
                     for row in rows:
                         cursor = row["sequence"]
-                        payload = json.dumps(row, ensure_ascii=False)
-                        yield f"id: {cursor}\nevent: {row['type']}\ndata: {payload}\n\n"
+                        for frame in frames(row):
+                            yield frame
                     if status in TERMINAL_STATUSES and len(rows) < 200:
                         # Final status and event commit atomically. The extra
                         # replay covers SQLite's separate read snapshots too.
                         tail, _ = await asyncio.to_thread(replay, cursor)
                         for row in tail:
-                            yield f"id: {row['sequence']}\nevent: {row['type']}\ndata: {json.dumps(row, ensure_ascii=False)}\n\n"
+                            for frame in frames(row):
+                                yield frame
+                        if projection is not None and not sent_terminal:
+                            # Even a reconnect after the final cursor must close
+                            # the AG-UI lifecycle of this HTTP stream.
+                            event = projection.terminal or ag_ui.RunErrorEvent(
+                                message="运行事件记录不完整，请查看运行记录。",
+                                code="EVENT_LOG_INCOMPLETE",
+                            )
+                            yield ag_ui.encode(event)
                         return
                     if len(rows) == 200:
                         continue
@@ -733,7 +880,18 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             valid_until=valid_until,
             authorize=authorize_stream,
             media_type="text/event-stream",
-            headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
+            headers={
+                "X-Accel-Buffering": "no",
+                "Cache-Control": "no-store",
+                **(
+                    {
+                        "X-Run-ID": run_id,
+                        "X-AG-UI-Protocol-Version": ag_ui.PROTOCOL_VERSION,
+                    }
+                    if projection
+                    else {}
+                ),
+            },
         )
 
     @app.get(
@@ -880,6 +1038,8 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
                 status_code=route.status_code,
                 response_model=route.response_model,
                 response_model_exclude_unset=route.response_model_exclude_unset,
+                response_class=route.response_class,
+                responses=route.responses,
                 name="tenant_" + route.name,
             )
 

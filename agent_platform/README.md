@@ -4,6 +4,7 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 
 ## 文档
 
+- [AG-UI 交互协议](docs/ag-ui-protocol.md)：Playground 的流式运行、工具事件、取消、幂等与断线恢复。
 - [架构调整与验收](docs/architecture-adjustments.md)：八项架构改进、证据及升级契约。
 - [多租户实现说明](docs/multi-tenant-implementation.md)：当前架构、权限、数据库、网关、账务和交付状态。
 - [多租户运行手册](docs/multi-tenant-operations.md)：部署、密钥、切库、备份、关闭与恢复。
@@ -23,7 +24,7 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 | Agent | 8 个内置助手、草稿和不可变发布、受控工具、多轮会话 |
 | 模型 | 组织模型授权、默认及候选顺序、部署与显示别名分离、价格快照 |
 | 网关 | 每组织加密凭据、代际轮换、Outbox、未知外部写入核查、独立同步进程 |
-| 执行 | 独立排队/执行期限、租户轮转、持久事件与提交唤醒、SSE独立租约及撤权检查 |
+| 执行 | AG-UI 1.0 流式交互、独立排队/执行期限、租户轮转、持久事件与提交唤醒、SSE独立租约及撤权检查 |
 | 账务 | 精确钱包、独立供应商成本预算、追加用量证据、后台补证、未知冻结、可重建累计预算 |
 | 容量 | 套餐硬上限、内部配额、成员/Agent/队列/运行/SSE/导出限制 |
 | 数据 | 分页接口、私有异步导出、关闭组织、保留期、独立持久删除记录 |
@@ -84,7 +85,7 @@ make -C agent_platform local-start PORT=8010 GATEWAY=external
 3. 向组织授权模型，指定平台报价及上下文/输出限制。
 4. 在组织网关面板发起同步，待状态变为就绪。
 5. 平台财务显式入账；组织按需配置更严格的内部配额。
-6. 切换进入该组织，在对话实验室运行 Agent。
+6. 切换进入该组织，在 Playground 运行 Agent。
 
 内置角色包括写作润色、翻译与本地化、长文总结、会议纪要、任务规划、代码排错、数据解读、客服回复。角色定义只包含指令和示例，不包含模型名称、供应商或密钥。
 

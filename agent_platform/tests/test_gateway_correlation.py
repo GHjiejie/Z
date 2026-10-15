@@ -59,6 +59,7 @@ class GatewayCorrelationTests(unittest.IsolatedAsyncioTestCase):
             gateway = Gateway(
                 "https://offline-gateway.test/v1",
                 "offline-inference-key",
+                protocol="chat_completions",
                 client_factory=lambda **options: create_gateway_chat_model(
                     **options, http_async_client=client, http_socket_options=()
                 ),
@@ -153,6 +154,7 @@ class GatewayCorrelationTests(unittest.IsolatedAsyncioTestCase):
             gateway = Gateway(
                 "https://offline-gateway.test/v1",
                 "offline-inference-key",
+                protocol="chat_completions",
                 client_factory=lambda **options: create_gateway_chat_model(
                     **options, http_async_client=client, http_socket_options=()
                 ),

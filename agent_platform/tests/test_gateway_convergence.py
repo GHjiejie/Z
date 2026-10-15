@@ -22,7 +22,10 @@ from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.config import Settings
 from agent_platform.infrastructure.db import Database
 from agent_platform.infrastructure.errors import PlatformError
-from agent_platform.modules.gateway_control import GatewayService
+from agent_platform.modules.gateway_control import (
+    ControlFailure,
+    GatewayService,
+)
 
 
 class ControlFixture:
@@ -207,6 +210,21 @@ class GatewayConvergenceTests(unittest.TestCase):
             for row in self.rows(g.credentials)
             if row["tenant_id"] == tenant and row["status"] == "active"
         )
+
+    def test_runtime_credentials_use_responses_routes_and_reject_chat_permissions(
+        self,
+    ):
+        self.assertEqual(self.deployment["protocol"], "responses")
+        self.enroll()
+        credential = self.active()
+        issued = self.control.keys[credential["external_key_id"]]
+        self.assertEqual(issued["allowed_routes"], ["/responses", "/v1/responses"])
+        old_permissions = {
+            **issued,
+            "allowed_routes": ["/chat/completions", "/v1/chat/completions"],
+        }
+        with self.assertRaisesRegex(ControlFailure, "gateway_key_permissions_mismatch"):
+            GatewayService._validate_key(old_permissions, credential)
 
     def test_grants_do_not_implicitly_enroll_and_rotation_keeps_existing_route_usable(
         self,

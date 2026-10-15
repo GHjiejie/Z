@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { useEffect, useState } from "react";
 import { ArrowDown, ArrowUp, Pencil, Plus, RefreshCw, ShieldCheck, X } from "lucide-react";
 import { dateTime, money, write } from "./api";
@@ -44,18 +45,18 @@ function ModelPolicyEditor({ policy, models, close, saved }: { policy: ModelPoli
   return <Modal title="组织模型选择策略" description="本次手动选择和 Agent 指定模型优先于组织默认策略。" close={close}>
     <Form close={close} submit={async () => { await write("/model-policy", { default_model_id: defaultId || null, ordered_model_ids: order, expected_version: policy.version }, "PUT"); await saved(); }}>
       <Field label="组织默认模型">
-        <select value={defaultId} onChange={(event) => setDefaultId(event.target.value)}>
+        <Select value={defaultId} onChange={(event) => setDefaultId(event.target.value)}>
           <option value="">自动选择候选模型</option>
           {models.filter((item) => item.active || item.id === defaultId).map((item) =>
             <option value={item.id} key={item.id}>
-              {item.name}{item.active ? "" : "（已停用）"}</option>)}</select>
+              {item.name}{item.active ? "" : "（已停用）"}</option>)}</Select>
       </Field>
       <Field label="添加候选模型" hint="可调整自动选择时的优先顺序；不会在模型请求失败后自动再次调用。">
-        <select value="" onChange={(event) => setOrder((previous) => [...previous, event.target.value])}>
+        <Select value="" onChange={(event) => setOrder((previous) => [...previous, event.target.value])}>
           <option value="">选择候选模型</option>
           {models.filter((item) => item.active && !order.includes(item.id)).map((item) =>
             <option value={item.id} key={item.id}>
-              {item.name}</option>)}</select>
+              {item.name}</option>)}</Select>
       </Field>
       <ol className="model-priority-list">
         {order.map((id, index) =>
@@ -307,11 +308,11 @@ export function PlatformModelGrants({ tenant, identity }: { tenant: Tenant; iden
       <ResourceState loading={deployments.loading} error={deployments.error} retry={() => void deployments.reload()}>
         <Form close={() => setEditing(null)} submit={async (form) => { await write(`${prefix}/models`, { deployment_id: formValue(form, "deployment_id"), name: formValue(form, "name"), alias: formValue(form, "alias"), input_price: formValue(form, "input_price"), output_price: formValue(form, "output_price"), context_window: Number(formValue(form, "context_window")), max_output_tokens: Number(formValue(form, "max_output_tokens")), active: (form.elements.namedItem("active") as HTMLInputElement).checked }); setEditing(null); await resource.reload(); }}>
           <Field label="平台部署">
-            <select name="deployment_id" required defaultValue={editing === "new" ? "" : editing.deployment_id ?? ""}>
+            <Select name="deployment_id" required defaultValue={editing === "new" ? "" : editing.deployment_id ?? ""}>
               <option value="" disabled>选择部署</option>
               {deployments.data?.items.filter((item) => item.status === "active").map((item) =>
                 <option key={item.id} value={item.id}>
-                  {item.name} · {item.internal_route}</option>)}</select>
+                  {item.name} · {item.internal_route}</option>)}</Select>
           </Field>
           <Field label="组织显示名称">
             <input name="name" maxLength={120} required defaultValue={editing === "new" ? "" : editing.name} />

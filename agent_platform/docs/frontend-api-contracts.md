@@ -1,5 +1,7 @@
 # 前端 API 契约与页面映射
 
+> 2026-10-15 更新：Playground 已迁移到 AG-UI 1.0 POST/SSE，详见 [AG-UI 当前契约](ag-ui-protocol.md)。下文基线中的旧 Run 202 / 自定义事件 API 保留为兼容接口，不再由 Playground 使用。具体请求 schema 以 OpenAPI、官方 AG-UI SDK 和生成类型为准。
+
 > 基线：`master` @ `db1ab95367b53d84e68cb39f59c97715ccce37a0`，2026-10-02 源码核查。本文为 [前端功能规格](frontend-functional-spec.md) 的接口参考。所有例子都是结构示意，ID须从实际响应取得，Cookie/CSRF/邀请令牌由真实会话或专用响应提供；不包含真实凭据。未执行 live API、测试或服务启动。
 
 ## 1. 通用规则与响应投影
@@ -50,7 +52,7 @@
 - POST T/agents/{agent_id}/publish→{version:number}；版本单调增加，保存 published spec。无需 body。main.py:420–422；platform.py:590–616。
 - 无 Agent 删除、详情 GET、历史版本 GET、复制 API；若设计出现这些操作应标为未实现或本地复制表单再创建。已发布/草稿空态与模型未就绪说明已实现。发布失败 toast，编辑失败 Form 留窗，publish busy id。pages.tsx:331–343、445–476、650–653。
 
-### 对话实验室（Playground.tsx）
+### Playground（Playground.tsx）
 
 - GET T/agents/models/sessions；GET T/sessions/{session_id}→SessionDetail；POST T/sessions(201) {agent_id(1–64),title?:string<=160}→Session；POST T/sessions/{id}/runs(202) {message:string1–32000,model_id?:string|null} + Idempotency-Key→PublicRun(status=queued)；POST T/runs/{id}/cancel→GET式 Run；GET T/runs/{id}→Run。schemas.py:116–123；main.py:424–482。
 - 仅用户本人的 sessions/runs（含管理员）。一个会话最多1个 active run。重试相同会话/消息/模型保留同一 key。发布 Agent 是创建会话先决条件，模型/报价/授权在入队时检查。platform.py:618–631、668–729。

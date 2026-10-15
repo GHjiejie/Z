@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { useRef, useState } from "react";
 import { Building2, Check, Copy, ExternalLink, Pencil, Plus, RefreshCw, ShieldCheck, Users } from "lucide-react";
 import { api, dateTime, money, tenantLink, write } from "./api";
@@ -36,7 +37,7 @@ export function InvitationPage({ identity, accepted }: { identity: IdentityUser;
       </div>
     </div>}
     <Panel title={done ? "已加入组织" : "邀请信息"} detail={`当前账号：${identity.email}`}>
-      {done ? <Empty title="邀请已接受" description="从左侧组织选择器切换到新组织，即可开始使用。" action={<Button onClick={() => { location.hash = tenantLink("overview"); }}>进入工作空间</Button>} /> : <Form close={() => setToken("")} label="接受邀请" submit={async () => {
+      {done ? <Empty title="邀请已接受" description="从右上角切换到新组织，即可开始使用。" action={<Button onClick={() => { location.hash = tenantLink("overview"); }}>进入工作空间</Button>} /> : <Form close={() => setToken("")} label="接受邀请" submit={async () => {
         const value = token.trim(); if (!value) throw new Error("请输入邀请令牌或邀请链接。");
         let invitationToken = value;
         if (value.includes("#")) invitationToken = new URLSearchParams(value.split("?")[1] ?? "").get("token") ?? value;
@@ -147,23 +148,23 @@ export function MembersPage({ user, changed }: { user: User; changed: () => Prom
           <input name="email" type="email" required autoComplete="off" />
         </Field>
         <Field label="加入后的角色">
-          <select name="role" defaultValue="member">
+          <Select name="role" defaultValue="member">
             <RoleOptions owner={isOwner} />
-          </select>
+          </Select>
         </Field>
       </Form>}</Modal>}
     {editing && <Modal title="编辑组织成员" description={editing.email} close={() => setEditing(null)}>
       <Form close={() => setEditing(null)} submit={async (form) => { await write(`/memberships/${editing.id}`, { role: formValue(form, "role"), status: formValue(form, "status"), expected_version: editing.version ?? editing.authz_version ?? 1 }, "PATCH"); setEditing(null); toast("成员权限已更新"); await reload(); }}>
         <Field label="组织角色">
-          <select name="role" defaultValue={editing.role}>
+          <Select name="role" defaultValue={editing.role}>
             <RoleOptions owner={isOwner} />
-          </select>
+          </Select>
         </Field>
         <Field label="成员状态" hint="停用后不能继续访问本组织，其他组织的成员身份不受影响。">
-          <select name="status" defaultValue={editing.status}>
+          <Select name="status" defaultValue={editing.status}>
             <option value="active">正常</option>
             <option value="revoked">移除</option>
-          </select>
+          </Select>
         </Field>
         {editing.user_id === user.id && <div className="form-error">正在修改你自己的成员身份。降低权限后部分管理入口将立即关闭。</div>}</Form>
     </Modal>}
@@ -322,10 +323,10 @@ function PlatformTenantDetail({ tenant, identity, changed }: { tenant: Tenant; i
         <ResourceState loading={models.loading} error={models.error} retry={() => void models.reload()}>
           <Form close={() => setDialog(null)} label="授予模型" submit={async (form) => { await write(`${prefix}/model-grants`, { source_model_id: formValue(form, "source_model_id") }); setDialog(null); setResourceRevision((value) => value + 1); toast("模型已授权，请在组织网关授权面板同步"); }}>
             <Field label="平台模型">
-              <select name="source_model_id" required defaultValue="">
+              <Select name="source_model_id" required defaultValue="">
                 <option value="" disabled>选择已配置的平台模型</option>
                 {models.data?.items.filter((model) => model.active).map((model) => <option value={model.id} key={model.id}>
-                  {model.name} · {model.alias}</option>)}</select>
+                  {model.name} · {model.alias}</option>)}</Select>
             </Field>
             {!models.data?.items.some((model) => model.active) && <div className="inline-note">暂无可授权模型，请先配置平台模型目录。</div>}</Form>
         </ResourceState>

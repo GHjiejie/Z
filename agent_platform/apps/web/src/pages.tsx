@@ -1,3 +1,4 @@
+import { Select } from "./Select";
 import { useState } from "react";
 import {
   Activity,
@@ -363,7 +364,7 @@ export function AgentsPage({
           onChange={setSearch}
           placeholder="搜索 Agent 名称或描述"
         />
-        <select
+        <Select
           className="agent-source-filter"
           aria-label="筛选 Agent 来源"
           value={source}
@@ -372,7 +373,7 @@ export function AgentsPage({
           <option value="all">全部 Agent</option>
           <option value="builtin">内置 Agent</option>
           <option value="custom">自建 Agent</option>
-        </select>
+        </Select>
         <span>{items.length} 个 Agent</span>
         <Button
           variant="ghost"
@@ -545,7 +546,7 @@ function AgentEditor({
             label="使用模型"
             hint="自动模式优先使用默认模型，也可在对话中指定其他已启用模型。"
           >
-            <select
+            <Select
               name="model_id"
               value={selectedModel}
               onChange={(event) => setSelectedModel(event.target.value)}
@@ -561,7 +562,7 @@ function AgentEditor({
                     {!model.active ? "（已停用）" : ""}
                   </option>
                 ))}
-            </select>
+            </Select>
           </Field>
         </div>
         <Field label="简短描述">
@@ -1121,13 +1122,13 @@ export function UsersPage({ currentUser }: { currentUser: User }) {
               </>
             )}
             <Field label="角色">
-              <select
+              <Select
                 name="role"
                 defaultValue={editing === "new" ? "member" : editing.role}
               >
                 <option value="member">成员</option>
                 <option value="admin">管理员</option>
-              </select>
+              </Select>
             </Field>
             {editing !== "new" && (
               <label className="checkbox-row">
@@ -1228,7 +1229,7 @@ export function UsagePage() {
             onChange={setSearch}
             placeholder="搜索模型、Agent 或用户"
           />
-          <select
+          <Select
             aria-label="调用状态"
             value={status}
             onChange={(event) => setStatus(event.target.value)}
@@ -1241,7 +1242,7 @@ export function UsagePage() {
                 {statusLabel(value)}
               </option>
             ))}
-          </select>
+          </Select>
           <Button
             variant="ghost"
             aria-label="刷新调用统计"
@@ -1623,7 +1624,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
             }}
           >
             <Field label="作用范围">
-              <select
+              <Select
                 value={scope}
                 onChange={(event) => setScope(event.target.value)}
                 disabled={editing !== "new"}
@@ -1631,11 +1632,11 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                 <option value="tenant">整个工作空间</option>
                 <option value="user">指定用户</option>
                 <option value="model">指定模型</option>
-              </select>
+              </Select>
             </Field>
             {scope !== "tenant" && (
               <Field label={scope === "user" ? "用户" : "模型"}>
-                <select
+                <Select
                   name="subject_id"
                   required
                   defaultValue={editing === "new" ? "" : editing.subject_id}
@@ -1654,7 +1655,7 @@ export function QuotasPage({ tenantId }: { tenantId: string }) {
                           {model.name}
                         </option>
                       ))}
-                </select>
+                </Select>
               </Field>
             )}
             <div className="form-columns">
@@ -1824,7 +1825,7 @@ export function RunsPage({ navigate }: { navigate: (path: string) => void }) {
                   variant="secondary"
                   onClick={() => navigate("playground")}
                 >
-                  打开对话实验室
+                  打开 Playground
                   <ArrowRight size={15} />
                 </Button>
               }

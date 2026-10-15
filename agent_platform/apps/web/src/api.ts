@@ -42,6 +42,12 @@ export class ApiError extends Error {
   }
 }
 export async function api<T>(path: string, options: RequestInit = {}, scope = tenantId): Promise<T> {
+  return withApiResponse(path, options, scope, async (response) => response.json().catch(() => null) as Promise<T>);
+}
+// Keep cookies, CSRF, scope cancellation and access-expiry handling identical
+// for JSON APIs and long-lived AG-UI fetch streams. The response remains
+// registered until consume() completes, including its streaming body.
+export async function withApiResponse<T>(path: string, options: RequestInit, scope: string, consume: (response: Response) => Promise<T>): Promise<T> {
   const scoped = !path.startsWith("/auth/") && !path.startsWith("/api/");
   const revision = scopeRevision;
   const session = sessionRevision;
@@ -58,15 +64,17 @@ export async function api<T>(path: string, options: RequestInit = {}, scope = te
   sessionRequests.add(controller);
   try {
     const response = await fetch(apiUrl(path, scope), { ...options, signal: controller.signal, headers, credentials: "same-origin" });
-    const body = await response.json().catch(() => null);
     if (controller.signal.aborted || session !== sessionRevision) throw new ApiError("登录状态或组织已变化，请重新操作。", 0, "scope_changed");
     if (scoped && revision !== scopeRevision) throw new ApiError("组织已切换，请重新操作。", 0, "scope_changed");
     if (!response.ok) {
+      const body = await response.json().catch(() => null);
       if (response.status === 401 && path !== "/auth/login" && path !== "/api/v2/me") window.dispatchEvent(new Event("auth-expired"));
       if (response.status === 403 && scoped) window.dispatchEvent(new Event("tenant-access-changed"));
       throw new ApiError(body?.error?.message ?? (response.status === 422 ? "请检查表单内容是否符合要求。" : `请求未完成（${response.status}）`), response.status, body?.error?.code ?? "request_failed");
     }
-    return body as T;
+    const result = await consume(response);
+    if (controller.signal.aborted || session !== sessionRevision || (scoped && revision !== scopeRevision)) throw new ApiError("登录状态或组织已变化，请重新操作。", 0, "scope_changed");
+    return result;
   } catch (error) {
     if (error instanceof ApiError) throw error;
     if (controller.signal.aborted) throw new ApiError("请求已取消或组织已切换。", 0, "scope_changed");

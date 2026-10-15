@@ -1,7 +1,7 @@
 """Persist metering evidence before deciding which evidence may settle a call."""
 
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from urllib.parse import urlencode
 
 from sqlalchemy import select
@@ -282,15 +282,21 @@ class MeteringReconciler:
         try:
             # Query by a server-generated opaque end_user, since response IDs may
             # be missing when the stream is interrupted. Never scan all spend logs.
+            started_at = datetime.fromisoformat(job["created_at"])
+            if started_at.tzinfo is None:
+                started_at = started_at.replace(tzinfo=UTC)
+            # LiteLLM v2 accepts dates or second-resolution UTC timestamps, and
+            # treats both bounds inclusively. Cover whole UTC days through the
+            # next midnight so fractional seconds cannot fall outside the query.
             query = urlencode(
                 {
                     "end_user": "agent-platform-attempt-" + job["attempt_id"],
                     "page": 1,
                     "page_size": 100,
-                    "start_date": datetime.fromisoformat(job["created_at"])
-                    .astimezone(UTC)
-                    .isoformat(),
-                    "end_date": datetime.now(UTC).isoformat(),
+                    "start_date": started_at.astimezone(UTC).date().isoformat(),
+                    "end_date": (
+                        datetime.now(UTC).date() + timedelta(days=1)
+                    ).isoformat(),
                 }
             )
             payload = self.adapter._request("/spend/logs/v2?" + query)

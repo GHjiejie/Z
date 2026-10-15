@@ -6,6 +6,8 @@
 
 技术路线：Python / FastAPI + React / TypeScript + LiteLLM Proxy
 
+2026-10-15：浏览器与 Agent 的运行交互已改为 [AG-UI 1.0](ag-ui-protocol.md)，管理资源继续使用 REST，上游模型继续使用 Responses。内部持久事件结构保留，由 API 转换为官方 AG-UI 事件。
+
 第一版代码已落地；本篇保留完整目标，不代表下文所有扩展均已实现。当前功能、验证结果及与目标的差异见[实际完成范围](implementation-status.md)，运行步骤见[部署说明](deployment.md)。
 
 **查看当前系统请先阅读[当前实现架构图](architecture-diagrams.md)**：包含 LiteLLM 原生管理台、默认本地启动与完整容器部署的差异、实际调用及计费流程。本篇下方的总体图和时序图属于长期目标。当前已实现提交后 Redis 唤醒、持久 Outbox 自动收敛和按 attempt 关联日志的后台补证；供应商发票对账、外部副作用工具和图 Checkpoint 续跑仍在后续范围。
@@ -79,8 +81,8 @@ LiteLLM 官方提供 Proxy、Virtual Key、调用费用跟踪、预算与速率�
 
 - 新目录使用 `agent_platform/`，与已有 `deepAgentsProject/`、`fastapi_litellm_agent/` 独立。
 - Python 依赖遵循根目录统一环境；本次不修改依赖或锁文件。现有 `uv.lock` 中 LiteLLM 是 `1.83.0`，不可把当前在线文档全部视为该版本能力。
-- 既有 `chat_models.chat.chat_model` 是静态配置的共享实例。实施时在共享模型模块提供可注入的工厂，保留旧示例行为；新平台通过工厂创建指向 Proxy 的请求级客户端，禁止并发修改共享实例的 key、headers 或模型。
-- 工厂必须允许按模型能力选择 Chat Completions / Responses 协议，不能无条件沿用当前共享实例的 Responses 与 reasoning 设置。
+- 既有 `chat_models.chat.chat_model` 是静态配置的共享实例，保留旧示例行为；平台为每次模型调用创建指向 Proxy 的 HTTP 客户端，禁止并发修改共享实例的 key、headers 或模型。
+- 平台生产调用统一使用原生 `/v1/responses`，显式设置 `store=false` 并重放完整历史；直接读取 SSE 中的 `response.id`、最终 `output` 与原始 `usage`，避免协议转换生成新的响应标识或数值类型转换掩盖无效用量。模型部署须支持 Responses；不自动重试或切换协议。
 - 若采用 LangGraph 流式 API，按仓库约定使用 `version="v3"`，由适配器转成平台自己的事件协议。
 - LiteLLM 部署固定经过兼容验证的镜像版本与 digest；升级单独验证，不使用浮动 `latest`。
 

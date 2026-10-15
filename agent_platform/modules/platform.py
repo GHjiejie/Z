@@ -450,37 +450,41 @@ class Platform:
 
     def acquire_stream(self, user, run_id):
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
-            self.identity.assert_current(connection, user, "runs.read_own")
-            self.owned(connection, t.runs, user, run_id, own=True)
-            connection.execute(
-                delete(rt.stream_leases).where(
-                    rt.stream_leases.c.tenant_id == user["tenant_id"],
-                    rt.stream_leases.c.expires_at < time.time(),
-                )
+            return self._acquire_stream(connection, user, run_id)
+
+    def _acquire_stream(self, connection, user, run_id):
+        """Also used inside AG-UI enqueue so rejected streams cannot start work."""
+        self.identity.assert_current(connection, user, "runs.read_own")
+        self.owned(connection, t.runs, user, run_id, own=True)
+        connection.execute(
+            delete(rt.stream_leases).where(
+                rt.stream_leases.c.tenant_id == user["tenant_id"],
+                rt.stream_leases.c.expires_at < time.time(),
             )
-            count = connection.scalar(
-                select(func.count())
-                .select_from(rt.stream_leases)
-                .where(rt.stream_leases.c.tenant_id == user["tenant_id"])
+        )
+        count = connection.scalar(
+            select(func.count())
+            .select_from(rt.stream_leases)
+            .where(rt.stream_leases.c.tenant_id == user["tenant_id"])
+        )
+        maximum = connection.scalar(
+            select(nt.entitlements.c.max_sse_connections).where(
+                nt.entitlements.c.tenant_id == user["tenant_id"]
             )
-            maximum = connection.scalar(
-                select(nt.entitlements.c.max_sse_connections).where(
-                    nt.entitlements.c.tenant_id == user["tenant_id"]
-                )
+        )
+        if maximum is None or count >= maximum:
+            raise PlatformError(429, "stream_limit", "组织实时连接数量已达到上限。")
+        identifier = uid()
+        connection.execute(
+            insert(rt.stream_leases).values(
+                id=identifier,
+                tenant_id=user["tenant_id"],
+                user_id=user["id"],
+                run_id=run_id,
+                expires_at=time.time() + STREAM_LEASE_SECONDS,
             )
-            if maximum is None or count >= maximum:
-                raise PlatformError(429, "stream_limit", "组织实时连接数量已达到上限。")
-            identifier = uid()
-            connection.execute(
-                insert(rt.stream_leases).values(
-                    id=identifier,
-                    tenant_id=user["tenant_id"],
-                    user_id=user["id"],
-                    run_id=run_id,
-                    expires_at=time.time() + STREAM_LEASE_SECONDS,
-                )
-            )
-            return identifier
+        )
+        return identifier
 
     def update_stream(self, user, identifier, *, release=False):
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
@@ -668,10 +672,16 @@ class Platform:
         message: str,
         idempotency_key: str,
         model_id: str | None = None,
+        *,
+        ag_ui: dict | None = None,
+        admit_stream: bool = False,
+        resume_sequence: int = 0,
     ) -> dict:
         request = {"session_id": session_id, "message": message}
         if model_id is not None:
             request["model_id"] = model_id
+        if ag_ui is not None:
+            request["ag_ui"] = ag_ui
         fingerprint = digest(json.dumps(request, sort_keys=True))
         with self.db.transaction(f"tenant:{user['tenant_id']}") as connection:
             self.identity.assert_current(connection, user, "runs.execute")
@@ -696,7 +706,25 @@ class Platform:
                     raise PlatformError(
                         409, "idempotency_conflict", "同一幂等键不能用于不同的请求。"
                     )
-                return self.public_run(dict(previous))
+                result = self.public_run(dict(previous))
+                if admit_stream:
+                    result["_stream_id"] = self._acquire_stream(
+                        connection, user, result["id"]
+                    )
+                return result
+            if resume_sequence:
+                raise PlatformError(400, "invalid_cursor", "新运行不能携带重放游标。")
+            if ag_ui is not None:
+                correlations = connection.scalars(
+                    select(t.runs.c.spec).where(t.runs.c.session_id == session_id)
+                )
+                if any(
+                    spec.get("ag_ui", {}).get("message_id") == ag_ui["message_id"]
+                    for spec in correlations
+                ):
+                    raise PlatformError(
+                        409, "message_id_conflict", "该消息标识已用于其他运行。"
+                    )
             if connection.scalar(
                 select(func.count())
                 .select_from(t.runs)
@@ -823,6 +851,10 @@ class Platform:
             spec["price_version_id"] = routing["price_version_id"]
             spec["config_version"] = routing["config_version"]
             spec["membership_id"] = user.get("membership_id")
+            if ag_ui is not None:
+                # Only the API's validated protocol correlation belongs here;
+                # client state, tools and prompts never enter the frozen spec.
+                spec["ag_ui"] = ag_ui
             result = {
                 "id": uid(),
                 "tenant_id": user["tenant_id"],
@@ -859,7 +891,12 @@ class Platform:
                     .values(title=message[:60])
                 )
             append_event(connection, result["id"], "run.queued", {"status": "queued"})
-        return self.public_run(result)
+            public = self.public_run(result)
+            if admit_stream:
+                public["_stream_id"] = self._acquire_stream(
+                    connection, user, result["id"]
+                )
+        return public
 
     @staticmethod
     def public_run(row: dict) -> dict:

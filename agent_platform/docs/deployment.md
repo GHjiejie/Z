@@ -20,7 +20,7 @@ make -C agent_platform start
 
 一键启动默认使用 `GATEWAY=managed`，读取根目录 `.env` 中的 `OPENAI_BASE_URL`、`OPENAI_API_KEY` 和 `MODEL`，将上游模型配置为 `openai/<MODEL>`，对平台提供同名别名。有显式 `UPSTREAM_API_KEY` 时使用 `UPSTREAM_MODEL` / `UPSTREAM_API_BASE` / `UPSTREAM_API_KEY`。平台运行进程只接收本机 LiteLLM 地址与受限 key；master key、UI 密码和上游 key 不进入平台运行进程。
 
-官方管理页面默认是 `http://127.0.0.1:4000/ui`，平台管理员从侧栏「LiteLLM 网关」进入。首次启动自动生成 `.data/local/gateway/.env.control`（权限0600），其中 `UI_USERNAME` 默认为 `admin`，`UI_PASSWORD` 是独立管理页密码；数据库密码、master key、salt 也在该文件中持久保存。运行密钥保存在同目录 `.env.gateway`，仅允许当前别名的 Chat Completions，并有预算、RPM、TPM、并发与30天过期限制。重启验证后复用该密钥，不重置有效期，不自动轮换；无效或过期时启动失败并明确提示。请不要删除控制文件后复用旧数据库卷，否则保存的加密数据和数据库认证将无法匹配。
+官方管理页面默认是 `http://127.0.0.1:4000/ui`，平台管理员从侧栏「LiteLLM 网关」进入。首次启动自动生成 `.data/local/gateway/.env.control`（权限0600），其中 `UI_USERNAME` 默认为 `admin`，`UI_PASSWORD` 是独立管理页密码；数据库密码、master key、salt 也在该文件中持久保存。运行密钥保存在同目录 `.env.gateway`，仅允许明确授权模型的 Responses 调用，并有预算、RPM、TPM、并发与30天过期限制。重启验证后复用该密钥，不重置有效期，不自动轮换；无效、过期或协议权限不匹配时启动失败并明确提示。请不要删除控制文件后复用旧数据库卷，否则保存的加密数据和数据库认证将无法匹配。
 
 本地容器归属于由 `STATE_DIR` 派生的独立 Compose 项目，平台仍使用现有 SQLite 数据。`make stop` / Ctrl+C 停止该实例的网关容器并保留卷；不会停止其他 Compose 项目。`LITELLM_PORT` 控制本机管理页与调用端口。Docker 不可用时不会偷偷回退直连上游；已有外部服务可显式使用 `GATEWAY=external`，此时读取 `PLATFORM_LITELLM_URL` / `PLATFORM_LITELLM_KEY`，空值回退根 `OPENAI_*`，并可通过 `PLATFORM_LITELLM_ADMIN_URL` 指定外部管理页。
 
@@ -53,7 +53,7 @@ PLATFORM_LITELLM_URL=http://127.0.0.1:4000/v1
 PLATFORM_LITELLM_KEY=受限的LiteLLM虚拟密钥
 ```
 
-地址必须是 Chat Completions 接口所在的服务器地址，通常以 `/v1` 结尾。模型目录中的 `alias` 必须与 LiteLLM 的 `model_name` 对应。平台没有模型模拟回复：缺少网关配置时允许管理操作，但拒绝模型调用。
+地址必须是 Responses 接口所在的服务器地址，通常以 `/v1` 结尾；平台统一调用该地址下的 `/responses`。模型目录中的 `alias` 必须与 LiteLLM 的 `model_name` 对应。平台没有模型模拟回复：缺少网关配置时允许管理操作，但拒绝模型调用。
 
 一键启动通过 dotenv 解析文件，不作为 shell 脚本执行；分步 Python 命令用 `uv run --env-file` 加载配置。直接执行 Python 或 Uvicorn 时需要自行加载环境变量。设置 `PLATFORM_EMBEDDED_WORKER=false` 时，一键启动会自动管理独立 Worker；使用 `make dev` 分步启动时则要另启 `make worker`。
 
@@ -88,6 +88,7 @@ PLATFORM_LITELLM_KEY=受限的LiteLLM虚拟密钥
 | `UPSTREAM_API_BASE` | 上游接口地址，例如 `https://api.openai.com/v1` |
 | `UPSTREAM_API_KEY` | 真实上游模型密钥，仅 LiteLLM 持有 |
 | `LITELLM_MODEL_ALIAS` | 默认 `platform-chat`，平台模型目录也使用该别名 |
+| `GATEWAY_KEY_MODELS` | 可选的逗号分隔模型白名单，默认仅 `LITELLM_MODEL_ALIAS`；必须包含默认别名，不能有重复、空项或通配符 |
 
 数据库密码直接用于连接 URL，因此推荐十六进制随机串，避免 URL 特殊字符的编码歧义。所有密码和密钥都应分别生成，不能复用示例文本。
 
@@ -97,11 +98,13 @@ make -C agent_platform gateway-key
 make -C agent_platform up
 ```
 
-`infra` 启动数据库、Redis 和 LiteLLM。`gateway-key` 在 LiteLLM 容器内运行受限密钥引导脚本，创建一个 `internal_user` 身份，给一个模型别名生成仅允许 Chat Completions 的虚拟密钥。Master key 不离开该容器环境；生成的运行密钥写入 `agent_platform/.data/.env.gateway`，文件权限为 0600，归当前宿主用户所有。Compose 只把该运行密钥交给 API、Worker 和初始化服务，脚本不打印密钥。
+`infra` 启动数据库、Redis 和 LiteLLM。`gateway-key` 在 LiteLLM 容器内运行受限密钥引导脚本，创建一个 `internal_user` 身份，为明确列出的模型生成仅允许 `/responses` 与 `/v1/responses` 的虚拟密钥。Master key 不离开该容器环境；生成的运行密钥写入 `agent_platform/.data/.env.gateway`，文件权限为 0600，归当前宿主用户所有。Compose 只把该运行密钥交给 API、Worker 和初始化服务，脚本不打印密钥。
 
 默认运行密钥有效期 30 天，生命周期成本上限 100 USD、RPM 60、TPM 120000、并发 4，可在 `.env` 中通过 `GATEWAY_KEY_*` 调整。这里的网关预算是第二层上游保护，和平台钱包分别维护；生成密钥不会给平台充值。生产应建立到期前轮换流程。脚本发现输出文件已存在会拒绝再生成，避免重复创建凭据；轮换要在 LiteLLM 管理侧显式创建新 key、更新文件并重建 API/Worker，然后撤销旧 key。
 
-`up` 构建并启动平台服务。Compose 的数据库地址、Redis 地址、内嵌 Worker 开关均显式覆盖本地 `.env` 值。不要把 master key 填入 `PLATFORM_LITELLM_KEY`。LiteLLM 允许在管理页中新增模型并持久化至其数据库；支持更多模型时仍需同步更新运行密钥的模型白名单和平台模型目录，当前引导脚本只为一个别名授权。平台目录中的报价与 LiteLLM 上游成本配置各自维护，不会自动互相同步。
+`up` 构建并启动平台服务。Compose 的数据库地址、Redis 地址、内嵌 Worker 开关均显式覆盖本地 `.env` 值。不要把 master key 填入 `PLATFORM_LITELLM_KEY`。LiteLLM 允许在管理页中新增模型并持久化至其数据库；支持更多模型时需配置 `GATEWAY_KEY_MODELS`，同步更新运行用户、运行密钥的模型白名单和平台模型目录。平台目录中的报价与 LiteLLM 上游成本配置各自维护，不会自动互相同步。
+
+从旧版 Chat Completions 切换时，先通过 LiteLLM 管理接口显式将已有运行密钥的 `allowed_routes` 更新为 `["/responses", "/v1/responses"]`，保留原模型范围、预算、限流与有效期。受管租户密钥也须更新或通过已有轮换流程更换。引导脚本与网关同步器都会校验精确路由权限，发现旧协议权限会拒绝复用，不会自动扩大权限或重置密钥。已有部署记录的 `protocol` 元数据应在维护窗口同步为 `responses`；新建部署默认使用该协议。
 
 `agent_platform/.env` 中的 `PLATFORM_LITELLM_KEY` 供本地运行使用；Compose 中的运行 key 由 `.data/.env.gateway` 单独注入。已有受限 key 的管理员可直接创建该 0600 文件，内容为单行 `PLATFORM_LITELLM_KEY=...`，无需重复引导。
 
@@ -117,11 +120,11 @@ ghcr.io/berriai/litellm:v1.83.0-nightly@sha256:3a8f981557838dea1340d318ba22225bf
 
 这是用于本版兼容验证的 nightly 镜像，不是已经通过生产验收的稳定版。后续变更版本时，需要更新镜像 digest、Python 依赖与兼容验证记录，不能直接换成 `latest`。版本来源可在 [LiteLLM 官方仓库](https://github.com/BerriAI/litellm) 和 registry 查询；功能说明参考 [官方 Virtual Keys 文档](https://docs.litellm.ai/docs/proxy/virtual_keys)。
 
-LiteLLM 配置将 `router_settings.num_retries`、`litellm_settings.num_retries`、每个模型客户端 `max_retries` 均设为零，fallback 列表为空。平台 ChatOpenAI 也设置 `max_retries=0`。一次准入对应一个实际尝试；修改这些设置会破坏当前预占和结算假设。
+LiteLLM 配置将 `router_settings.num_retries`、`litellm_settings.num_retries`、每个模型客户端 `max_retries` 均设为零，fallback 列表为空。平台 OpenAI 客户端也设置 `max_retries=0`。一次准入对应一个实际尝试；修改这些设置会破坏当前预占和结算假设。
 
-平台启用 Chat Completions 的流式 usage 请求，保存网关返回的用量；网关完整输入/输出 token 和结束信息缺失时进入待核实，不能按零费用结算。即使浏览器已看到部分文字，也不能视为成功完成。取消已发出的请求同样可能留下待核实费用。
+平台使用 Responses 流式事件，保存完成响应中的用量；网关完整输入/输出 token 和结束信息缺失时进入待核实，不能按零费用结算。即使浏览器已看到部分文字，也不能视为成功完成。取消已发出的请求同样可能留下待核实费用。
 
-**当前结算规则是按 LiteLLM 网关计量结算，记录 `usage_source=litellm_gateway`。** 已验证 LiteLLM 1.83.0 会为缺失供应商 usage 的流自动估算 token：本地模拟供应商没有发送任何 usage 时，网关仍返回了输入 11、输出 4，协议没有附带 estimated 标记。因此，这些数据不能称为已由供应商确认的原始费用证据。平台的 confirmed 表示按网关计量完成平台结算；严格按供应商实际 token 收费需要另加可信取证与对账适配。真实供应商兼容验证必须包括这一缺失用量场景。
+**当前结算规则是按 LiteLLM 网关计量结算，记录 `usage_source=litellm_gateway`。** 此前的 Chat Completions 兼容测试已验证 LiteLLM 1.83.0 会为缺失供应商 usage 的流自动估算 token：本地模拟供应商没有发送任何 usage 时，网关仍返回了输入 11、输出 4，协议没有附带 estimated 标记。切换 Responses 后仍需验证各路由的缺失用量行为，不能仅凭网关 usage 将其称为供应商确认的原始费用证据。平台的 confirmed 表示按网关计量完成平台结算；严格按供应商实际 token 收费需要另加可信取证与对账适配。
 
 ## 数据库迁移
 

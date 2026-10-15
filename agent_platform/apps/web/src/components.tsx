@@ -22,6 +22,8 @@ import {
 } from "lucide-react";
 import { api, getTenantId } from "./api";
 
+export { Select } from "./Select";
+
 export function useResource<T>(path: string, enabled = true) {
   const [data, setData] = useState<T | null>(null);
   const [error, setError] = useState("");
@@ -110,6 +112,7 @@ export function Button({
       className={`button ${variant} ${className}`}
       {...props}
       disabled={busy || props.disabled}
+      aria-busy={busy || undefined}
     >
       {busy ? <LoaderCircle size={16} className="spin" /> : null}
       {children}
@@ -350,13 +353,13 @@ export function Modal({
     const originalOverflow = document.body.style.overflow;
     document.body.style.overflow = "hidden";
     ref.current
-      ?.querySelector<HTMLElement>("input, select, textarea, button")
+      ?.querySelector<HTMLElement>('input:not([aria-hidden="true"]), select:not([aria-hidden="true"]), textarea, button')
       ?.focus();
     const listener = (event: KeyboardEvent) => {
       if (event.key === "Escape") closeRef.current();
       if (event.key !== "Tab") return;
       const elements = ref.current?.querySelectorAll<HTMLElement>(
-        'button:not([disabled]), input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex="0"]',
+        'button:not([disabled]), input:not([disabled]):not([aria-hidden="true"]):not([type="hidden"]), select:not([disabled]):not([aria-hidden="true"]), textarea:not([disabled]), [tabindex="0"]',
       );
       if (!elements?.length) return;
       const first = elements[0];

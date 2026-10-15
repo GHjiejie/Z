@@ -133,6 +133,11 @@ async def execute_agent(
             ids.add(call["id"])
         message: dict = {"role": "assistant", "content": reply.content}
         if calls:
+            if reply.response_items:
+                # Replay native reasoning/function items in their original
+                # order for store=false. They are private graph state, never
+                # emitted as user-visible text or stored in usage receipts.
+                message["platform_response_items"] = reply.response_items
             message["tool_calls"] = [
                 {
                     "id": call["id"],
@@ -169,7 +174,14 @@ async def execute_agent(
         additions: list[dict] = []
         for call in state["pending_tools"]:
             await guard()
-            await emit("tool.started", {"id": call["id"], "name": call["name"]})
+            await emit(
+                "tool.started",
+                {
+                    "id": call["id"],
+                    "name": call["name"],
+                    "args": call["args"] if isinstance(call.get("args"), dict) else {},
+                },
+            )
             try:
                 if not isinstance(call.get("args"), dict):
                     raise TypeError("工具参数必须为 JSON 对象。")

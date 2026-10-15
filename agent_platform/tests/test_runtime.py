@@ -290,7 +290,10 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 )
 
             gateway = Gateway(
-                "https://litellm.test/v1", "test-key", client_factory=factory
+                "https://litellm.test/v1",
+                "test-key",
+                protocol="chat_completions",
+                client_factory=factory,
             )
             events = [
                 event
@@ -341,6 +344,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                     gateway = Gateway(
                         "https://litellm.test/v1",
                         "test-key",
+                        protocol="chat_completions",
                         client_factory=factory,
                         local_address="0.0.0.0",
                     )
@@ -383,6 +387,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             gateway = Gateway(
                 "https://litellm.test/v1",
                 "test-key",
+                protocol="chat_completions",
                 client_factory=factory,
                 local_address="0.0.0.0",
             )
@@ -413,6 +418,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
                 gateway = Gateway(
                     "https://litellm.test/v1",
                     "test-key",
+                    protocol="chat_completions",
                     client_factory=failing_factory,
                     local_address="0.0.0.0",
                 )
@@ -597,6 +603,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             gateway = Gateway(
                 "https://litellm.test/v1",
                 "test-key",
+                protocol="chat_completions",
                 client_factory=lambda **options: create_gateway_chat_model(
                     **options, http_async_client=client, http_socket_options=()
                 ),
@@ -652,6 +659,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             gateway = Gateway(
                 "https://litellm.test/v1",
                 "test-key",
+                protocol="chat_completions",
                 client_factory=lambda **options: create_gateway_chat_model(
                     **options, http_async_client=client, http_socket_options=()
                 ),
@@ -668,7 +676,7 @@ class GatewayTests(unittest.IsolatedAsyncioTestCase):
             {"OPENAI_API_KEY": "not-platform", "OPENAI_BASE_URL": "https://wrong.test"},
             clear=True,
         ):
-            gateway = Gateway()
+            gateway = Gateway(protocol="chat_completions")
             self.assertFalse(gateway.configured)
             with self.assertRaises(GatewayError) as caught:
                 _ = [event async for event in gateway.stream([], "test", 20, 0, [])]

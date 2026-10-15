@@ -33,7 +33,7 @@ from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.infrastructure.request_context import audit_details
 from agent_platform.modules.authorization import capabilities
 
-ALLOWED_ROUTES = ["/chat/completions", "/v1/chat/completions"]
+ALLOWED_ROUTES = ["/responses", "/v1/responses"]
 DEFAULT_LIMITS = {
     "max_budget": 100.0,
     "rpm_limit": 60,
@@ -529,7 +529,7 @@ class GatewayService:
                 "gateway_id": "primary",
                 "internal_route": route,
                 "base_url": base,
-                "protocol": "chat_completions",
+                "protocol": "responses",
                 "capabilities": values.get("capabilities")
                 or {"text": True, "tools": False},
                 "status": "active",
@@ -895,7 +895,7 @@ class GatewayService:
                         "gateway_id": "primary",
                         "internal_route": row["alias"],
                         "base_url": self.settings.litellm_url.rstrip("/"),
-                        "protocol": "chat_completions",
+                        "protocol": "responses",
                         "capabilities": {"text": True, "tools": True},
                         "status": "active",
                         "config_version": 1,

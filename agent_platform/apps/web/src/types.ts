@@ -46,7 +46,7 @@ export type Agent = {
 };
 export type Session = SessionResponse;
 export type Run = RunResponse;
-export type Message = { role: string; content: string; created_at?: string };
+export type Message = { id?: string; role: string; content: string; created_at?: string };
 export type SessionDetail = Session & { messages: Message[]; runs: Run[] };
 export type RunEvent = {
   sequence: number;

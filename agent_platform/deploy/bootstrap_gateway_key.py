@@ -6,6 +6,7 @@ import argparse
 import json
 import math
 import os
+import re
 import sys
 import uuid
 from datetime import UTC, datetime
@@ -14,7 +15,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
-ALLOWED_ROUTES = ["/chat/completions", "/v1/chat/completions"]
+ALLOWED_ROUTES = ["/responses", "/v1/responses"]
 
 
 def control_request(
@@ -70,8 +71,40 @@ def valid_key(key: object, master: str) -> bool:
     )
 
 
+def key_models(alias: str) -> list[str]:
+    """Require explicit model names and keep the default alias in scope."""
+    if re.fullmatch(r"[a-zA-Z0-9_.:/-]{1,200}", alias) is None:
+        raise ValueError("An explicit permitted model alias is required.")
+    configured = os.getenv("GATEWAY_KEY_MODELS")
+    if configured is None:
+        return [alias]
+    models = [item.strip() for item in configured.split(",")]
+    if (
+        any(ord(character) < 32 or ord(character) == 127 for character in configured)
+        or any(
+            re.fullmatch(r"[a-zA-Z0-9_.:/-]{1,200}", item) is None for item in models
+        )
+        or len(models) != len(set(models))
+        or alias not in models
+    ):
+        raise ValueError(
+            "GATEWAY_KEY_MODELS must contain unique explicit model aliases, "
+            "including LITELLM_MODEL_ALIAS, with no empty entries or wildcards."
+        )
+    return models
+
+
+def same_models(actual: object, expected: list[str]) -> bool:
+    return (
+        isinstance(actual, list)
+        and all(isinstance(item, str) for item in actual)
+        and len(actual) == len(set(actual))
+        and set(actual) == set(expected)
+    )
+
+
 def validate_existing(
-    output: Path, base: str, master: str, alias: str, limits: dict
+    output: Path, base: str, master: str, models: list[str], limits: dict
 ) -> None:
     lines = [
         line
@@ -113,9 +146,9 @@ def validate_existing(
         raise RuntimeError(
             "Existing key has expired; explicitly rotate it before restarting. No new key was created."
         )
-    if info.get("models") != [alias] or set(info.get("allowed_routes") or []) != set(
-        ALLOWED_ROUTES
-    ):
+    if not same_models(info.get("models"), models) or set(
+        info.get("allowed_routes") or []
+    ) != set(ALLOWED_ROUTES):
         raise RuntimeError(
             "Existing key model or route permissions do not match; update or rotate it explicitly."
         )
@@ -149,7 +182,9 @@ def validate_existing(
         base, master, "/user/info?" + urlencode({"user_id": user_id})
     )
     user = owner.get("user_info") or {}
-    if user.get("user_role") != "internal_user" or user.get("models") != [alias]:
+    if user.get("user_role") != "internal_user" or not same_models(
+        user.get("models"), models
+    ):
         raise RuntimeError(
             "Existing key owner has unexpected permissions; review it before reuse."
         )
@@ -163,12 +198,11 @@ def bootstrap(*, reuse_existing: bool = False) -> Path:
         )
     master = os.environ["LITELLM_MASTER_KEY"]
     alias = os.environ.get("LITELLM_MODEL_ALIAS", "platform-chat")
-    if not alias or alias == "*":
-        raise ValueError("An explicit permitted model alias is required.")
+    models = key_models(alias)
     base = os.getenv("GATEWAY_BOOTSTRAP_URL", "http://127.0.0.1:4000").rstrip("/")
     limits = key_limits()
     if output.exists():
-        validate_existing(output, base, master, alias, limits)
+        validate_existing(output, base, master, models, limits)
         return output
 
     def post(path: str, body: dict) -> dict:
@@ -182,7 +216,7 @@ def bootstrap(*, reuse_existing: bool = False) -> Path:
             "user_alias": "Agent platform runtime",
             "user_role": "internal_user",
             "auto_create_key": False,
-            "models": [alias],
+            "models": models,
         },
     )
     result = post(
@@ -190,7 +224,7 @@ def bootstrap(*, reuse_existing: bool = False) -> Path:
         {
             "user_id": user_id,
             "key_alias": "Agent platform runtime",
-            "models": [alias],
+            "models": models,
             # In 1.83.0, llm_api overwrites allowed_routes with all LLM routes.
             "key_type": "default",
             "allowed_routes": ALLOWED_ROUTES,
