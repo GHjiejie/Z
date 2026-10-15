@@ -4,9 +4,11 @@ model_list:
       model: os.environ/UPSTREAM_MODEL
       api_base: os.environ/UPSTREAM_API_BASE
       api_key: os.environ/UPSTREAM_API_KEY
-      temperature: 1
+      reasoning_effort: high
+      store: false
+      drop_params: true
       max_retries: 0
-      timeout: 90
+      timeout: 180
 
 router_settings:
   num_retries: 0
@@ -21,7 +23,7 @@ router_settings:
 litellm_settings:
   force_ipv4: true
   num_retries: 0
-  request_timeout: 90
+  request_timeout: 180
   set_verbose: false
   turn_off_message_logging: true
 
