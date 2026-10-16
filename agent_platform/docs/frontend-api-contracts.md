@@ -480,7 +480,7 @@ Reservation 完整已实现字段（`service.py:89`、第 241 行）：
 - decimal string：`amount,input_price,output_price,cost,overage`；`actual_cost,provider_cost:string|null`。
 - int：`estimated_input_tokens,max_output_tokens,rate_tokens`；`input_tokens,output_tokens:int|null`。
 - `rate_scopes:string[]`；`raw_usage:object|null`（JSON 解码）；T 端点在无 platform.costs.read 时删除 provider_cost/raw_usage；PT 端点返回底层完整 reservation，无额外 projection。UI 应仅显示必要字段，不展示 fingerprint/rate scopes 当业务信息。
-- 状态 `reserved|unresolved|settled|released|written_off`（`service.py:43`、第 725/935/972/995 行）。unresolved 是未知真实用量而非免费；仍持有金额和 concurrency；amount 为预占，cost 为客户已扣费用，actual_cost 为计算实际金额，overage 为平台承担差额。cost 不能替代 amount，estimated tokens 不能当 confirmed tokens。
+- 状态 `reserved|unresolved|settled|released|written_off`。unresolved 是未知真实用量而非免费；仍持有钱包/预算金额和原限流窗口内的用量，但释放执行并发名额；amount 为预占，cost 为客户已扣费用，actual_cost 为计算实际金额，overage 为平台承担差额。cost 不能替代 amount，estimated tokens 不能当 confirmed tokens。
 - 正常 worker 结算把 provider_cost 参数传 None（`worker/main.py:597`），所以有 platform.costs.read 也不保证供应商成本非空；不能凭成本空值推出毛利或成本为零。
 - UI：“待对账/全部”tab 可本地筛选；待对账只 unresolved；行的人工处理按钮仅 unresolved 且平台财务有权，其他只读；loading/empty/error/refresh 明确。可复用 `BillingReconciliation.tsx:42`，目前仅装在平台组织财务（`PlatformResources.tsx:209`），不要向租户 finance_viewer 展示不可调用的 mutation。
 

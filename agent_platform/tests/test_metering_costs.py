@@ -357,7 +357,7 @@ class MeteringCostTests(unittest.TestCase):
         self.assertEqual(self.billing.wallet(self.tenant)["balance"], balance)
         self.assertEqual(self.budget()["spent"], Decimal("0.3"))
 
-    def test_late_reconciliation_releases_real_redis_admission_and_adjusts_tokens(self):
+    def test_late_reconciliation_cleans_stale_redis_capacity_and_adjusts_tokens(self):
         redis_url = os.getenv("PLATFORM_ACCEPTANCE_REDIS_URL")
         if not redis_url:
             self.skipTest("Real isolated Redis is required for late metering cleanup")
@@ -370,6 +370,10 @@ class MeteringCostTests(unittest.TestCase):
         self.prepare_log_job()
         reservation = self.billing.reservations(self.tenant)[0]
         keys = limiter._keys(self.tenant, reservation["rate_scopes"])
+        for index in range(2, len(keys), 3):
+            self.assertIsNone(limiter.client.zscore(keys[index], "call-a"))
+            # Simulate a missed cleanup from before execution/fees were separated.
+            limiter.client.zadd(keys[index], {"call-a": time.time()})
         self.assertTrue(
             all(
                 limiter.client.zscore(keys[index], "call-a") is not None

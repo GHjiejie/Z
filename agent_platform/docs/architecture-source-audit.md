@@ -137,7 +137,7 @@ Maintenance每批先扫描全局租户目录，轮转处理exports/closures、�
 2. Local SQLite卷被API/Worker/gateway-sync/maintenance共同挂载，固定节点+单副本；WAL和BEGIN IMMEDIATE可串行写，但不能证明横向扩展。Chart模板明确拒绝SQLite多副本、非Recreate或未pin node（[charts/api/templates/_helpers.tpl:16-37](../charts/api/templates/_helpers.tpl#L16)）。
 3. API与maintenance共享export filesystem；通用storage RWX需实际StorageClass支持，源码不交付对象存储适配（[charts/storage/values.yaml:10-22](../charts/storage/values.yaml#L10)）。
 4. Tombstone与gateway撤销、financial evidence保留、DB恢复顺序耦合；UI组织关闭只应调用已有后端流程并显示blocker/state，不允许暗含“立即清空/恢复备份”。maintenance CLI的replay-tombstones是operator action，不能创造前端恢复功能（[apps/maintenance/main.py:1-5,26-37](../apps/maintenance/main.py#L1)）。
-5. 共享rate SQL与Redis是双重防线，Redis故障会拒绝新调用；未知计量继续占用wallet/concurrency，UI刷新或浏览器断线不能释放额度（[modules/billing/service.py:1-7](../modules/billing/service.py#L1)）。
+5. 共享rate SQL与Redis是双重防线，Redis故障会拒绝新调用；未知计量继续占用wallet/budget并保留原限流窗口用量，但调用转为unresolved后释放执行并发。UI刷新或浏览器断线不能释放费用预占（[modules/billing/service.py](../modules/billing/service.py)）。
 6. 旧全局gateway_configured指标准确性范围有限；当前组织应根据管理API/模型授权/Run错误判断可运行，不应由health统一强制“网关未配置”。
 7. `config.py`定义部分Settings字段（如worker_poll_seconds/web_directory/session_hours）没有全部映射到from_env；不要根据字段名编造环境变量或设置UI，部署配置以from_env/Chart实际生成值为准（[infrastructure/config.py:40-45,107-162](../infrastructure/config.py#L40)）。
 8. 异步服务仅靠heartbeat探针不能验证业务处理成功；真正的unknown外部写入必须保持核查状态，不可由UI盲目重试推断失败。

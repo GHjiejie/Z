@@ -2,8 +2,9 @@
 
 Redis, when configured, adds an atomic shared rate limiter and must be available
 for new reservations. SQLite uses exact decimal strings rather than binary floats.
-Unconfirmed requests keep money and database concurrency capacity indefinitely;
-Redis leases can expire without releasing either of those authoritative holds.
+Unconfirmed requests keep their financial holds until settlement or reconciliation.
+Execution concurrency counts reserved calls only; unresolved calls retain their
+wallet, budget and rate-window usage without blocking new execution slots.
 """
 
 from __future__ import annotations
@@ -40,7 +41,7 @@ from agent_platform.infrastructure.money import ExactMoney
 ZERO = Decimal(0)
 PRECISION = Decimal("0.000000000001")
 MAX_MONEY = Decimal(1000000000)
-ACTIVE = ("reserved", "unresolved")
+FINANCIAL_HOLD_STATUSES = ("reserved", "unresolved")
 
 
 wallets = Table(
@@ -663,15 +664,21 @@ class BillingService:
                         )
                     ).one()
                     aggregate = func.exact_sum if self.db.sqlite else func.sum
-                    active = conn.execute(
+                    concurrent_calls, held_amount = conn.execute(
                         select(
-                            func.count(), aggregate(reservations_table.c.amount)
-                        ).where(*filters, reservations_table.c.status.in_(ACTIVE))
+                            func.count().filter(
+                                reservations_table.c.status == "reserved"
+                            ),
+                            aggregate(reservations_table.c.amount),
+                        ).where(
+                            *filters,
+                            reservations_table.c.status.in_(FINANCIAL_HOLD_STATUSES),
+                        )
                     ).one()
                     counters = {
                         "rpm": recent[0] + 1,
                         "tpm": recent[1] + token_count,
-                        "concurrent": active[0] + 1,
+                        "concurrent": concurrent_calls + 1,
                     }
                     for name, count in counters.items():
                         limit = quota[name]
@@ -687,7 +694,7 @@ class BillingService:
                         committed = self._budget_spent(
                             conn, tenant_id, quota["scope"], quota["subject_id"]
                         )
-                    reserved = Decimal(str(active[1] or 0))
+                    reserved = Decimal(str(held_amount or 0))
                     if budget is not None and (
                         budget == ZERO or committed + reserved + amount > budget
                     ):
@@ -1187,7 +1194,10 @@ class BillingService:
             self._audit(
                 conn, tenant_id, None, "billing.unresolved", call_id, {"reason": reason}
             )
-            return _serialize(row)
+        # Local execution ended. Keep the estimated rate usage and all money
+        # frozen, but release the Redis execution slot after the SQL commit.
+        self._finish_rate(row, row["rate_tokens"])
+        return _serialize(row)
 
     def resolve(
         self,
@@ -1377,7 +1387,7 @@ class BillingService:
                     )
                 ).mappings()
             )
-            if any(row["status"] in ACTIVE for row in rows):
+            if any(row["status"] in FINANCIAL_HOLD_STATUSES for row in rows):
                 raise PlatformError(
                     409,
                     "unresolved_billing",
@@ -1436,7 +1446,8 @@ class BillingService:
 
 
 # Each policy has a sliding 60-second request set, per-call token map and a short
-# Redis concurrency lease. Durable unresolved calls are also counted in SQL.
+# Redis concurrency lease. SQL counts reserved calls independently of the lease;
+# unresolved calls retain financial holds and their original rate-window usage.
 # All tenant keys share one hash slot; every dimension is checked before mutation.
 _ADMIT_LUA = r"""
 local now = tonumber(ARGV[1])
@@ -1538,7 +1549,8 @@ class RedisLimiter:
             )
         except Exception:
             # Money is already safely committed in SQL. Stale Redis reservations
-            # only over-restrict and age out; SQL still protects unresolved calls.
+            # only over-restrict and age out; SQL still protects financial holds
+            # and the concurrency of calls whose execution has not ended.
             import logging
 
             logging.getLogger(__name__).warning(

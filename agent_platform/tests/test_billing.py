@@ -256,7 +256,7 @@ class BillingTest(unittest.TestCase):
             lambda: self.reserve("over-budget", input_tokens=1, output_tokens=0),
         )
 
-    def test_unknown_usage_keeps_money_and_capacity_after_rate_window(self):
+    def test_unknown_usage_keeps_money_but_releases_execution_capacity(self):
         self.credit()
         self.quota(concurrent=1)
         self.reserve()
@@ -265,7 +265,6 @@ class BillingTest(unittest.TestCase):
         old = (datetime.now(UTC) - timedelta(days=3)).isoformat()
         with self.db.transaction(f"tenant:{self.tenant_a}") as conn:
             conn.execute(reservations_table.update().values(created_at=old))
-        self.error("concurrent_limit", lambda: self.reserve("next"))
         self.error(
             "unresolved_call",
             lambda: self.billing.release(self.tenant_a, "call-1", "TTL expired"),
@@ -273,8 +272,54 @@ class BillingTest(unittest.TestCase):
         self.assertEqual(
             Decimal(self.billing.wallet(self.tenant_a)["reserved"]), Decimal("0.2")
         )
+        self.reserve("next")
+        self.assertEqual(
+            Decimal(self.billing.wallet(self.tenant_a)["reserved"]), Decimal("0.4")
+        )
+        self.error("concurrent_limit", lambda: self.reserve("over-limit"))
         self.billing.settle(self.tenant_a, "call-1", 100, 10)
+        # Late settlement of the old call cannot release a different active call.
+        self.error("concurrent_limit", lambda: self.reserve("still-over-limit"))
+        self.billing.settle(self.tenant_a, "next", 100, 10)
         self.reserve("reconciled")
+
+    def test_unknown_usage_preserves_budgets_and_capacity_limits_in_every_scope(self):
+        self.credit()
+        self.reserve()
+        self.billing.unresolved(self.tenant_a, "call-1", "Usage not confirmed")
+        for scope, subject in (
+            ("tenant", self.tenant_a),
+            ("user", self.user_a),
+            ("model", self.model_a),
+        ):
+            with self.subTest(scope=scope):
+                self.quota(scope=scope, subject=subject, concurrent=1, budget="0.3")
+                self.error(
+                    "budget_exceeded",
+                    lambda scope=scope: self.reserve(f"{scope}-denied"),
+                )
+                self.quota(scope=scope, subject=subject, concurrent=1, budget="0.4")
+                self.reserve(f"{scope}-accepted")
+                self.error(
+                    "concurrent_limit",
+                    lambda scope=scope: self.reserve(f"{scope}-excess"),
+                )
+                self.billing.release(
+                    self.tenant_a, f"{scope}-accepted", "Request never sent"
+                )
+        self.assertEqual(
+            Decimal(self.billing.wallet(self.tenant_a)["reserved"]), Decimal("0.2")
+        )
+
+    def test_unknown_usage_does_not_consume_entitlement_execution_capacity(self):
+        self.credit()
+        self.fixture.platform.identity.set_entitlements(
+            self.fixture.principal, self.tenant_a, {"max_concurrent_runs": 1}
+        )
+        self.reserve()
+        self.billing.unresolved(self.tenant_a, "call-1", "Usage not confirmed")
+        self.reserve("next")
+        self.error("concurrent_limit", lambda: self.reserve("over-limit"))
 
     def test_token_adjustment_releases_unused_tokens_in_original_window(self):
         self.credit()
@@ -789,7 +834,7 @@ class RedisBillingTest(unittest.TestCase):
             self.limiter.admit(self.tenant, "excess", 1, [policy])
         self.assertEqual(caught.exception.code, "tpm_limit")
 
-    def test_expired_redis_lease_cannot_release_unknown_database_capacity(self):
+    def test_unknown_usage_releases_redis_capacity_without_refunding_rate_tokens(self):
         settings = Settings(
             database_url=f"sqlite:///{Path(self.temporary.name) / (self.tenant + '.db')}",
             admin_email="owner@redis-billing.test",
@@ -816,6 +861,16 @@ class RedisBillingTest(unittest.TestCase):
             billing.unresolved(tenant, "old", "Unknown remote state")
             scopes = [f"entitlement:{tenant}", f"tenant:{tenant}"]
             keys = self.limiter._keys(tenant, scopes)
+            for index in range(0, len(keys), 3):
+                self.assertIsNone(self.limiter.client.zscore(keys[index + 2], "old"))
+                self.assertIsNotNone(self.limiter.client.zscore(keys[index], "old"))
+                self.assertEqual(
+                    self.limiter.client.hget(keys[index + 1], "old"), "200"
+                )
+            billing.reserve(
+                tenant, actor["id"], model["id"], run["id"], "new", 100, 100, "1", "1"
+            )
+            # Losing Redis state still cannot admit a second executing call.
             self.limiter.client.delete(*keys)
             self.assertTrue(all(self.limiter.client.exists(key) == 0 for key in keys))
             with self.assertRaises(PlatformError) as caught:
@@ -824,13 +879,16 @@ class RedisBillingTest(unittest.TestCase):
                     actor["id"],
                     model["id"],
                     run["id"],
-                    "new",
+                    "excess",
                     100,
                     100,
                     "1",
                     "1",
                 )
             self.assertEqual(caught.exception.code, "concurrent_limit")
+            self.assertEqual(
+                Decimal(billing.wallet(tenant)["reserved"]), Decimal("0.0004")
+            )
         finally:
             db.close()
 

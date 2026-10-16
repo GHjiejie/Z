@@ -340,6 +340,33 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
             ["user"],
         )
 
+    async def test_finished_unknown_call_does_not_block_the_next_run(self) -> None:
+        self.credit()
+        self.platform.billing.set_quota(
+            self.tenant, "tenant", self.tenant, None, None, 1, None
+        )
+        self.enqueue()
+        _, old = await self.execute(FakeGateway(missing=True))
+        self.assertEqual(
+            self.platform.get_run(self.user, old["id"])["status"], "failed"
+        )
+        held = Decimal(self.platform.billing.wallet(self.tenant)["reserved"])
+        self.assertGreater(held, 0)
+
+        session = self.platform.create_session(self.user, self.agent["id"], None)
+        self.enqueue("next request", session=session)
+        gateway = FakeGateway()
+        _, new = await self.execute(gateway)
+        self.assertEqual(
+            self.platform.get_run(self.user, new["id"])["status"], "succeeded"
+        )
+        self.assertEqual(len(gateway.calls), 1)
+        self.assertEqual(self.receipts(old["id"])[0]["status"], "unresolved")
+        self.assertEqual(self.receipts(new["id"])[0]["status"], "settled")
+        self.assertEqual(
+            Decimal(self.platform.billing.wallet(self.tenant)["reserved"]), held
+        )
+
     async def test_cancel_queued_run_never_claimed(self) -> None:
         queued = self.enqueue()
         self.platform.cancel_run(self.user, queued["id"])
