@@ -92,6 +92,7 @@ input[type="checkbox"] {
   height: 16px;
   accent-color: var(--primary);
   margin: 0;
+  padding: 0;
   flex-shrink: 0;
 }
 input[type="number"] {
@@ -1543,7 +1544,7 @@ td .button {
   line-height: 1.9;
   color: #b4a9be;
 }
-.field input,
+.field input:not([type="checkbox"]):not([type="radio"]),
 .field select,
 .field textarea {
   width: 100%;
@@ -1569,10 +1570,11 @@ td .button {
 }
 .tool-choices {
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 12px;
 }
 .tool-choices > label {
+  min-width: 0;
   border: 1px solid #e9e2ef;
   border-radius: 8px;
   padding: 12px;
@@ -1582,9 +1584,14 @@ td .button {
   font-size: 11px;
   cursor: pointer;
 }
+.tool-choices > label > span {
+  flex: 1;
+  min-width: 0;
+  line-height: 1.6;
+}
 .tool-choices small {
   display: block;
-  color: #b6a9bf;
+  color: var(--text-secondary);
   font-size: 9px;
   margin-top: 4px;
 }
