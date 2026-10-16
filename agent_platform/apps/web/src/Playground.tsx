@@ -2,11 +2,11 @@ import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react
 import type { FormEvent } from "react";
 import {
   AlertCircle, ArrowDown, ArrowUp, Bot, Check, ChevronRight, CircleStop,
-  Copy, History, LoaderCircle, MessageSquare, Plus, Search,
+  Copy, History, LoaderCircle, MessageSquare, Plus,
   Sparkles, Terminal, Wrench,
 } from "lucide-react";
 import { api, dateTime, getScopeRevision, getTenantId, scopeIsCurrent, tenantLink, terminal, write } from "./api";
-import { Button, Modal, Select, useResource, useToast } from "./components";
+import { Button, Modal, SearchBox, Select, useResource, useToast } from "./components";
 import type { Agent, Model, Run, Session, SessionDetail } from "./types";
 import type { AGUIEvent } from "./ag-ui";
 import { useAgentRun } from "./useAgentRun";
@@ -330,7 +330,7 @@ export function Playground({ name }: { name?: string }) {
     </div>
     {historyOpen && <Modal title="历史对话" close={() => setHistoryOpen(false)}>
       <div className="pg-history-body">
-        <label className="pg-history-search"><Search size={17} /><input aria-label="搜索历史对话" placeholder="搜索对话" value={historyQuery} onChange={(event) => setHistoryQuery(event.target.value)} /></label>
+        <SearchBox className="pg-history-search" aria-label="搜索历史对话" placeholder="搜索对话" value={historyQuery} onChange={setHistoryQuery} />
         {sessions.error && <div className="pg-notice error" role="alert"><span>{sessions.error}</span><button onClick={() => void sessions.reload()}>重试</button></div>}
         {sessions.loading && !sessions.data ? <div className="pg-loading"><LoaderCircle size={20} className="spin" />正在加载…</div>
           : recentSessions.length ? <div className="pg-history-list">{recentSessions.map((session) => <button key={session.id} className={session.id === sessionId ? "selected" : ""} disabled={busy} onClick={() => chooseSession(session)}>

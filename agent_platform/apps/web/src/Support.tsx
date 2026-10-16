@@ -199,7 +199,7 @@ export function PlatformRolesPanel({ changed }: { changed: () => Promise<void> }
   }
   return <Panel title="平台角色" detail="平台管理员、财务和支持角色与组织成员角色分别管理。最后一位有效平台管理员不能被撤销。">
     <form className="toolbar" onSubmit={(event) => { event.preventDefault(); void find(formValue(event.currentTarget, "email")); }}>
-      <input name="email" type="email" placeholder="按完整邮箱查询账号" maxLength={254} required />
+      <input name="email" type="email" aria-label="查询平台账号邮箱" placeholder="按完整邮箱查询账号" maxLength={254} required />
       <Button type="submit" disabled={searching}>
         {searching ? "查询中…" : "查询账号"}</Button>
     </form>

@@ -61,18 +61,20 @@ function ModelPolicyEditor({ policy, models, close, saved }: { policy: ModelPoli
       <ol className="model-priority-list">
         {order.map((id, index) =>
           <li key={id}>
-            <span>
-              {models.find((item) => item.id === id)?.name ?? "已不可用模型"}</span>
-            <div className="row-actions">
-              <button className="icon-button" type="button" aria-label="提高优先级" disabled={index === 0} onClick={() => move(index, -1)}>
-                <ArrowUp size={14} />
-              </button>
-              <button className="icon-button" type="button" aria-label="降低优先级" disabled={index === order.length - 1} onClick={() => move(index, 1)}>
-                <ArrowDown size={14} />
-              </button>
-              <button className="icon-button" type="button" aria-label="移除候选模型" onClick={() => setOrder((previous) => previous.filter((value) => value !== id))}>
-                <X size={14} />
-              </button>
+            <div className="model-priority-row">
+              <span>
+                {models.find((item) => item.id === id)?.name ?? "已不可用模型"}</span>
+              <div className="row-actions">
+                <button className="icon-button" type="button" aria-label="提高优先级" disabled={index === 0} onClick={() => move(index, -1)}>
+                  <ArrowUp size={14} />
+                </button>
+                <button className="icon-button" type="button" aria-label="降低优先级" disabled={index === order.length - 1} onClick={() => move(index, 1)}>
+                  <ArrowDown size={14} />
+                </button>
+                <button className="icon-button" type="button" aria-label="移除候选模型" onClick={() => setOrder((previous) => previous.filter((value) => value !== id))}>
+                  <X size={14} />
+                </button>
+              </div>
             </div>
           </li>)}</ol>
     </Form>

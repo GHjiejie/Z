@@ -70,8 +70,8 @@ input:focus,
 select:focus,
 textarea:focus {
   outline: none;
-  border-color: #8e8cf8 !important;
-  box-shadow: 0 0 0 3px #6663ef12;
+  border-color: var(--control-focus, #8e8cf8) !important;
+  box-shadow: var(--control-focus-ring, 0 0 0 3px #6663ef12);
 }
 input,
 select,
@@ -3259,7 +3259,8 @@ td small,
 @media (max-width: 600px) { .tenant-limits-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 0 16px 16px; } .tenant-detail-summary { padding: 16px; } .tenant-detail-summary .row-actions { justify-content: flex-start; } }
 .model-priority-list { list-style: decimal; padding-left: 25px; margin: 15px 0; }
 .model-priority-list li { padding: 8px 10px; border-bottom: 1px solid var(--border, #ebeaf2); }
-.model-priority-list li > span { display: inline-block; max-width: 65%; vertical-align: middle; }
-.model-priority-list .row-actions { display: inline-flex; float: right; }
+.model-priority-row { display: flex; align-items: center; gap: 10px; min-width: 0; }
+.model-priority-row > span { flex: 1; min-width: 0; overflow-wrap: anywhere; }
+.model-priority-row .row-actions { flex-shrink: 0; flex-wrap: nowrap; }
 .support-message { padding: 16px 0; border-bottom: 1px solid var(--border, #ebeaf2); }
 .support-message pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }

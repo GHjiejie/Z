@@ -59,8 +59,7 @@
 .pg-jump-latest { position: absolute; bottom: 185px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 7px; min-height: 34px; border: 1px solid #e4dfed; background: #fff; border-radius: 20px; padding: 8px 13px; color: #82728e; font-size: 11px; box-shadow: 0 3px 12px #30233d10; }
 .pg-loading { display: flex; justify-content: center; align-items: center; gap: 10px; padding: 36px 12px; color: #9c92aa; font-size: 12px; }
 .pg-history-body, .pg-run-details { padding: 8px 24px 24px; }
-.pg-history-search { display: flex; align-items: center; gap: 10px; background: #f6f5f9; border-radius: 11px; padding: 0 13px; color: #9a91a7; margin-bottom: 14px; }
-.pg-history-search input { flex: 1; min-width: 0; padding: 12px 0; border: 0; box-shadow: none !important; background: transparent; font-size: 12px; }
+.pg-history-search { width: 100%; margin-bottom: 14px; }
 .pg-history-list { max-height: 48vh; overflow-y: auto; scrollbar-width: thin; }
 .pg-history-list button { width: 100%; display: flex; align-items: center; gap: 13px; padding: 14px 12px; border: 0; background: transparent; border-radius: 10px; text-align: left; color: #a195b0; }
 .pg-history-list button:hover, .pg-history-list button.selected { background: #f5f1fc; }

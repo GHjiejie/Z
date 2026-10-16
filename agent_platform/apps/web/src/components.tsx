@@ -285,16 +285,20 @@ export function SearchBox({
   value,
   onChange,
   placeholder = "搜索…",
+  "aria-label": ariaLabel,
+  className = "",
 }: {
   value: string;
   onChange: (value: string) => void;
   placeholder?: string;
+  "aria-label"?: string;
+  className?: string;
 }) {
   return (
-    <label className="search-box">
+    <label className={`search-box ${className}`}>
       <Search size={16} />
       <input
-        aria-label={placeholder}
+        aria-label={ariaLabel ?? placeholder}
         placeholder={placeholder}
         value={value}
         onChange={(event) => onChange(event.target.value)}
