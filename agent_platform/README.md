@@ -7,6 +7,7 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 - [AG-UI 交互协议](docs/ag-ui-protocol.md)：Playground 的流式运行、工具事件、取消、幂等与断线恢复。
 - [架构调整与验收](docs/architecture-adjustments.md)：八项架构改进、证据及升级契约。
 - [多租户实现说明](docs/multi-tenant-implementation.md)：当前架构、权限、数据库、网关、账务和交付状态。
+- [账号与前端角色权限](docs/roles-and-permissions.md)：7 种角色的菜单、可操作功能、当前本机账号与本地凭据文件位置。
 - [多租户运行手册](docs/multi-tenant-operations.md)：部署、密钥、切库、备份、关闭与恢复。
 - [Kubernetes 本地部署](docs/kubernetes-local.md)：OrbStack 集群、数据迁移、更新、停启及恢复。
 - [迭代设计方案](docs/multi-tenant-iteration-design.md)：设计依据和正式验收矩阵。
