@@ -150,6 +150,10 @@ export function reduceMessages(messages: Message[], event: AGUIEvent): Message[]
       return messages.map((message) => message.id === event.messageId && message.role === "reasoning" ? {
         ...message, metadata: { ...message.metadata, ...event.metadata, platform: event.metadata?.platform ?? { reasoning_status: "complete" } },
       } : message);
+    case EventType.ACTIVITY_SNAPSHOT:
+      return [...messages.filter((message) => message.id !== event.messageId), {
+        id: event.messageId, role: "activity", activityType: event.activityType, content: event.content,
+      }];
     case EventType.TEXT_MESSAGE_START:
       return messages.some((message) => message.id === event.messageId) ? messages : [
         ...messages, { id: event.messageId, role: event.role ?? "assistant", content: "" },

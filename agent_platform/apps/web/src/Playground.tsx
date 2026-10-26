@@ -7,10 +7,11 @@ import {
 } from "lucide-react";
 import { api, dateTime, getScopeRevision, getTenantId, scopeIsCurrent, tenantLink, terminal, write } from "./api";
 import { Button, Modal, SearchBox, Select, useResource, useToast } from "./components";
-import type { Agent, Model, ReasoningTrace, Run, Session, SessionDetail } from "./types";
+import type { Agent, GeneratedArtifact, Model, ReasoningTrace, Run, Session, SessionDetail } from "./types";
 import type { AGUIEvent } from "./ag-ui";
 import { messageRunId } from "./ag-ui";
 import { useAgentRun } from "./useAgentRun";
+import { Artifact } from "./Artifact";
 import { Reasoning, reasoningTrace } from "./Reasoning";
 
 const query = () => new URLSearchParams(location.hash.split("?")[1] ?? "");
@@ -29,6 +30,7 @@ export function Playground({ name }: { name?: string }) {
   const [draft, setDraft] = useState("");
   const [liveText, setLiveText] = useState("");
   const [liveReasoning, setLiveReasoning] = useState<ReasoningTrace[]>([]);
+  const [liveArtifacts, setLiveArtifacts] = useState<GeneratedArtifact[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [canceling, setCanceling] = useState(false);
@@ -60,6 +62,8 @@ export function Playground({ name }: { name?: string }) {
     .sort((a, b) => b.created_at.localeCompare(a.created_at))[0];
   const { run: activeRun, events, connection, error: streamError, start, attach, reset, reconnect } = useAgentRun(tenantScope, {
     messages: (messages, runId) => {
+      setLiveArtifacts(messages.flatMap((message) => message.role === "activity" && message.activityType === "GENERATIVE_UI"
+        ? [{ id: message.id, run_id: runId, content: message.content }] : []));
       const livePrefix = `assistant:${runId}:`;
       const isLiveReply = (id: string) => id === `assistant:${runId}` || id.startsWith(livePrefix);
       setLiveReasoning(messages.flatMap((message) => {
@@ -81,7 +85,7 @@ export function Playground({ name }: { name?: string }) {
       if (message) setError(message);
       // Keep the last streamed text visible until its persisted replacement is
       // ready, so completion cannot briefly empty the assistant bubble.
-      void loadSession(id, false).then((result) => { if (result) { setLiveText(""); setLiveReasoning([]); } });
+      void loadSession(id, false).then((result) => { if (result) { setLiveText(""); setLiveArtifacts([]); setLiveReasoning([]); } });
       void sessions.reload();
     },
   });
@@ -125,6 +129,7 @@ export function Playground({ name }: { name?: string }) {
     reset();
     setLiveText("");
     setLiveReasoning([]);
+    setLiveArtifacts([]);
     setDetail(null);
     setError("");
     if (sessionId) void loadSession(sessionId);
@@ -142,7 +147,7 @@ export function Playground({ name }: { name?: string }) {
       const element = viewport.current;
       if (element && following.current) element.scrollTop = element.scrollHeight;
     });
-  }, [detail?.messages.length, detail?.reasoning?.length, liveText, liveReasoning, sessionId]);
+  }, [detail?.messages.length, detail?.reasoning?.length, liveText, liveReasoning, liveArtifacts, sessionId]);
   useEffect(() => () => {
     if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
     scrollFrame.current = null;
@@ -191,6 +196,7 @@ export function Playground({ name }: { name?: string }) {
       if (!restored || !scopeIsCurrent(scopeRevision)) return;
       setLiveText("");
       setLiveReasoning([]);
+      setLiveArtifacts([]);
       await start({
         threadId: id, runId: sendKey.current.key, protocolVersion: "1.0",
         messages: [{ id: sendKey.current.messageId, role: "user", content: message }],
@@ -295,14 +301,16 @@ export function Playground({ name }: { name?: string }) {
             <h2>今天想聊些什么？</h2>
             {!agents.loading && !published.length && <p className="pg-empty-note">还没有已发布的 Agent。<a href={tenantLink("agents", tenantScope)}>先去创建并发布</a></p>}
           </div> : <div className="pg-message-list">
-            <ConversationHistory messages={detail?.messages} reasoning={detail?.reasoning}
+            <ConversationHistory messages={detail?.messages} artifacts={detail?.artifacts} runs={detail?.runs} reasoning={detail?.reasoning}
               hiddenRunId={activeRun?.id ?? liveReasoning[0]?.run_id} sessionId={sessionId} copy={copyReply} />
-            {(activeRun || liveText || liveReasoning.length > 0) && <article className="pg-message assistant" aria-label={activeRun ? "Agent 正在回复" : "Agent 的回复"}>
+            {(activeRun || liveText || liveReasoning.length > 0 || liveArtifacts.length > 0) && <article className="pg-message assistant" aria-label={activeRun ? "Agent 正在回复" : "Agent 的回复"}>
               <span className="pg-assistant-icon"><Sparkles size={22} strokeWidth={1.7} /></span>
               <div className="pg-message-content">
                 {liveReasoning.map((trace) => <Reasoning key={trace.id} trace={trace} />)}
                 {liveText ? <div className="pg-message-text">{liveText}{activeRun && <span className="typing-cursor" />}</div>
                   : !liveReasoning.length && <div className="pg-thinking" role="status"><span className="thinking-dots"><i /><i /><i /></span>{activeRun?.status === "queued" ? "等待执行" : "正在思考"}</div>}
+                {liveArtifacts.filter((artifact) => !detail?.artifacts?.some((saved) => saved.id === artifact.id)).map((artifact) =>
+                  <Artifact key={artifact.id} content={artifact.content} runStatus={activeRun?.status ?? "succeeded"} />)}
               </div>
             </article>}
           </div>}
@@ -371,8 +379,8 @@ export function Playground({ name }: { name?: string }) {
     </Modal>}
   </section>;
 }
-const ConversationHistory = memo(function ConversationHistory({ messages, reasoning, hiddenRunId, sessionId, copy }: {
-  messages: SessionDetail["messages"] | undefined;
+const ConversationHistory = memo(function ConversationHistory({ messages, artifacts, runs, reasoning, hiddenRunId, sessionId, copy }: {
+  messages: SessionDetail["messages"] | undefined; artifacts: GeneratedArtifact[] | undefined; runs: Run[] | undefined;
   reasoning: ReasoningTrace[] | undefined; hiddenRunId: string | undefined;
   sessionId: string | null; copy: (content: string) => void;
 }) {
@@ -386,6 +394,10 @@ const ConversationHistory = memo(function ConversationHistory({ messages, reason
     <div className="pg-message-content">
       {message.role === "assistant" && traces(message).map((trace) => <Reasoning key={trace.id} trace={trace} />)}
       <div className="pg-message-text">{message.content}</div>
+      {artifacts?.filter((artifact) => artifact.run_id === runId(message) &&
+        (message.role === "assistant" || !messages.some((item) => item.role === "assistant" && runId(item) === artifact.run_id)))
+        .map((artifact) => <Artifact key={artifact.id} content={artifact.content}
+          runStatus={runs?.find((run) => run.id === artifact.run_id)?.status ?? "succeeded"} />)}
       {message.role === "assistant" && <button className="pg-copy icon-button" aria-label="复制回复" onClick={() => copy(message.content)}><Copy size={15} /></button>}
     </div>
   </article>

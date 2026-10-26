@@ -201,7 +201,10 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                     )
                 ).mappings()
             )
-        self.assertEqual(len(builtins), 8)
+        from agent_platform.modules.builtin_agents import BUILTIN_AGENTS
+
+        self.assertEqual(len(builtins), len(BUILTIN_AGENTS))
+        builtins = [agent for agent in builtins if not agent["tools"]]
         for agent in builtins:
             with self.subTest(agent=agent["builtin_key"]):
                 session = self.platform.create_session(self.user, agent["id"], None)

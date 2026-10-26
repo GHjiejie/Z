@@ -46,6 +46,15 @@
 .pg-message-content { min-width: 0; flex: 0 1 auto; }
 .pg-message.assistant .pg-message-content { flex: 1; padding-top: 3px; }
 .pg-message-text { font-size: 14px; line-height: 1.95; white-space: pre-wrap; overflow-wrap: anywhere; color: #43414e; }
+.pg-workspace .artifact { margin: 16px 0; min-width: 0; border: 1px solid #e9e7f0; border-radius: 12px; overflow: hidden; background: #fff; }
+.pg-workspace .artifact-body { position: relative; min-width: 0; }
+.pg-workspace .artifact iframe { display: block; width: 100%; border: 0; background: transparent; }
+.pg-workspace .artifact-overlay { position: absolute; inset: 0; display: grid; place-items: center; background: #ffffffdf; padding: 18px; overflow: auto; }
+.pg-workspace .artifact-overlay.opaque { background: #fff; }
+.pg-workspace .artifact-loading, .pg-workspace .artifact-error { display: grid; gap: 10px; font-size: 13px; line-height: 1.7; color: #817b8b; }
+.pg-workspace .artifact-loading small, .pg-workspace .artifact-error small { font-size: 11px; }
+.pg-workspace .artifact-error { padding: 14px; color: #b16c80; overflow-wrap: anywhere; }
+.pg-workspace .artifact-error-details pre { max-height: 130px; white-space: pre-wrap; overflow: auto; }
 .pg-assistant-icon { width: 29px; height: 31px; display: grid; place-items: center; color: #9480bd; flex-shrink: 0; }
 .pg-copy { width: 28px; height: 28px; margin: 8px 0 0 -4px; color: #aaa3b6; }
 .pg-thinking { display: flex; align-items: center; gap: 12px; min-height: 30px; color: #a29aaf; font-size: 12px; }

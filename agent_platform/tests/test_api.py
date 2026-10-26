@@ -118,7 +118,11 @@ class APIIntegrationTest(unittest.TestCase):
         self.assertTrue(
             all(a["model_id"] is None and a["published_version"] == 1 for a in agents)
         )
-        self.assertTrue(all(a["starter_prompts"] and not a["tools"] for a in agents))
+        self.assertTrue(all(a["starter_prompts"] for a in agents))
+        ui = next(a for a in agents if a["builtin_key"] == "generative_ui")
+        self.assertEqual(ui["tools"], ["generate_sandboxed_ui"])
+        self.assertEqual(ui["max_tokens"], 8192)
+        self.assertTrue(all(not a["tools"] for a in agents if a != ui))
         first = agents[0]
         self.request(
             "PATCH", f"/agents/{first['id']}", json={"system_prompt": "Edited draft"}
@@ -269,7 +273,9 @@ class APIIntegrationTest(unittest.TestCase):
                     )
                 )
             )
-        self.assertEqual(len(foreign_ids), 8)
+        from agent_platform.modules.builtin_agents import BUILTIN_AGENTS
+
+        self.assertEqual(len(foreign_ids), len(BUILTIN_AGENTS))
         self.assertEqual(
             self.request(
                 "POST", "/sessions", json={"agent_id": foreign_ids[0]}

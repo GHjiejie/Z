@@ -95,8 +95,8 @@ class AgentCreate(StrictModel):
     temperature: float = Field(default=1, ge=0, le=2)
     max_steps: int = Field(default=8, ge=1, le=30)
     max_tokens: int = Field(default=1024, ge=1, le=128000)
-    tools: list[Literal["calculator", "current_time"]] = Field(
-        default_factory=list, max_length=2
+    tools: list[Literal["calculator", "current_time", "generate_sandboxed_ui"]] = Field(
+        default_factory=list, max_length=3
     )
 
 
@@ -108,9 +108,9 @@ class AgentPatch(StrictModel):
     temperature: float | None = Field(default=None, ge=0, le=2)
     max_steps: int | None = Field(default=None, ge=1, le=30)
     max_tokens: int | None = Field(default=None, ge=1, le=128000)
-    tools: list[Literal["calculator", "current_time"]] | None = Field(
-        default=None, max_length=2
-    )
+    tools: (
+        list[Literal["calculator", "current_time", "generate_sandboxed_ui"]] | None
+    ) = Field(default=None, max_length=3)
 
 
 class SessionCreate(StrictModel):

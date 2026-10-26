@@ -646,6 +646,11 @@ function AgentEditor({
                 当前时间<small>查询当前日期与时间</small>
               </span>
             </label>
+            <label>
+              <input type="checkbox" name="tools" value="generate_sandboxed_ui"
+                defaultChecked={agent?.tools.includes("generate_sandboxed_ui")} />
+              <span>生成可视化界面<small>在对话中生成交互图表、演示和小工具</small></span>
+            </label>
           </div>
         </div>
         {!models.some((model) => model.active) && (

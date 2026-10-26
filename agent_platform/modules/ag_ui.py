@@ -10,6 +10,7 @@ import re
 from datetime import datetime
 
 from ag_ui.core import (
+    ActivitySnapshotEvent,
     BaseEvent,
     CustomEvent,
     Message,
@@ -41,6 +42,7 @@ from sqlalchemy import select
 from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.modules.reasoning import reasoning_message, session_reasoning
+from agent_platform.modules.runtime.generative_ui import UI_ACTIVITY, activity_content
 
 PROTOCOL_VERSION = "1.0"
 TERMINAL_EVENTS = {
@@ -344,6 +346,15 @@ class Projection:
                     role="tool",
                 )
             ]
+        elif kind == "artifact.created":
+            events = [
+                ActivitySnapshotEvent(
+                    message_id=f"artifact:{self.run['id']}:{data['id']}",
+                    activity_type=UI_ACTIVITY,
+                    content=activity_content(data["content"]),
+                    replace=True,
+                )
+            ]
         elif kind == "usage.updated":
             # Customer-visible receipts only; provider cost and raw/encrypted
             # response items are never part of the UI protocol.
@@ -389,6 +400,15 @@ class Projection:
                             "platform": {"reasoning_status": reasoning_status}
                         }
                     messages.append(visible)
+            messages.extend(
+                copy.deepcopy(
+                    [
+                        message
+                        for message in self.messages
+                        if message["role"] == "activity"
+                    ]
+                )
+            )
             if status == "succeeded":
                 messages.append(
                     {
@@ -424,7 +444,17 @@ class Projection:
 
     def apply(self, event: BaseEvent):
         """Reconstruct the snapshot at an exact sub-event cursor on reconnect."""
-        if isinstance(event, MessagesSnapshotEvent):
+        if isinstance(event, ActivitySnapshotEvent):
+            self.messages = [m for m in self.messages if m["id"] != event.message_id]
+            self.messages.append(
+                {
+                    "id": event.message_id,
+                    "role": "activity",
+                    "activityType": event.activity_type,
+                    "content": copy.deepcopy(event.content),
+                }
+            )
+        elif isinstance(event, MessagesSnapshotEvent):
             self.messages = [
                 message.model_dump(by_alias=True) for message in event.messages
             ]

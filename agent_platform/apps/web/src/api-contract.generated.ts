@@ -2,8 +2,9 @@
 // Exact money is a JSON string. Optional fields may be omitted by permissions.
 
 export type ActivityMessage = { "activityType": string; "content": Record<string, unknown>; "id": string; "metadata"?: Record<string, unknown> | null; "role"?: "activity"; "subagentRunId"?: string | null; };
-export type AgentCreate = { "description"?: string; "max_steps"?: number; "max_tokens"?: number; "model_id"?: string | null; "name": string; "system_prompt"?: string; "temperature"?: number; "tools"?: Array<"calculator" | "current_time">; };
-export type AgentPatch = { "description"?: string | null; "max_steps"?: number | null; "max_tokens"?: number | null; "model_id"?: string | null; "name"?: string | null; "system_prompt"?: string | null; "temperature"?: number | null; "tools"?: Array<"calculator" | "current_time"> | null; };
+export type AgentCreate = { "description"?: string; "max_steps"?: number; "max_tokens"?: number; "model_id"?: string | null; "name": string; "system_prompt"?: string; "temperature"?: number; "tools"?: Array<"calculator" | "current_time" | "generate_sandboxed_ui">; };
+export type AgentPatch = { "description"?: string | null; "max_steps"?: number | null; "max_tokens"?: number | null; "model_id"?: string | null; "name"?: string | null; "system_prompt"?: string | null; "temperature"?: number | null; "tools"?: Array<"calculator" | "current_time" | "generate_sandboxed_ui"> | null; };
+export type ArtifactResponse = { "content": Record<string, unknown>; "id": string; "run_id": string; };
 export type AssistantMessage = { "content"?: string | null; "encryptedValue"?: string | null; "id": string; "metadata"?: Record<string, unknown> | null; "name"?: string | null; "role"?: "assistant"; "subagentRunId"?: string | null; "toolCalls"?: Array<ToolCall> | null; };
 export type AudioPart = { "id"?: string | null; "metadata"?: unknown | null; "source": DataSource | UrlSource | FileSource; "type"?: "audio"; };
 export type AuthResponse = { "csrf_token": string; "user": PrincipalResponse; };
@@ -58,7 +59,7 @@ export type RunCreate = { "message": string; "model_id"?: string | null; };
 export type RunResponse = { "agent_name": string; "cost"?: string; "created_at": string; "error": string; "finished_at": string | null; "id": string; "message"?: string; "model_alias": string | null; "model_id": string | null; "session_id": string; "status": string; "tenant_id": string; "user_id": string; };
 export type RunsResponse = { "items": Array<RunResponse>; "next_cursor": string | null; };
 export type SessionCreate = { "agent_id": string; "title"?: string | null; };
-export type SessionDetailResponse = { "agent_id": string; "created_at": string; "id": string; "messages": Array<MessageResponse>; "reasoning"?: Array<ReasoningResponse>; "runs": Array<RunResponse>; "tenant_id": string; "title": string; "user_id": string; };
+export type SessionDetailResponse = { "agent_id": string; "artifacts": Array<ArtifactResponse>; "created_at": string; "id": string; "messages": Array<MessageResponse>; "reasoning"?: Array<ReasoningResponse>; "runs": Array<RunResponse>; "tenant_id": string; "title": string; "user_id": string; };
 export type SessionResponse = { "agent_id": string; "created_at": string; "id": string; "tenant_id": string; "title": string; "user_id": string; };
 export type SessionsResponse = { "items": Array<SessionResponse>; "next_cursor": string | null; };
 export type StatusChange = { "expected_version"?: number | null; "reason": string; };

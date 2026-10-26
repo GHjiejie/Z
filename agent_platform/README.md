@@ -5,6 +5,7 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 ## 文档
 
 - [AG-UI 交互协议](docs/ag-ui-protocol.md)：Playground 的流式运行、工具事件、取消、幂等与断线恢复。
+- [可视化界面助手](docs/generative-ui-agent.md)：内置 Agent、HTML/CSS/JS 工具、隔离交互界面、历史恢复与继续修改。
 - [架构调整与验收](docs/architecture-adjustments.md)：八项架构改进、证据及升级契约。
 - [多租户实现说明](docs/multi-tenant-implementation.md)：当前架构、权限、数据库、网关、账务和交付状态。
 - [账号与前端角色权限](docs/roles-and-permissions.md)：7 种角色的菜单、可操作功能、当前本机账号与本地凭据文件位置。
@@ -26,7 +27,7 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 | 身份 | 全局账号、多组织成员、邀请、撤销、所有权转移、按标签页切换组织 |
 | 权限 | owner、tenant_admin、member、finance_viewer；独立平台管理/财务/支持角色 |
 | 内容 | 会话和运行正文本人私有；支持访问需 owner 限时审批并留审计 |
-| Agent | 8 个内置助手、草稿和不可变发布、受控工具、多轮会话 |
+| Agent | 9 个内置助手（含可视化界面生成）、草稿和不可变发布、受控工具、多轮会话 |
 | 模型 | 组织模型授权、默认及候选顺序、部署与显示别名分离、价格快照 |
 | 网关 | 每组织加密凭据、代际轮换、Outbox、未知外部写入核查、独立同步进程 |
 | 执行 | AG-UI 1.0 流式交互、独立排队/执行期限、租户轮转、持久事件与提交唤醒、SSE独立租约及撤权检查 |

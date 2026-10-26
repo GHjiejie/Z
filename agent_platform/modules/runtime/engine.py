@@ -12,6 +12,7 @@ from langgraph.graph import END, START, StateGraph
 
 from .contracts import validate_run_snapshot_version
 from .gateway import ModelReply
+from .generative_ui import UI_TOOL, GeneratedUiArguments
 from .tools import execute_tool, tool_definitions
 
 Invoke = Callable[[list[dict], list[dict]], Awaitable[ModelReply]]
@@ -195,6 +196,17 @@ async def execute_agent(
             await emit(
                 "tool.finished", {"id": call["id"], "name": call["name"], **data}
             )
+            if call["name"] == UI_TOOL and data["ok"]:
+                await guard()
+                await emit(
+                    "artifact.created",
+                    {
+                        "id": f"{state['step']}:{call['id']}",
+                        "content": GeneratedUiArguments.model_validate(
+                            call["args"]
+                        ).model_dump(),
+                    },
+                )
             additions.append(
                 {
                     "role": "tool",

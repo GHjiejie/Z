@@ -136,8 +136,8 @@ class Platform:
                         "builtin_key": template.key,
                         "temperature": 1,
                         "max_steps": 6,
-                        "max_tokens": 1024,
-                        "tools": [],
+                        "max_tokens": template.max_tokens,
+                        "tools": list(template.tools),
                         "published_version": 1,
                     }
                     connection.execute(insert(t.agents).values(**agent))
@@ -646,10 +646,14 @@ class Platform:
 
     def session_detail(self, user: dict, session_id: str) -> dict:
         from agent_platform.modules.reasoning import session_reasoning
+        from agent_platform.modules.runtime.generative_ui import session_artifacts
 
         with self.db.read() as connection:
             result = self.owned(connection, t.sessions, user, session_id, own=True)
             result["reasoning"] = session_reasoning(connection, user, session_id)
+            result["artifacts"] = session_artifacts(
+                connection, user["tenant_id"], session_id
+            )
             result["messages"] = [
                 dict(row)
                 for row in connection.execute(

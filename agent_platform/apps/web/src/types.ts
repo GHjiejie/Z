@@ -47,8 +47,9 @@ export type Agent = {
 export type Session = SessionResponse;
 export type Run = RunResponse;
 export type Message = { id?: string; run_id?: string; role: string; content: string; created_at?: string };
+export type GeneratedArtifact = { id: string; run_id: string; content: unknown };
 export type ReasoningTrace = ReasoningResponse;
-export type SessionDetail = Session & { messages: Message[]; runs: Run[]; reasoning?: ReasoningTrace[] };
+export type SessionDetail = Session & { messages: Message[]; runs: Run[]; artifacts?: GeneratedArtifact[]; reasoning?: ReasoningTrace[] };
 export type RunEvent = {
   sequence: number;
   type: string;

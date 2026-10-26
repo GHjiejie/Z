@@ -112,6 +112,12 @@ class MessageResponse(ResponseModel):
     created_at: str
 
 
+class ArtifactResponse(ResponseModel):
+    id: str
+    run_id: str
+    content: dict[str, Any]
+
+
 class ReasoningResponse(ResponseModel):
     id: str
     run_id: str
@@ -123,6 +129,7 @@ class ReasoningResponse(ResponseModel):
 class SessionDetailResponse(SessionResponse):
     messages: list[MessageResponse]
     runs: list[RunResponse]
+    artifacts: list[ArtifactResponse]
     reasoning: list[ReasoningResponse] = Field(default_factory=list)
 
 

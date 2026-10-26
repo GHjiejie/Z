@@ -15,6 +15,7 @@ from agent_platform.infrastructure.config import Settings
 from agent_platform.modules.gateway_control import GatewayService
 from agent_platform.modules.runtime.gateway import GatewayEvent, ModelReply
 from agent_platform.tests.fixtures import PASSWORD, MultiTenantFixture, migrate
+from agent_platform.tests.generative_ui_fixture import COUNTER_UI
 from agent_platform.tests.test_execution_lifecycle import OfflineControl
 
 
@@ -32,6 +33,32 @@ class SmokeGateway:
             yield GatewayEvent("text", {"text": "验证完成，结果为 300。"})
             yield GatewayEvent(
                 "result", ModelReply("验证完成，结果为 300。", [], 20, 25, {})
+            )
+            return
+        if last["role"] == "user" and any(
+            word in last["content"] for word in ("界面", "计数器")
+        ):
+            yield GatewayEvent(
+                "result",
+                ModelReply(
+                    "",
+                    [
+                        {
+                            "id": "smoke-ui",
+                            "name": "generate_sandboxed_ui",
+                            "args": COUNTER_UI,
+                        }
+                    ],
+                    20,
+                    10,
+                    {},
+                ),
+            )
+            return
+        if last["role"] == "tool" and "界面代码已传输" in last["content"]:
+            yield GatewayEvent("text", {"text": "计数器界面已生成。"})
+            yield GatewayEvent(
+                "result", ModelReply("计数器界面已生成。", [], 20, 5, {})
             )
             return
         if last["role"] == "user" and "计算" in last["content"]:

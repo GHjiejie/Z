@@ -881,6 +881,8 @@ class Worker:
             await self._execute(run)
 
     async def _execute(self, run: dict) -> None:
+        from agent_platform.modules.runtime.generative_ui import previous_ui_context
+
         pulse = asyncio.create_task(self.heartbeat(run))
         try:
             with self.db.read() as connection:
@@ -895,6 +897,8 @@ class Worker:
                         .order_by(t.messages.c.created_at)
                     ).mappings()
                 ]
+                if context := previous_ui_context(connection, run):
+                    messages.insert(max(0, len(messages) - 1), context)
             await asyncio.to_thread(
                 self.event, run, "run.started", {"status": "running"}
             )
