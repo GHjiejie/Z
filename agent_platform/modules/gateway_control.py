@@ -740,8 +740,8 @@ class GatewayService:
             model.setdefault("name", deployment["name"])
             model.setdefault("alias", deployment["internal_route"])
             model.setdefault("active", True)
-            model.setdefault("context_window", 8192)
-            model.setdefault("max_output_tokens", 1024)
+            model.setdefault("context_window", self.settings.default_context_window)
+            model.setdefault("max_output_tokens", self.settings.default_output_tokens)
             for field in ("input_price", "output_price"):
                 model[field] = format(_price(model.get(field, "0")), "f")
             if not 1 <= model["max_output_tokens"] <= model["context_window"]:

@@ -550,8 +550,9 @@ class IdentityService:
                     "builtin_key": template.key,
                     "temperature": 1,
                     "max_steps": 6,
-                    "max_tokens": 1024,
-                    "tools": [],
+                    "max_tokens": template.max_tokens
+                    or self.settings.default_output_tokens,
+                    "tools": list(template.tools),
                     "published_version": 1,
                 }
                 connection.execute(insert(t.agents).values(**agent))

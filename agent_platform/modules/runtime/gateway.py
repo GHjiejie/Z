@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 import httpx
 from langchain_core.messages import AIMessageChunk
 
+from agent_platform.modules.execution_policy import ReasoningEffort
 from chat_models.factory import create_gateway_chat_model
 
 
@@ -187,6 +188,7 @@ class Gateway:
         timeout: float = 90,
         local_address: str | None = None,
         protocol: str = "responses",
+        reasoning_effort: ReasoningEffort | None = None,
     ) -> None:
         self.base_url = (
             base_url if base_url is not None else os.getenv("PLATFORM_LITELLM_URL", "")
@@ -197,6 +199,7 @@ class Gateway:
         self._client_factory = client_factory
         self.timeout = timeout
         self.protocol = protocol
+        self.reasoning_effort = reasoning_effort
         self.local_address = (
             local_address
             if local_address is not None
@@ -294,6 +297,8 @@ class Gateway:
             }
             if tools:
                 body["tools"] = _responses_tools(tools)
+            if self.reasoning_effort is not None:
+                body["reasoning"] = {"effort": self.reasoning_effort}
             headers = {"Authorization": "Bearer " + self._api_key}
             if attempt_id:
                 headers["x-litellm-call-id"] = attempt_id
@@ -544,6 +549,11 @@ class Gateway:
                 temperature=temperature,
                 timeout=self.timeout,
                 use_responses_api=False,
+                **(
+                    {"reasoning_effort": self.reasoning_effort}
+                    if self.reasoning_effort is not None
+                    else {}
+                ),
                 **(
                     {
                         "default_headers": {"x-litellm-call-id": attempt_id},

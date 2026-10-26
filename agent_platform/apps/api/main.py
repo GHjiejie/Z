@@ -522,9 +522,35 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
             ]
         }
 
+    @app.get("/api/v1/token-defaults")
+    def token_defaults(user=Depends(auth)):
+        return {
+            "output_tokens": settings.default_output_tokens,
+            "context_window": settings.default_context_window,
+        }
+
+    @app.get("/api/v1/agents/execution-options")
+    def agent_execution_options(user=Depends(auth)):
+        from agent_platform.modules.execution_policy import (
+            MAX_MODEL_CALLS,
+            MAX_OUTPUT_TOKENS,
+        )
+
+        return {
+            "timeout_seconds": settings.run_timeout,
+            "max_cost": settings.max_run_cost,
+            "max_steps": MAX_MODEL_CALLS,
+            "max_output_tokens": MAX_OUTPUT_TOKENS,
+            "default_output_tokens": settings.default_output_tokens,
+            "default_context_window": settings.default_context_window,
+        }
+
     @app.post("/api/v1/agents", status_code=201)
     def create_agent(body: s.AgentCreate, user=Depends(admin)):
-        return platform.save_agent(user, body.model_dump())
+        values = body.model_dump()
+        if "max_tokens" not in body.model_fields_set:
+            values["max_tokens"] = settings.default_output_tokens
+        return platform.save_agent(user, values)
 
     @app.patch("/api/v1/agents/{agent_id}")
     def patch_agent(agent_id: str, body: s.AgentPatch, user=Depends(admin)):
@@ -532,6 +558,12 @@ def create_app(settings: Settings | None = None, *, gateway=None) -> FastAPI:
         values = body.model_dump(exclude_none=True)
         if "model_id" in body.model_fields_set:
             values["model_id"] = body.model_id
+        if "execution_policy" in body.model_fields_set:
+            values["execution_policy"] = (
+                body.execution_policy.model_dump(exclude_unset=True)
+                if body.execution_policy is not None
+                else {}
+            )
         return platform.save_agent(user, values, agent_id)
 
     @app.post("/api/v1/agents/{agent_id}/publish")

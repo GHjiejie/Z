@@ -10,7 +10,7 @@ from unittest.mock import patch
 
 import httpx
 
-from agent_platform.modules.runtime.engine import execute_agent
+from agent_platform.modules.runtime.engine import RuntimeFailure, execute_agent
 from agent_platform.modules.runtime.gateway import (
     Gateway,
     GatewayError,
@@ -146,6 +146,7 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
         multiline=False,
         attempt_id="attempt-a",
         logical_call_id="logical-a",
+        reasoning_effort=None,
     ):
         requests = []
 
@@ -162,7 +163,11 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
             "agent_platform.modules.runtime.gateway.httpx.AsyncHTTPTransport",
             return_value=transport,
         ):
-            gateway = Gateway(base_url="http://gateway/v1", api_key="private-key")
+            gateway = Gateway(
+                base_url="http://gateway/v1",
+                api_key="private-key",
+                reasoning_effort=reasoning_effort,
+            )
             values = [
                 value
                 async for value in gateway.stream(
@@ -184,6 +189,12 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(replies), 1)
         self.assertIsInstance(replies[0], ModelReply)
         return replies[0]
+
+    async def test_developer_reasoning_override_is_request_scoped(self):
+        _, low = await self.run_sse(completed_events(), reasoning_effort="low")
+        self.assertEqual(json.loads(low.content)["reasoning"], {"effort": "low"})
+        _, inherited = await self.run_sse(completed_events())
+        self.assertNotIn("reasoning", json.loads(inherited.content))
 
     async def test_default_responses_request_converts_messages_tools_and_evidence_ids(
         self,
@@ -403,16 +414,30 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
                 with patch(
                     "agent_platform.modules.runtime.engine.execute_tool"
                 ) as execute:
-                    result = await execute_agent(
-                        {"max_steps": 3, "tools": ["calculator"]},
-                        [{"role": "user", "content": "offline calculate"}],
-                        invoke,
-                        emit,
-                        cancelled,
-                    )
+                    if response_status == "incomplete":
+                        with self.assertRaises(RuntimeFailure) as caught:
+                            await execute_agent(
+                                {"max_steps": 3, "tools": ["calculator"]},
+                                [{"role": "user", "content": "offline calculate"}],
+                                invoke,
+                                emit,
+                                cancelled,
+                            )
+                        self.assertEqual(caught.exception.code, "output_limit_exceeded")
+                    else:
+                        result = await execute_agent(
+                            {"max_steps": 3, "tools": ["calculator"]},
+                            [{"role": "user", "content": "offline calculate"}],
+                            invoke,
+                            emit,
+                            cancelled,
+                        )
                 execute.assert_not_called()
-                self.assertEqual(result, "safe rejection")
-                self.assertEqual(len(invocations), 2)
+                if response_status != "incomplete":
+                    self.assertEqual(result, "safe rejection")
+                self.assertEqual(
+                    len(invocations), 1 if response_status == "incomplete" else 2
+                )
 
     async def test_tool_call_uses_call_id_and_second_round_function_call_output(self):
         events, _ = await self.run_sse(

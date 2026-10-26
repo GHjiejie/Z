@@ -521,6 +521,14 @@ def register(app, platform, principal, auth, idempotency):
                 "gateway": sync,
             }
 
+    @app.get("/api/v2/platform/token-defaults")
+    def platform_token_defaults(actor=Depends(principal)):
+        require(actor, "platform.models.manage")
+        return {
+            "output_tokens": platform.settings.default_output_tokens,
+            "context_window": platform.settings.default_context_window,
+        }
+
     @app.post("/api/v2/platform/tenants/{tenant_id}/models", status_code=201)
     def create_tenant_model(
         tenant_id: str, body: s.PlatformModelCreate, actor=Depends(principal)
@@ -528,6 +536,10 @@ def register(app, platform, principal, auth, idempotency):
         require(actor, "platform.models.manage")
         require(actor, "platform.pricing.manage")
         values = body.model_dump(exclude={"deployment_id"})
+        if "context_window" not in body.model_fields_set:
+            values["context_window"] = platform.settings.default_context_window
+        if "max_output_tokens" not in body.model_fields_set:
+            values["max_output_tokens"] = platform.settings.default_output_tokens
         existing_id = target_model_id(actor, tenant_id, body.alias)
         if existing_id:
             values["model_id"] = existing_id

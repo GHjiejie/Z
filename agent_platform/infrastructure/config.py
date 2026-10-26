@@ -6,6 +6,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
+from .token_defaults import DEFAULT_CONTEXT_WINDOW, DEFAULT_OUTPUT_TOKENS
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -32,6 +34,8 @@ class Settings:
     litellm_admin_url: str = ""
     gateway_local_address: str | None = None
     default_model: str = ""
+    default_output_tokens: int = DEFAULT_OUTPUT_TOKENS
+    default_context_window: int = DEFAULT_CONTEXT_WINDOW
     default_model_input_price: str = ""
     default_model_output_price: str = ""
     admin_email: str = "admin@example.com"
@@ -59,6 +63,15 @@ class Settings:
             raise ValueError("PLATFORM_MODE must be local or saas")
         if self.worker_concurrency < 1:
             raise ValueError("PLATFORM_WORKER_CONCURRENCY must be positive")
+        if (
+            not 1
+            <= self.default_output_tokens
+            <= self.default_context_window
+            <= 2000000
+        ):
+            raise ValueError(
+                "Default output tokens must fit the default context window (at most 2000000 tokens)"
+            )
         for name in ("queue_timeout", "run_timeout"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(value) or value <= 0:
@@ -150,6 +163,14 @@ class Settings:
             litellm_admin_url=os.getenv("PLATFORM_LITELLM_ADMIN_URL", "").strip(),
             gateway_local_address=os.getenv("PLATFORM_GATEWAY_LOCAL_ADDRESS") or None,
             default_model=os.getenv("PLATFORM_DEFAULT_MODEL", "").strip(),
+            default_output_tokens=int(
+                os.getenv("PLATFORM_DEFAULT_OUTPUT_TOKENS", str(DEFAULT_OUTPUT_TOKENS))
+            ),
+            default_context_window=int(
+                os.getenv(
+                    "PLATFORM_DEFAULT_CONTEXT_WINDOW", str(DEFAULT_CONTEXT_WINDOW)
+                )
+            ),
             default_model_input_price=os.getenv(
                 "PLATFORM_DEFAULT_MODEL_INPUT_PRICE", ""
             ).strip(),

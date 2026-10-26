@@ -3264,3 +3264,6 @@ td small,
 .model-priority-row .row-actions { flex-shrink: 0; flex-wrap: nowrap; }
 .support-message { padding: 16px 0; border-bottom: 1px solid var(--border, #ebeaf2); }
 .support-message pre { white-space: pre-wrap; overflow-wrap: anywhere; font: inherit; line-height: 1.7; }
+.agent-execution-policy { min-width: 0; margin: 4px 0 22px; padding: 16px; border: 1px solid var(--border, #e9e7f0); border-radius: 12px; }
+.agent-execution-policy legend { padding: 0 6px; font-size: 13px; font-weight: 600; }
+.agent-execution-policy > p { margin: 0 0 16px; font-size: 12px; line-height: 1.7; }

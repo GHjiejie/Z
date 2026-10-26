@@ -5,6 +5,16 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from agent_platform.infrastructure.token_defaults import (
+    DEFAULT_CONTEXT_WINDOW,
+    DEFAULT_OUTPUT_TOKENS,
+)
+from agent_platform.modules.execution_policy import (
+    MAX_MODEL_CALLS,
+    MAX_OUTPUT_TOKENS,
+    ExecutionPolicy,
+)
+
 
 class StrictModel(BaseModel):
     model_config = ConfigDict(extra="forbid", str_strip_whitespace=True)
@@ -44,8 +54,10 @@ class ModelCreate(StrictModel):
     active: bool = True
     input_price: str = "1"
     output_price: str = "3"
-    context_window: int = Field(default=32768, ge=256, le=2000000)
-    max_output_tokens: int = Field(default=2048, ge=1, le=128000)
+    context_window: int = Field(default=DEFAULT_CONTEXT_WINDOW, ge=256, le=2000000)
+    max_output_tokens: int = Field(
+        default=DEFAULT_OUTPUT_TOKENS, ge=1, le=MAX_OUTPUT_TOKENS
+    )
 
     @field_validator("input_price", "output_price")
     @classmethod
@@ -77,7 +89,7 @@ class ModelPatch(StrictModel):
     input_price: str | None = None
     output_price: str | None = None
     context_window: int | None = Field(default=None, ge=256, le=2000000)
-    max_output_tokens: int | None = Field(default=None, ge=1, le=128000)
+    max_output_tokens: int | None = Field(default=None, ge=1, le=MAX_OUTPUT_TOKENS)
 
     @field_validator("input_price", "output_price")
     @classmethod
@@ -93,8 +105,9 @@ class AgentCreate(StrictModel):
     )
     model_id: str | None = Field(default=None, min_length=1, max_length=64)
     temperature: float = Field(default=1, ge=0, le=2)
-    max_steps: int = Field(default=8, ge=1, le=30)
-    max_tokens: int = Field(default=1024, ge=1, le=128000)
+    max_steps: int = Field(default=8, ge=1, le=MAX_MODEL_CALLS)
+    max_tokens: int = Field(default=DEFAULT_OUTPUT_TOKENS, ge=1, le=MAX_OUTPUT_TOKENS)
+    execution_policy: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
     tools: list[Literal["calculator", "current_time", "generate_sandboxed_ui"]] = Field(
         default_factory=list, max_length=3
     )
@@ -106,8 +119,9 @@ class AgentPatch(StrictModel):
     system_prompt: str | None = Field(default=None, min_length=1, max_length=20000)
     model_id: str | None = Field(default=None, min_length=1, max_length=64)
     temperature: float | None = Field(default=None, ge=0, le=2)
-    max_steps: int | None = Field(default=None, ge=1, le=30)
-    max_tokens: int | None = Field(default=None, ge=1, le=128000)
+    max_steps: int | None = Field(default=None, ge=1, le=MAX_MODEL_CALLS)
+    max_tokens: int | None = Field(default=None, ge=1, le=MAX_OUTPUT_TOKENS)
+    execution_policy: ExecutionPolicy | None = None
     tools: (
         list[Literal["calculator", "current_time", "generate_sandboxed_ui"]] | None
     ) = Field(default=None, max_length=3)

@@ -220,6 +220,67 @@ class WorkerIntegrationTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(call["messages"][0]["content"], agent["system_prompt"])
                 self.assertEqual(self.receipts(queued["id"])[0]["status"], "settled")
 
+    async def test_published_policy_deadline_is_frozen_for_existing_runs(self):
+        self.credit()
+        self.platform.save_agent(
+            self.user,
+            {"execution_policy": {"timeout_seconds": 2, "reasoning_effort": "low"}},
+            self.agent["id"],
+        )
+        self.platform.publish(self.user, self.agent["id"])
+        queued = self.enqueue()
+        self.platform.save_agent(
+            self.user, {"execution_policy": {"timeout_seconds": 1}}, self.agent["id"]
+        )
+        self.platform.publish(self.user, self.agent["id"])
+        worker = Worker(self.platform, gateway=FakeGateway())
+        started = time.time()
+        run = worker.claim()
+        self.assertEqual(run["id"], queued["id"])
+        self.assertAlmostEqual(run["deadline"] - started, 2, delta=0.2)
+        self.assertEqual(run["spec"]["execution_policy"]["reasoning_effort"], "low")
+
+    async def test_developer_token_and_cost_budgets_block_before_provider_io(self):
+        self.credit()
+        for policy, expected in [
+            ({"max_total_tokens": 1}, "Token"),
+            ({"max_cost": "0.000000000001"}, "费用"),
+        ]:
+            self.platform.save_agent(
+                self.user, {"execution_policy": {}}, self.agent["id"]
+            )
+            self.platform.save_agent(
+                self.user, {"execution_policy": policy}, self.agent["id"]
+            )
+            self.platform.publish(self.user, self.agent["id"])
+            queued = self.enqueue()
+            gateway = FakeGateway()
+            await self.execute(gateway)
+            result = self.platform.get_run(self.user, queued["id"])
+            self.assertEqual(result["status"], "failed")
+            self.assertIn(expected, result["error"])
+            self.assertEqual(gateway.calls, [])
+
+    async def test_output_recovery_is_metered_as_separate_calls(self):
+        self.credit()
+        self.platform.save_agent(
+            self.user,
+            {"execution_policy": {"max_output_recoveries": 1}},
+            self.agent["id"],
+        )
+        self.platform.publish(self.user, self.agent["id"])
+        queued = self.enqueue()
+        first = replace(result("partial"), raw_usage={"finish_reason": "length"})
+        gateway = FakeGateway([first, result("complete")])
+        await self.execute(gateway)
+        self.assertEqual(
+            self.platform.get_run(self.user, queued["id"])["status"], "succeeded"
+        )
+        self.assertEqual(len(gateway.calls), 2)
+        self.assertEqual(
+            [r["status"] for r in self.receipts(queued["id"])], ["settled", "settled"]
+        )
+
     async def test_success_settles_once_records_events_and_preserves_history(
         self,
     ) -> None:

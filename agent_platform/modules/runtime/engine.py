@@ -10,6 +10,8 @@ from typing import Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from agent_platform.modules.execution_policy import read_policy
+
 from .contracts import validate_run_snapshot_version
 from .gateway import ModelReply
 from .generative_ui import UI_TOOL, GeneratedUiArguments
@@ -44,6 +46,8 @@ class AgentState(TypedDict):
     step: int
     pending_tools: list[dict]
     final: str
+    output_recoveries: int
+    retry_output: bool
 
 
 async def _cancellable_invoke(
@@ -82,6 +86,10 @@ async def execute_agent(
         raise RuntimeFailure(
             "unsupported_run_snapshot", "运行快照版本不受当前执行器支持。"
         ) from None
+    try:
+        policy = read_policy(spec)
+    except ValueError:
+        raise RuntimeFailure("invalid_agent_config", "Agent 执行策略无效。") from None
     max_steps = spec.get("max_steps", 8)
     if type(max_steps) is not int or not 1 <= max_steps <= 50:
         raise RuntimeFailure("invalid_agent_config", "最大步数须为 1 至 50。")
@@ -116,6 +124,50 @@ async def execute_agent(
             invoke, state["messages"], definitions, cancelled
         )
         await guard()
+        if reply.raw_usage.get("finish_reason") == "length":
+            recovery = state["output_recoveries"]
+            retry = recovery < policy.max_output_recoveries and step < max_steps
+            await emit(
+                "step.finished",
+                {
+                    "step": step,
+                    "input_tokens": reply.input_tokens,
+                    "output_tokens": reply.output_tokens,
+                },
+            )
+            await emit(
+                "model.output_limit",
+                {
+                    "step": step,
+                    "recovery": recovery + 1 if retry else recovery,
+                    "max_recoveries": policy.max_output_recoveries,
+                    "action": "recover" if retry else "stop",
+                },
+            )
+            if not retry:
+                raise RuntimeFailure(
+                    "output_limit_exceeded",
+                    "模型达到单次输出上限，未完成结果；已停止或达到配置的恢复次数。已确认用量正常结算。",
+                )
+            # Never execute, concatenate or replay an unfinished function call.
+            # Request a new complete result using only confirmed prior context.
+            additions = []
+            if reply.content:
+                additions.append({"role": "assistant", "content": reply.content})
+            additions.append(
+                {
+                    "role": "user",
+                    "content": "运行控制提示：上一轮达到输出上限，结果未完成。请根据原始需求给出精简、完整的可用结果；需要工具时重新提交完整参数，不续接截断的 JSON 或脚本。优先完成最小版本，避免重复长篇规划。",
+                }
+            )
+            return {
+                "messages": [*state["messages"], *additions],
+                "step": step,
+                "pending_tools": [],
+                "final": "",
+                "output_recoveries": recovery + 1,
+                "retry_output": True,
+            }
         calls = reply.tool_calls
         if len(calls) > 8:
             raise RuntimeFailure("tool_limit_exceeded", "每步最多允许 8 次工具调用。")
@@ -167,6 +219,7 @@ async def execute_agent(
             "step": step,
             "pending_tools": calls,
             "final": reply.content if not calls else "",
+            "retry_output": False,
         }
 
     async def tools_node(state: AgentState) -> dict[str, Any]:
@@ -221,7 +274,14 @@ async def execute_agent(
     builder.add_node("tools", tools_node)
     builder.add_edge(START, "model")
     builder.add_conditional_edges(
-        "model", lambda state: "tools" if state["pending_tools"] else END
+        "model",
+        lambda state: (
+            "model"
+            if state["retry_output"]
+            else "tools"
+            if state["pending_tools"]
+            else END
+        ),
     )
     builder.add_edge("tools", "model")
     graph = builder.compile()
@@ -230,6 +290,8 @@ async def execute_agent(
         "step": 0,
         "pending_tools": [],
         "final": "",
+        "output_recoveries": 0,
+        "retry_output": False,
     }
     async with await graph.astream_events(
         initial, config={"recursion_limit": max_steps * 2 + 2}, version="v3"

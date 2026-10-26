@@ -12,7 +12,7 @@
 
 Wylon 模型使用独立别名，避免与直连 Flash 混淆。组织默认与候选顺序为 Wylon Flash → DeepSeek 直连 Flash → DeepSeek 直连 Pro；顺序只参与运行创建时的可用模型选择，不会在已经发出的调用失败后自动重新收费重试。
 
-本次查询 Wylon `/models` 确认模型名、1048576 tokens 上下文与 393216 tokens 上游最大输出。本机仍限制每次最多输出 8192 tokens，实际还受 Agent 配置限制。
+本次查询 Wylon `/models` 确认模型名、1048576 tokens 上下文与 393216 tokens 上游最大输出。本机当前默认每次最多输出 128K（131072 tokens），上下文窗口为 1M（1048576 tokens），实际还受 Agent 配置限制。
 
 ## 路由与密钥
 

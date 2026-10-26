@@ -355,6 +355,8 @@ class Projection:
                     replace=True,
                 )
             ]
+        elif kind == "model.output_limit":
+            events = [CustomEvent(name="platform.output_limit", value=data)]
         elif kind == "usage.updated":
             # Customer-visible receipts only; provider cost and raw/encrypted
             # response items are never part of the UI protocol.

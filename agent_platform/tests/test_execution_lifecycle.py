@@ -15,7 +15,7 @@ import httpx
 from alembic import command
 from alembic.config import Config
 from cryptography.fernet import Fernet
-from sqlalchemy import delete, insert, select, update
+from sqlalchemy import delete, insert, select, text, update
 
 from agent_platform.apps.api.main import COOKIE, LeasedStreamingResponse, create_app
 from agent_platform.apps.worker.main import Worker
@@ -480,16 +480,41 @@ class ExecutionDeadlineMigrationTests(unittest.TestCase):
                 )
                 platform, db = app.state.platform, app.state.database
                 try:
-                    platform.bootstrap()
+                    # Seed the historical schema without using today's Agent
+                    # table (which now has additional policy columns).
+                    platform._bootstrap_admin()
+                    platform.identity.bootstrap()
                     with db.read() as connection:
                         principal = dict(
                             connection.execute(select(t.users)).mappings().one()
                         )
-                        agent_id = connection.scalar(select(t.agents.c.id))
-                    context = platform.identity.context(
-                        principal["id"], principal["tenant_id"]
-                    )
-                    session = platform.create_session(context, agent_id, "Migration")
+                    context = {
+                        "id": principal["id"],
+                        "tenant_id": principal["tenant_id"],
+                    }
+                    agent_id = uid()
+                    session = {"id": uid()}
+                    with db.transaction() as connection:
+                        connection.execute(
+                            text(
+                                "INSERT INTO platform_agents (id,tenant_id,created_at,name,description,system_prompt,model_id,builtin_key,temperature,max_steps,max_tokens,tools,published_version) VALUES (:id,:tenant,:stamp,'Historical','','Keep prompt',NULL,NULL,1,6,1024,'[]',1)"
+                            ),
+                            {
+                                "id": agent_id,
+                                "tenant": context["tenant_id"],
+                                "stamp": now(),
+                            },
+                        )
+                        connection.execute(
+                            insert(t.sessions).values(
+                                id=session["id"],
+                                tenant_id=context["tenant_id"],
+                                user_id=context["id"],
+                                agent_id=agent_id,
+                                title="Migration",
+                                created_at=now(),
+                            )
+                        )
                     stamp = datetime.now(UTC).isoformat()
                     deadline = time.time() + 30
                     with db.transaction(f"tenant:{context['tenant_id']}") as connection:

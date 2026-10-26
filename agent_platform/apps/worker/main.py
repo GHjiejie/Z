@@ -19,6 +19,7 @@ from agent_platform.infrastructure import tenancy_tables as nt
 from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.infrastructure.events import configure_notifications
 from agent_platform.modules.billing.service import BillingService, reservations_table
+from agent_platform.modules.execution_policy import effective_limits, read_policy
 from agent_platform.modules.run_records import append_event, now, uid
 from agent_platform.modules.runtime.engine import RunCancelled, execute_agent
 from agent_platform.modules.runtime.gateway import Gateway, GatewayError, ModelReply
@@ -173,13 +174,19 @@ class Worker:
                         {"status": "cancelled", "error": "运行授权已失效。"},
                     )
                     continue
+                frozen_timeout = (
+                    row["spec"]
+                    .get("execution_limits", {})
+                    .get("timeout_seconds", self.settings.run_timeout)
+                )
+                run_timeout = min(frozen_timeout, self.settings.run_timeout)
                 changes = {
                     "status": "running",
                     "owner": self.owner,
                     "fence": row["fence"] + 1,
                     "queue_expires_at": queue_expires_at,
-                    "lease_until": started_at + min(20, self.settings.run_timeout),
-                    "deadline": started_at + self.settings.run_timeout,
+                    "lease_until": started_at + min(20, run_timeout),
+                    "deadline": started_at + run_timeout,
                 }
                 result = connection.execute(
                     update(t.runs)
@@ -399,12 +406,32 @@ class Worker:
             ),
             Decimal(0),
         )
-        if committed + amount > self.max_run_cost:
+        policy = read_policy(run["spec"])
+        limits = run["spec"].get(
+            "execution_limits", effective_limits(policy, self.settings)
+        )
+        max_cost = min(self.max_run_cost, Decimal(limits["max_cost"]))
+        if committed + amount > max_cost:
             raise PlatformError(
                 402,
                 "run_budget_exceeded",
-                f"本次运行达到 {self.max_run_cost} USD 的费用上限。",
+                f"本次运行达到 {max_cost} USD 的费用上限。",
             )
+        if policy.max_total_tokens is not None:
+            used_tokens = sum(
+                (r["input_tokens"] or 0) + (r["output_tokens"] or 0)
+                if r["status"] == "settled"
+                else r["estimated_input_tokens"] + r["max_output_tokens"]
+                if r["status"] in ("reserved", "unresolved")
+                else 0
+                for r in existing
+            )
+            if used_tokens + input_tokens + max_output > policy.max_total_tokens:
+                raise PlatformError(
+                    400,
+                    "run_token_budget_exceeded",
+                    "本次运行剩余 Token 预算不足以容纳下一次调用的输入估算和输出预留。",
+                )
 
     def _validate_route(self, connection, run: dict) -> None:
         if self.gateway is not None and not run["spec"].get("deployment_id"):
@@ -479,6 +506,7 @@ class Worker:
                 routing["api_key"],
                 timeout=self.settings.model_timeout,
                 local_address=self.settings.gateway_local_address,
+                reasoning_effort=read_policy(run["spec"]).reasoning_effort,
             )
             # Credentials remain solely in the transient inference adapter.
             return gateway, {

@@ -13,7 +13,7 @@
 | 可选模型 | `deepseek-v4-pro`，界面名称为 DeepSeek V4 Pro |
 | 平台到网关的协议 | 原生 Responses API，流式输出 |
 | 本地网关 | `http://127.0.0.1:4000/v1` |
-| 本地输出上限 | 两个模型均配置为每次最多 8192 tokens；Agent 可以设置更小上限 |
+| 本地输出上限 | 两个模型均配置为每次最多 128K（131072 tokens），上下文为 1M（1048576 tokens）；Agent 可以设置更小上限 |
 | 默认思考设置 | 本机两个路由均配置 `reasoning_effort: xhigh`；DeepSeek 官方将该兼容值映射为 high，详见[推理显示与等级](reasoning.md) |
 
 模型名称和上下文上限来自接入时使用实际密钥请求的 `/models`：两个模型的上下文容量均为 1048576 tokens，上游最大输出为 393216 tokens。本机每次输出上限独立设置，没有直接采用上游最大值。[DeepSeek 模型发现接口](https://api-docs.deepseek.com/api/list-models/)、[Responses API](https://api-docs.deepseek.com/api/create-response/)。

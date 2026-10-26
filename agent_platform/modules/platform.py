@@ -32,6 +32,10 @@ from agent_platform.infrastructure.errors import PlatformError
 from agent_platform.modules.authorization import capabilities, require_capability
 from agent_platform.modules.billing.service import BillingService, reservations_table
 from agent_platform.modules.builtin_agents import BUILTIN_AGENTS, COMMON_INSTRUCTIONS
+from agent_platform.modules.execution_policy import (
+    effective_limits,
+    read_policy,
+)
 from agent_platform.modules.gateway_control import GatewayService
 from agent_platform.modules.identity import IdentityService
 from agent_platform.modules.run_records import append_event, now, uid
@@ -136,7 +140,8 @@ class Platform:
                         "builtin_key": template.key,
                         "temperature": 1,
                         "max_steps": 6,
-                        "max_tokens": template.max_tokens,
+                        "max_tokens": template.max_tokens
+                        or self.settings.default_output_tokens,
                         "tools": list(template.tools),
                         "published_version": 1,
                     }
@@ -227,6 +232,8 @@ class Platform:
                 alias=self.settings.default_model,
                 input_price=self.settings.default_model_input_price,
                 output_price=self.settings.default_model_output_price,
+                context_window=self.settings.default_context_window,
+                max_output_tokens=self.settings.default_output_tokens,
             ).model_dump()
             self.require_current(connection, dict(user), admin=True)
             model_id = uid()
@@ -579,6 +586,37 @@ class Platform:
                 }
             )
             result = {**current, **values}
+            try:
+                # A nested PATCH merges declared fields; explicit null resets
+                # an inherited field. Empty object resets the whole policy.
+                if values.get("execution_policy"):
+                    result["execution_policy"] = {
+                        **current.get("execution_policy", {}),
+                        **values["execution_policy"],
+                    }
+                policy = read_policy(result)
+            except ValueError:
+                raise PlatformError(
+                    422, "invalid_execution_policy", "Agent 执行策略无效。"
+                ) from None
+            if (
+                policy.timeout_seconds
+                and policy.timeout_seconds > self.settings.run_timeout
+            ):
+                raise PlatformError(
+                    400,
+                    "execution_policy_limit",
+                    f"运行时限不能超过平台上限 {self.settings.run_timeout} 秒。",
+                )
+            if policy.max_cost and Decimal(policy.max_cost) > Decimal(
+                self.settings.max_run_cost
+            ):
+                raise PlatformError(
+                    400,
+                    "execution_policy_limit",
+                    f"费用上限不能超过平台上限 {self.settings.max_run_cost} USD。",
+                )
+            result["execution_policy"] = policy.model_dump()
             if result.get("model_id"):
                 model = self.owned(connection, t.models, user, result["model_id"])
                 if result["max_tokens"] > model["max_output_tokens"]:
@@ -771,6 +809,9 @@ class Platform:
                 raise PlatformError(400, "agent_not_published", "Agent 尚未发布。")
             spec = dict(version["spec"], version=version["version"])
             spec["snapshot_schema_version"] = 2
+            execution_policy = read_policy(spec)
+            spec["execution_policy"] = execution_policy.model_dump()
+            spec["execution_limits"] = effective_limits(execution_policy, self.settings)
             policy = (
                 connection.execute(
                     select(nt.tenant_settings).where(

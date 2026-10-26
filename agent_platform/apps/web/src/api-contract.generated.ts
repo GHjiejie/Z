@@ -2,8 +2,8 @@
 // Exact money is a JSON string. Optional fields may be omitted by permissions.
 
 export type ActivityMessage = { "activityType": string; "content": Record<string, unknown>; "id": string; "metadata"?: Record<string, unknown> | null; "role"?: "activity"; "subagentRunId"?: string | null; };
-export type AgentCreate = { "description"?: string; "max_steps"?: number; "max_tokens"?: number; "model_id"?: string | null; "name": string; "system_prompt"?: string; "temperature"?: number; "tools"?: Array<"calculator" | "current_time" | "generate_sandboxed_ui">; };
-export type AgentPatch = { "description"?: string | null; "max_steps"?: number | null; "max_tokens"?: number | null; "model_id"?: string | null; "name"?: string | null; "system_prompt"?: string | null; "temperature"?: number | null; "tools"?: Array<"calculator" | "current_time" | "generate_sandboxed_ui"> | null; };
+export type AgentCreate = { "description"?: string; "execution_policy"?: ExecutionPolicy; "max_steps"?: number; "max_tokens"?: number; "model_id"?: string | null; "name": string; "system_prompt"?: string; "temperature"?: number; "tools"?: Array<"calculator" | "current_time" | "generate_sandboxed_ui">; };
+export type AgentPatch = { "description"?: string | null; "execution_policy"?: ExecutionPolicy | null; "max_steps"?: number | null; "max_tokens"?: number | null; "model_id"?: string | null; "name"?: string | null; "system_prompt"?: string | null; "temperature"?: number | null; "tools"?: Array<"calculator" | "current_time" | "generate_sandboxed_ui"> | null; };
 export type ArtifactResponse = { "content": Record<string, unknown>; "id": string; "run_id": string; };
 export type AssistantMessage = { "content"?: string | null; "encryptedValue"?: string | null; "id": string; "metadata"?: Record<string, unknown> | null; "name"?: string | null; "role"?: "assistant"; "subagentRunId"?: string | null; "toolCalls"?: Array<ToolCall> | null; };
 export type AudioPart = { "id"?: string | null; "metadata"?: unknown | null; "source": DataSource | UrlSource | FileSource; "type"?: "audio"; };
@@ -26,6 +26,7 @@ export type DeploymentPatch = { "base_url"?: string | null; "internal_route"?: s
 export type DeveloperMessage = { "content": string; "encryptedValue"?: string | null; "id": string; "metadata"?: Record<string, unknown> | null; "name"?: string | null; "role"?: "developer"; "subagentRunId"?: string | null; };
 export type DocumentPart = { "id"?: string | null; "metadata"?: unknown | null; "source": DataSource | UrlSource | FileSource; "type"?: "document"; };
 export type EntitlementPatch = { "concurrent"?: number | null; "expected_version"?: number | null; "max_agents"?: number | null; "max_budget"?: string | null; "max_concurrent_runs"?: number | null; "max_export_jobs"?: number | null; "max_members"?: number | null; "max_queued_runs"?: number | null; "max_running_runs"?: number | null; "max_sse_connections"?: number | null; "rpm"?: number | null; "tpm"?: number | null; };
+export type ExecutionPolicy = { "max_cost"?: string | null; "max_output_recoveries"?: number; "max_total_tokens"?: number | null; "reasoning_effort"?: "none" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max" | null; "timeout_seconds"?: number | null; };
 export type ExportRequest = { "kind"?: "calls" | "runs"; "scope"?: "self" | "tenant"; };
 export type FileSource = { "mimeType"?: string | null; "provider"?: string | null; "type"?: "file"; "value": string; };
 export type ForwardedProps = { "modelId"?: string | null; };

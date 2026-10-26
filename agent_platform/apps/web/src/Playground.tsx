@@ -425,7 +425,14 @@ function eventLabel(event: AGUIEvent): string {
       }
       return "运行状态已更新";
     }
-    case "CUSTOM": return ({ "platform.queued": "运行已进入队列", "platform.model": "正在调用模型", "platform.usage": "调用用量与费用已更新" } as Record<string, string>)[event.name] ?? "运行进度已更新";
+    case "CUSTOM": {
+      if (event.name === "platform.output_limit") {
+        const value: unknown = event.value;
+        return value && typeof value === "object" && "action" in value && value.action === "recover"
+          ? "达到单次输出上限，按 Agent 配置尝试生成完整结果" : "达到单次输出上限，已停止恢复";
+      }
+      return ({ "platform.queued": "运行已进入队列", "platform.model": "正在调用模型", "platform.usage": "调用用量与费用已更新" } as Record<string, string>)[event.name] ?? "运行进度已更新";
+    }
     default: return event.type;
   }
 }

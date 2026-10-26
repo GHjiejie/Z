@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import unittest
+from dataclasses import replace
 from unittest.mock import patch
 
 import httpx
@@ -121,6 +122,109 @@ class RuntimeTests(unittest.IsolatedAsyncioTestCase):
                 "step.finished",
             ],
         )
+
+    async def test_output_limit_stops_without_executing_truncated_tools(self):
+        calls = 0
+
+        async def invoke(messages, tools):
+            nonlocal calls
+            calls += 1
+            return replace(
+                reply(
+                    "partial",
+                    [
+                        {
+                            "id": "bad",
+                            "name": "calculator",
+                            "args": {"expression": "2+3"},
+                        }
+                    ],
+                ),
+                raw_usage={"finish_reason": "length"},
+            )
+
+        with self.assertRaises(RuntimeFailure) as caught:
+            await execute_agent(
+                {"tools": ["calculator"]}, [], invoke, self.emit, never_cancel
+            )
+        self.assertEqual(caught.exception.code, "output_limit_exceeded")
+        self.assertEqual(calls, 1)
+        self.assertFalse(any(kind == "tool.started" for kind, _ in self.events))
+
+    async def test_configured_output_recovery_requests_a_complete_result(self):
+        calls = []
+
+        async def invoke(messages, tools):
+            calls.append(messages)
+            if len(calls) == 1:
+                return replace(
+                    reply(
+                        "partial",
+                        [{"id": "bad", "name": "calculator", "args": "truncated"}],
+                    ),
+                    raw_usage={"finish_reason": "length"},
+                )
+            self.assertEqual(messages[-1]["role"], "user")
+            self.assertFalse(any(message.get("tool_calls") for message in messages))
+            return reply("complete")
+
+        result = await execute_agent(
+            {"execution_policy": {"max_output_recoveries": 1}},
+            [],
+            invoke,
+            self.emit,
+            never_cancel,
+        )
+        self.assertEqual(result, "complete")
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(
+            [
+                data["action"]
+                for kind, data in self.events
+                if kind == "model.output_limit"
+            ],
+            ["recover"],
+        )
+
+    async def test_recovery_obeys_both_recovery_and_total_step_limits(self):
+        for max_steps, recoveries, expected in [(5, 2, 3), (1, 2, 1)]:
+            count = 0
+
+            async def invoke(messages, tools):
+                nonlocal count
+                count += 1
+                return replace(reply(), raw_usage={"finish_reason": "length"})
+
+            with self.assertRaises(RuntimeFailure):
+                await execute_agent(
+                    {
+                        "max_steps": max_steps,
+                        "execution_policy": {"max_output_recoveries": recoveries},
+                    },
+                    [],
+                    invoke,
+                    self.emit,
+                    never_cancel,
+                )
+            self.assertEqual(count, expected)
+
+    async def test_unknown_usage_never_triggers_output_recovery(self):
+        count = 0
+
+        async def invoke(messages, tools):
+            nonlocal count
+            count += 1
+            raise UsageUnavailable()
+
+        with self.assertRaises(UsageUnavailable):
+            await execute_agent(
+                {"execution_policy": {"max_output_recoveries": 5}},
+                [],
+                invoke,
+                self.emit,
+                never_cancel,
+            )
+        self.assertEqual(count, 1)
 
     async def test_step_limit_prevents_further_model_and_tool_execution(self) -> None:
         count = 0

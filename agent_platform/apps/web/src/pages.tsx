@@ -316,6 +316,7 @@ export function AgentsPage({
 }) {
   const agents = useResource<Items<Agent>>("/agents");
   const models = useResource<Items<Model>>("/models");
+  const executionOptions = useResource<import("./types").ExecutionOptions>("/agents/execution-options");
   const [search, setSearch] = useState("");
   const [source, setSource] = useState("all");
   const [editing, setEditing] = useState<Agent | "new" | null>(null);
@@ -478,6 +479,7 @@ export function AgentsPage({
         <AgentEditor
           agent={editing === "new" ? null : editing}
           models={models.data?.items ?? []}
+          executionOptions={executionOptions.data}
           close={() => setEditing(null)}
           saved={async () => {
             setEditing(null);
@@ -492,17 +494,21 @@ export function AgentsPage({
 function AgentEditor({
   agent,
   models,
+  executionOptions,
   close,
   saved,
 }: {
   agent: Agent | null;
   models: Model[];
+  executionOptions: import("./types").ExecutionOptions | null;
   close: () => void;
   saved: () => Promise<void>;
 }) {
   const [selectedModel, setSelectedModel] = useState<string>(
     agent?.model_id ?? "",
   );
+  const policy = agent?.execution_policy;
+  const modelLimit = models.find((model) => model.id === selectedModel)?.max_output_tokens;
   return (
     <Modal
       title={agent ? "编辑 Agent 草稿" : "创建 Agent"}
@@ -522,6 +528,13 @@ function AgentEditor({
             temperature: Number(formValue(form, "temperature")),
             max_steps: Number(formValue(form, "max_steps")),
             max_tokens: Number(formValue(form, "max_tokens")),
+            execution_policy: {
+              reasoning_effort: formValue(form, "reasoning_effort") || null,
+              timeout_seconds: formValue(form, "timeout_seconds") ? Number(formValue(form, "timeout_seconds")) : null,
+              max_total_tokens: formValue(form, "max_total_tokens") ? Number(formValue(form, "max_total_tokens")) : null,
+              max_cost: formValue(form, "max_cost") || null,
+              max_output_recoveries: Number(formValue(form, "max_output_recoveries")),
+            },
             tools: data.getAll("tools"),
           };
           await write(
@@ -600,27 +613,57 @@ function AgentEditor({
               required
             />
           </Field>
-          <Field label="最大执行步数">
+          <Field label="最大执行步数" hint="模型调用总次数，包含输出上限后的恢复调用。">
             <input
               name="max_steps"
               type="number"
               min={1}
-              max={30}
+              max={executionOptions?.max_steps}
               defaultValue={agent?.max_steps ?? 6}
               required
             />
           </Field>
-          <Field label="单次输出 Token 上限">
+          <Field label="单次输出 Token 上限" hint={modelLimit ? `所选模型最多 ${number(modelLimit)} tokens。` : "运行时与实际所选模型的输出上限取较小值。"}>
             <input
               name="max_tokens"
               type="number"
               min={1}
-              max={128000}
-              defaultValue={agent?.max_tokens ?? 2048}
+              max={modelLimit ?? executionOptions?.max_output_tokens}
+              defaultValue={agent?.max_tokens ?? executionOptions?.default_output_tokens ?? 131072}
               required
             />
           </Field>
         </div>
+        <fieldset className="agent-execution-policy">
+          <legend>执行策略</legend>
+          <p className="muted">留空的限制继承平台配置。修改发布后用于新运行，正在执行的任务保持原版本。</p>
+          <div className="form-columns">
+            <Field label="思考强度" hint="继承时沿用模型网关默认值；显式值需要所选供应商支持。">
+              <Select name="reasoning_effort" defaultValue={policy?.reasoning_effort ?? ""}>
+                <option value="">继承模型默认</option>
+                <option value="none">关闭（none）</option>
+                <option value="minimal">最少（minimal）</option>
+                <option value="low">低（low）</option>
+                <option value="medium">中（medium）</option>
+                <option value="high">高（high）</option>
+                <option value="xhigh">很高（xhigh）</option>
+                <option value="max">最高（max）</option>
+              </Select>
+            </Field>
+            <Field label="运行时限（秒）" hint={executionOptions ? `平台上限：${executionOptions.timeout_seconds} 秒。` : "留空继承平台运行时限。"}>
+              <input name="timeout_seconds" type="number" min={1} max={executionOptions?.timeout_seconds} step={1} defaultValue={policy?.timeout_seconds ?? ""} placeholder="继承平台" />
+            </Field>
+            <Field label="累计 Token 预算" hint="覆盖本次运行全部模型调用的输入和输出；调用前按保守输入估算及输出预留检查。">
+              <input name="max_total_tokens" type="number" min={1} max={2000000000} step={1} defaultValue={policy?.max_total_tokens ?? ""} placeholder="不另设累计 Token 限制" />
+            </Field>
+            <Field label="运行费用上限（USD）" hint={executionOptions ? `平台上限：${executionOptions.max_cost} USD，调用前检查费用预留。` : "留空继承平台费用上限。"}>
+              <input name="max_cost" type="number" min="0.000000000001" max={executionOptions?.max_cost} step="any" defaultValue={policy?.max_cost ?? ""} placeholder="继承平台" />
+            </Field>
+            <Field label="输出上限恢复次数" hint="0 表示停止；大于 0 时，请求新的完整结果。仅恢复用量已确认的输出截断，不重试费用未知的请求。">
+              <input name="max_output_recoveries" type="number" min={0} max={10} step={1} required defaultValue={policy?.max_output_recoveries ?? 0} />
+            </Field>
+          </div>
+        </fieldset>
         <div className="field">
           <span>允许的工具</span>
           <div className="tool-choices">
@@ -735,6 +778,7 @@ export function ModelsPage({ admin, canPolicy = false }: { admin: boolean; canPo
   const resource = useResource<Items<Model> & { default_model?: string }>(
     "/models",
   );
+  const tokenDefaults = useResource<import("./types").TokenDefaults>("/token-defaults");
   const [editing, setEditing] = useState<Model | "new" | null>(null);
   const [search, setSearch] = useState("");
   const toast = useToast();
@@ -936,7 +980,7 @@ export function ModelsPage({ admin, canPolicy = false }: { admin: boolean; canPo
                   max={2000000}
                   required
                   defaultValue={
-                    editing === "new" ? 128000 : editing.context_window
+                    editing === "new" ? tokenDefaults.data?.context_window ?? 1048576 : editing.context_window
                   }
                 />
               </Field>
@@ -945,10 +989,9 @@ export function ModelsPage({ admin, canPolicy = false }: { admin: boolean; canPo
                   name="max_output_tokens"
                   type="number"
                   min={1}
-                  max={128000}
                   required
                   defaultValue={
-                    editing === "new" ? 4096 : editing.max_output_tokens
+                    editing === "new" ? tokenDefaults.data?.output_tokens ?? 131072 : editing.max_output_tokens
                   }
                 />
               </Field>

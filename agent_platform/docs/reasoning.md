@@ -23,7 +23,7 @@ Playground 在推理期间展开“正在思考”，正文继续在同一回复
 
 Wylon 对 `max` 的实测为 HTTP 400；当前使用已确认可用的 `xhigh`。DeepSeek 直连接口原生等级为 none、low、high、max，官方明确说明 xhigh 是 high 的兼容别名；因此不将直连的 xhigh 描述为其原生 max。[DeepSeek Responses 参数](https://api-docs.deepseek.com/api/create-response/)
 
-思考等级控制请求意图，实际推理长度由模型和问题决定。推理和正文共用 `max_output_tokens`；本机模型上限为 8192，已发布 Agent 可以有更小的上限。修改等级不会自动提高所有 Agent 的输出预算。
+思考等级控制请求意图，实际推理长度由模型和问题决定。推理和正文共用 `max_output_tokens`；本机模型和 Agent 的默认输出上限为 128K（131072 tokens），上下文窗口为 1M（1048576 tokens），已发布 Agent 可以有更小的上限。修改等级不会自动提高所有 Agent 的输出预算。
 
 当前固定版本的 LiteLLM 对两个直连路由会合并上游流，在最终响应中返回可读 reasoning.content；平台会从该响应补发思考内容。默认 Wylon 路由已实测为真正的推理增量流。直连路由也已登记其原生推理和流式能力，以供网关能力查询使用。
 

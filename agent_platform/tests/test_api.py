@@ -121,7 +121,7 @@ class APIIntegrationTest(unittest.TestCase):
         self.assertTrue(all(a["starter_prompts"] for a in agents))
         ui = next(a for a in agents if a["builtin_key"] == "generative_ui")
         self.assertEqual(ui["tools"], ["generate_sandboxed_ui"])
-        self.assertEqual(ui["max_tokens"], 8192)
+        self.assertEqual(ui["max_tokens"], self.settings.default_output_tokens)
         self.assertTrue(all(not a["tools"] for a in agents if a != ui))
         first = agents[0]
         self.request(
@@ -150,6 +150,71 @@ class APIIntegrationTest(unittest.TestCase):
         self.assertEqual(
             self.request("GET", f"/sessions/{session['id']}").json()["messages"], []
         )
+
+    def test_execution_policy_is_editable_validated_and_published(self):
+        options = self.request("GET", "/agents/execution-options")
+        self.assertEqual(options.status_code, 200)
+        self.assertEqual(options.json()["timeout_seconds"], self.settings.run_timeout)
+        _, agent, session = self.create_resources()
+        policy = {
+            "reasoning_effort": "low",
+            "timeout_seconds": 2,
+            "max_total_tokens": 20000,
+            "max_cost": "0.1",
+            "max_output_recoveries": 2,
+        }
+        saved = self.request(
+            "PATCH", f"/agents/{agent['id']}", json={"execution_policy": policy}
+        )
+        self.assertEqual(saved.status_code, 200, saved.text)
+        self.assertEqual(saved.json()["execution_policy"], policy)
+        self.request("POST", f"/agents/{agent['id']}/publish")
+        queued = self.enqueue(session).json()
+        self.request(
+            "PATCH",
+            f"/agents/{agent['id']}",
+            json={"execution_policy": {"reasoning_effort": None}},
+        )
+        draft = next(
+            a
+            for a in self.request("GET", "/agents").json()["items"]
+            if a["id"] == agent["id"]
+        )
+        self.assertIsNone(draft["execution_policy"]["reasoning_effort"])
+        self.assertEqual(draft["execution_policy"]["max_output_recoveries"], 2)
+        with self.db.read() as connection:
+            spec = connection.scalar(
+                select(t.runs.c.spec).where(t.runs.c.id == queued["id"])
+            )
+        self.assertEqual(spec["execution_policy"], policy)
+        for invalid in (
+            {"max_cost": "NaN"},
+            {"max_cost": "0"},
+            {"max_output_recoveries": -1},
+            {"reasoning_effort": "unknown"},
+            {"extra": True},
+        ):
+            rejected = self.request(
+                "PATCH", f"/agents/{agent['id']}", json={"execution_policy": invalid}
+            )
+            self.assertEqual(rejected.status_code, 422, rejected.text)
+        rejected = self.request(
+            "PATCH",
+            f"/agents/{agent['id']}",
+            json={"execution_policy": {"timeout_seconds": 86400}},
+        )
+        self.assertEqual(rejected.json()["error"]["code"], "execution_policy_limit")
+        reset = self.request(
+            "PATCH", f"/agents/{agent['id']}", json={"execution_policy": {}}
+        )
+        self.assertEqual(reset.json()["execution_policy"]["max_output_recoveries"], 0)
+
+    def test_large_output_budget_is_not_fixed_to_128000(self):
+        created = self.request(
+            "POST", "/agents", json={"name": "Large output", "max_tokens": 1000000}
+        )
+        self.assertEqual(created.status_code, 201, created.text)
+        self.assertEqual(created.json()["max_tokens"], 1000000)
 
     def test_automatic_agent_resolves_new_models_each_run_and_freezes_snapshot(self):
         builtin = self.request("GET", "/agents").json()["items"][0]

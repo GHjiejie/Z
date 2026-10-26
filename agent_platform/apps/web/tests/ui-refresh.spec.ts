@@ -53,7 +53,10 @@ async function fixture(page: Page, options: { failRun?: boolean; holdRun?: boole
       const body = request.postDataJSON() as Record<string, unknown> | null;
       writes.push({ path, body: body ?? {}, key: request.headers()["idempotency-key"] });
     }
+    if (resource === "/agents" && method === "POST") return json({ ...request.postDataJSON(), id: "created-agent" }, 201);
     if (resource === "/agents") return json({ items: options.empty ? [] : agents });
+    if (resource === "/agents/execution-options") return json({ timeout_seconds: 300, max_cost: "1", max_steps: 50, max_output_tokens: 2000000, default_output_tokens: 131072, default_context_window: 1048576 });
+    if (resource === "/token-defaults") return json({ output_tokens: 131072, context_window: 1048576 });
     if (resource === "/models") return json({ items: options.empty ? [] : models });
     if (resource === "/sessions" && method === "POST") { newSession.title = String(request.postDataJSON().title); return json(newSession, 201); }
     if (resource === "/sessions") return json({ items: options.empty ? [] : [session, ...(hasRun ? [newSession] : [])] });
@@ -397,6 +400,29 @@ test("表单下拉保持默认角色与 FormData，Escape 只关闭当前浮层"
   await dialog.getByRole("button", { name: "创建邀请" }).click();
   await expect(page.getByRole("dialog", { name: "邀请已创建" })).toBeVisible();
   expect(mock.writes.find((request) => request.path.endsWith("/invitations"))?.body).toEqual({ email: "invited@example.test", role: "finance_viewer" });
+  expect(mock.errors).toEqual([]);
+});
+
+test("开发者在 Agent 编辑器配置执行策略并提交完整配置", async ({ page }, info) => {
+  const mock = await fixture(page);
+  await page.goto("/#agents");
+  await page.getByRole("button", { name: "创建 Agent", exact: true }).click();
+  const dialog = page.getByRole("dialog", { name: "创建 Agent", exact: true });
+  await expect(dialog.getByLabel("单次输出 Token 上限", { exact: true })).toHaveValue("131072");
+  await dialog.getByLabel("Agent 名称", { exact: true }).fill("可配置可视化助手");
+  await dialog.getByLabel("单次输出 Token 上限", { exact: true }).fill("1000000");
+  await dialog.getByLabel("思考强度", { exact: true }).click();
+  await page.getByRole("option", { name: "低（low）", exact: true }).click();
+  await dialog.getByLabel("运行时限（秒）", { exact: true }).fill("120");
+  await dialog.getByLabel("累计 Token 预算", { exact: true }).fill("1500000");
+  await dialog.getByLabel("运行费用上限（USD）", { exact: true }).fill("0.20");
+  await dialog.getByLabel("输出上限恢复次数", { exact: true }).fill("2");
+  await expect(dialog.getByLabel("运行时限（秒）", { exact: true })).toHaveAttribute("max", "300");
+  await page.screenshot({ path: info.outputPath("agent-execution-policy.png"), fullPage: true });
+  await dialog.getByRole("button", { name: "保存草稿", exact: true }).click();
+  await expect(dialog).toHaveCount(0);
+  const saved = mock.writes.find((request) => request.path.endsWith("/agents") && request.body.name === "可配置可视化助手");
+  expect(saved?.body).toMatchObject({ max_tokens: 1000000, execution_policy: { reasoning_effort: "low", timeout_seconds: 120, max_total_tokens: 1500000, max_cost: "0.20", max_output_recoveries: 2 } });
   expect(mock.errors).toEqual([]);
 });
 

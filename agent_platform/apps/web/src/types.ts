@@ -1,4 +1,4 @@
-import type { CallResponse, PrincipalResponse, ReasoningResponse, RunResponse, SessionResponse, WalletResponse } from "./api-contract.generated";
+import type { CallResponse, ExecutionPolicy, PrincipalResponse, ReasoningResponse, RunResponse, SessionResponse, WalletResponse } from "./api-contract.generated";
 
 export type User = {
   id: string;
@@ -40,11 +40,14 @@ export type Agent = {
   temperature: number;
   max_steps: number;
   max_tokens: number;
+  execution_policy?: ExecutionPolicy;
   tools: string[];
   published_version: number | null;
   created_at: string;
 };
 export type Session = SessionResponse;
+export type TokenDefaults = { output_tokens: number; context_window: number };
+export type ExecutionOptions = { timeout_seconds: number; max_cost: string; max_steps: number; max_output_tokens: number; default_output_tokens?: number; default_context_window?: number };
 export type Run = RunResponse;
 export type Message = { id?: string; run_id?: string; role: string; content: string; created_at?: string };
 export type GeneratedArtifact = { id: string; run_id: string; content: unknown };

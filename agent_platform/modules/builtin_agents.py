@@ -14,7 +14,7 @@ class BuiltinAgent:
     instructions: str
     starters: tuple[str, str]
     tools: tuple[str, ...] = ()
-    max_tokens: int = 1024
+    max_tokens: int | None = None
 
 
 COMMON_INSTRUCTIONS = """你是一位可靠的工作助手。默认用用户使用的语言回答。
@@ -155,7 +155,6 @@ BUILTIN_AGENTS = (
             "用示例数据生成一个销售仪表盘，支持切换月份并查看渠道占比。",
         ),
         tools=(UI_TOOL,),
-        max_tokens=8192,
     ),
 )
 

@@ -96,6 +96,7 @@ agents = Table(
     Column("max_steps", Integer, nullable=False),
     Column("max_tokens", Integer, nullable=False),
     Column("tools", JSON, nullable=False),
+    Column("execution_policy", JSON, nullable=False, default=dict, server_default="{}"),
     Column("published_version", Integer, nullable=False, default=0),
     UniqueConstraint("tenant_id", "id"),
     UniqueConstraint("tenant_id", "builtin_key", name="uq_agent_builtin_tenant"),

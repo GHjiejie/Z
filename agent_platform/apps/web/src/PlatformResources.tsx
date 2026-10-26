@@ -266,6 +266,7 @@ export function PlatformModelGrants({ tenant, identity }: { tenant: Tenant; iden
   const prefix = `/api/v2/platform/tenants/${tenant.id}`;
   const resource = useResource<Items<GrantedModel>>(`${prefix}/model-grants`);
   const deployments = useResource<Items<Deployment>>("/api/v2/platform/deployments");
+  const tokenDefaults = useResource<import("./types").TokenDefaults>("/api/v2/platform/token-defaults");
   const [editing, setEditing] = useState<GrantedModel | "new" | null>(null);
   const canPrice = identity.capabilities.includes("platform.pricing.manage");
   return <Panel title="组织模型与报价" detail="修改价格仅影响后续运行。新增或更换部署后，请在组织网关面板同步授权。" action={canPrice && <Button variant="secondary" onClick={() => { void deployments.reload(); setEditing("new"); }}>
@@ -330,10 +331,10 @@ export function PlatformModelGrants({ tenant, identity }: { tenant: Tenant; iden
               <input name="output_price" type="number" min="0.000000000001" max="1000000" step="any" required defaultValue={editing === "new" ? "" : editing.output_price} />
             </Field>
             <Field label="上下文窗口">
-              <input name="context_window" type="number" min="256" max="2000000" required defaultValue={editing === "new" ? 128000 : editing.context_window} />
+              <input name="context_window" type="number" min="256" max="2000000" required defaultValue={editing === "new" ? tokenDefaults.data?.context_window ?? 1048576 : editing.context_window} />
             </Field>
             <Field label="最大输出 Token">
-              <input name="max_output_tokens" type="number" min="1" max="128000" required defaultValue={editing === "new" ? 4096 : editing.max_output_tokens} />
+              <input name="max_output_tokens" type="number" min="1" required defaultValue={editing === "new" ? tokenDefaults.data?.output_tokens ?? 131072 : editing.max_output_tokens} />
             </Field>
           </div>
           <label className="checkbox-row">
