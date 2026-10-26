@@ -67,6 +67,16 @@ class ToolInference:
         yield GatewayEvent("result", reply)
 
 
+class ReasoningInference:
+    text = "核对输入条件。" * 20 + "已确认计算方法。"
+
+    async def stream(self, messages, _model, _max_tokens, _temperature, _tools):
+        yield GatewayEvent("reasoning", {"text": self.text[:140]})
+        yield GatewayEvent("reasoning", {"text": self.text[140:]})
+        yield GatewayEvent("text", {"text": "结果是 5。"})
+        yield GatewayEvent("result", ModelReply("结果是 5。", [], 15, 25, {}))
+
+
 class AgUIContractTests(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix="ag-ui-contract-")
@@ -199,6 +209,148 @@ class AgUIContractTests(unittest.IsolatedAsyncioTestCase):
             response = await asyncio.wait_for(request, 3)
         self.assertEqual(response.status_code, 200, response.text)
         return claimed, response, frames(response.text)
+
+    async def test_readable_reasoning_streams_persists_and_resumes_at_each_phase(self):
+        run, response, events = await self.execute_request(ReasoningInference())
+        reasoning = [
+            (cursor, event)
+            for cursor, event in events
+            if event["type"].startswith("REASONING_")
+        ]
+        self.assertEqual(
+            [event["type"] for _, event in reasoning],
+            [
+                "REASONING_START",
+                "REASONING_MESSAGE_START",
+                "REASONING_MESSAGE_CONTENT",
+                "REASONING_MESSAGE_CONTENT",
+                "REASONING_MESSAGE_END",
+                "REASONING_END",
+            ],
+        )
+        identifier = reasoning[0][1]["messageId"]
+        self.assertTrue(identifier.startswith(f"reasoning:{run['id']}:"))
+        self.assertEqual(
+            "".join(event["delta"] for _, event in reasoning if "delta" in event),
+            ReasoningInference.text,
+        )
+        types = [event["type"] for _, event in events]
+        self.assertLess(types.index("REASONING_END"), types.index("TEXT_MESSAGE_START"))
+        final = next(
+            event
+            for _, event in reversed(events)
+            if event["type"] == "MESSAGES_SNAPSHOT"
+        )
+        self.assertEqual(
+            [
+                message["content"]
+                for message in final["messages"]
+                if message["role"] == "reasoning"
+            ],
+            [ReasoningInference.text],
+        )
+        async with self.client() as client:
+            detail = (
+                await client.get(self.path(f"/sessions/{self.session['id']}"))
+            ).json()
+            self.assertEqual(len(detail["reasoning"]), 1)
+            self.assertEqual(detail["reasoning"][0]["id"], identifier)
+            self.assertEqual(detail["reasoning"][0]["status"], "complete")
+            self.assertEqual(detail["reasoning"][0]["content"], ReasoningInference.text)
+            for cursor, _ in reasoning:
+                resumed = frames(
+                    (
+                        await client.get(
+                            self.path(f"/runs/{run['id']}/ag-ui"),
+                            headers={"Last-Event-ID": cursor},
+                        )
+                    ).text
+                )
+                self.assertEqual(
+                    [key for key, _ in resumed if key],
+                    [
+                        key
+                        for key, _ in events
+                        if key and ag_ui.parse_cursor(key) > ag_ui.parse_cursor(cursor)
+                    ],
+                )
+                snapshot = next(
+                    event
+                    for _, event in reversed(resumed)
+                    if event["type"] == "MESSAGES_SNAPSHOT"
+                )
+                traces = [
+                    message
+                    for message in snapshot["messages"]
+                    if message["role"] == "reasoning"
+                ]
+                self.assertEqual(len(traces), 1)
+                self.assertEqual(traces[0]["content"], ReasoningInference.text)
+        self.body["runId"] = "client-run-2"
+        self.body["messages"] = [
+            {"id": "client-message-2", "role": "user", "content": "Follow up"}
+        ]
+        next_run = self.protocol_run()
+        projection = ag_ui.read_projection(self.platform, self.user, next_run["id"])
+        self.assertEqual(
+            [
+                message["content"]
+                for message in projection.messages
+                if message["role"] == "reasoning"
+            ],
+            [ReasoningInference.text],
+        )
+        self.assertTrue(
+            all(
+                message["metadata"]["platform"]["run_id"]
+                for message in projection.messages
+                if message["role"] in {"user", "assistant"}
+            )
+        )
+        self.assertNotIn("encrypted_content", response.text)
+
+    async def test_cancelled_reasoning_is_closed_and_only_its_owner_can_read_it(self):
+        from agent_platform.modules.reasoning import session_reasoning
+
+        run = self.protocol_run()
+        with self.db.transaction("tenant:" + self.tenant) as connection:
+            for kind, data in [
+                ("reasoning.started", {"call_id": "call-1"}),
+                (
+                    "reasoning.delta",
+                    {"call_id": "call-1", "text": "已收到的推理片段。"},
+                ),
+            ]:
+                append_event(connection, run["id"], kind, data)
+        self.complete(run, status="cancelled")
+        async with self.client() as client:
+            replay = frames(
+                (await client.get(self.path(f"/runs/{run['id']}/ag-ui"))).text
+            )
+            detail = (
+                await client.get(self.path(f"/sessions/{self.session['id']}"))
+            ).json()
+        end = next(event for _, event in replay if event["type"] == "REASONING_END")
+        self.assertEqual(end["metadata"]["platform"]["reasoning_status"], "interrupted")
+        self.assertEqual(detail["reasoning"][0]["status"], "interrupted")
+        self.assertEqual(detail["reasoning"][0]["content"], "已收到的推理片段。")
+        with self.db.read() as connection:
+            self.assertEqual(
+                session_reasoning(
+                    connection,
+                    {**self.user, "id": "different-user"},
+                    self.session["id"],
+                ),
+                [],
+            )
+            self.assertEqual(
+                session_reasoning(
+                    connection,
+                    {**self.user, "tenant_id": self.fixture.tenant_b},
+                    self.session["id"],
+                ),
+                [],
+            )
 
     async def test_post_runs_real_worker_and_emits_official_events(self):
         gateway = OfflineInference()

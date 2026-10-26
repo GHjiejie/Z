@@ -14,6 +14,11 @@ from ag_ui.core import (
     CustomEvent,
     Message,
     MessagesSnapshotEvent,
+    ReasoningEndEvent,
+    ReasoningMessageContentEvent,
+    ReasoningMessageEndEvent,
+    ReasoningMessageStartEvent,
+    ReasoningStartEvent,
     RunAgentInput,
     RunErrorEvent,
     RunFinishedEvent,
@@ -35,6 +40,7 @@ from sqlalchemy import select
 
 from agent_platform.infrastructure import tables as t
 from agent_platform.infrastructure.errors import PlatformError
+from agent_platform.modules.reasoning import reasoning_message, session_reasoning
 
 PROTOCOL_VERSION = "1.0"
 TERMINAL_EVENTS = {
@@ -152,6 +158,7 @@ def read_projection(platform, user: dict, run_id: str):
             .order_by(t.messages.c.created_at, t.messages.c.id)
         ).mappings()
         history = []
+        history_order = {}
         for row in rows:
             if row["role"] not in {"user", "assistant"}:
                 continue
@@ -164,8 +171,24 @@ def read_projection(platform, user: dict, run_id: str):
                 else f"assistant:{row['run_id']}"
             )
             history.append(
-                {"id": identifier, "role": row["role"], "content": row["content"]}
+                {
+                    "id": identifier,
+                    "role": row["role"],
+                    "content": row["content"],
+                    "metadata": {"platform": {"run_id": row["run_id"]}},
+                }
             )
+            history_order[identifier] = row["created_at"]
+        for trace in session_reasoning(
+            connection,
+            user,
+            run["session_id"],
+            before=run["created_at"],
+            exclude_run_id=run_id,
+        ):
+            history.append(reasoning_message(trace))
+            history_order[trace["id"]] = trace["created_at"]
+        history.sort(key=lambda message: (history_order[message["id"]], message["id"]))
     return Projection(run, platform.public_run(run), history)
 
 
@@ -193,6 +216,7 @@ class Projection:
         self.history = copy.deepcopy(history)
         self.messages = copy.deepcopy(history)
         self.open_message: str | None = None
+        self.open_reasoning: str | None = None
         self.call_id = "output"
         self.step: str | None = None
         self.terminal: BaseEvent | None = None
@@ -217,6 +241,18 @@ class Projection:
         identifier, self.open_message = self.open_message, None
         return [TextMessageEndEvent(message_id=identifier)]
 
+    def close_reasoning(self, status: str = "complete") -> list[BaseEvent]:
+        if not self.open_reasoning:
+            return []
+        identifier, self.open_reasoning = self.open_reasoning, None
+        return [
+            ReasoningMessageEndEvent(message_id=identifier),
+            ReasoningEndEvent(
+                message_id=identifier,
+                metadata={"platform": {"reasoning_status": status}},
+            ),
+        ]
+
     def project(self, row: dict) -> list[BaseEvent]:
         kind, data = row["type"], row["data"]
         events: list[BaseEvent] = []
@@ -229,21 +265,47 @@ class Projection:
             self.step = f"step-{data['step']}"
             events = [StepStartedEvent(step_name=self.step)]
         elif kind == "step.finished":
-            events = self.close_text()
+            events = self.close_text() + self.close_reasoning()
             events.append(StepFinishedEvent(step_name=f"step-{data['step']}"))
             self.step = None
         elif kind == "model.started":
-            events = self.close_text()
+            events = self.close_text() + self.close_reasoning()
             self.call_id = data.get("call_id", "output")
             events.append(
                 CustomEvent(name="platform.model", value={"model": data.get("model")})
             )
+        elif kind in {"reasoning.started", "reasoning.delta"}:
+            identifier = (
+                f"reasoning:{self.run['id']}:{data.get('call_id', self.call_id)}"
+            )
+            if self.open_reasoning != identifier:
+                events = self.close_text() + self.close_reasoning()
+                self.open_reasoning = identifier
+                events.extend(
+                    [
+                        ReasoningStartEvent(message_id=identifier),
+                        ReasoningMessageStartEvent(
+                            message_id=identifier,
+                            role="reasoning",
+                            metadata={"platform": {"reasoning_status": "streaming"}},
+                        ),
+                    ]
+                )
+            if kind == "reasoning.delta" and data.get("text"):
+                events.append(
+                    ReasoningMessageContentEvent(
+                        message_id=identifier, delta=data["text"]
+                    )
+                )
+        elif kind == "reasoning.finished":
+            events = self.close_reasoning()
         elif kind == "message.delta" and data.get("text"):
+            events = self.close_reasoning()
             identifier = (
                 f"assistant:{self.run['id']}:{data.get('call_id', self.call_id)}"
             )
             if self.open_message != identifier:
-                events = self.close_text()
+                events += self.close_text()
                 self.open_message = identifier
                 events.append(
                     TextMessageStartEvent(message_id=identifier, role="assistant")
@@ -252,7 +314,7 @@ class Projection:
                 TextMessageContentEvent(message_id=identifier, delta=data["text"])
             )
         elif kind == "tool.started":
-            events = self.close_text()
+            events = self.close_text() + self.close_reasoning()
             parent = f"assistant:{self.run['id']}:{self.call_id}"
             tool_id = f"{self.run['id']}:{self.call_id}:{data['id']}"
             events.extend(
@@ -302,10 +364,11 @@ class Projection:
                 )
             ]
         elif kind in TERMINAL_EVENTS:
-            events = self.close_text()
             status = data.get("status", kind.removeprefix("run."))
             if status == "completed":
                 status = "succeeded"
+            reasoning_status = "complete" if status == "succeeded" else "interrupted"
+            events = self.close_text() + self.close_reasoning(reasoning_status)
             self.run = {**self.run, "status": status, "error": data.get("error", "")}
             if self.step:
                 events.append(
@@ -315,12 +378,24 @@ class Projection:
                 )
                 self.step = None
             messages = copy.deepcopy(self.history)
+            prior_ids = {message["id"] for message in messages}
+            for message in self.messages:
+                if message["role"] == "reasoning" and message["id"] not in prior_ids:
+                    visible = copy.deepcopy(message)
+                    if ((visible.get("metadata") or {}).get("platform") or {}).get(
+                        "reasoning_status"
+                    ) != "complete":
+                        visible["metadata"] = {
+                            "platform": {"reasoning_status": reasoning_status}
+                        }
+                    messages.append(visible)
             if status == "succeeded":
                 messages.append(
                     {
                         "id": f"assistant:{self.run['id']}",
                         "role": "assistant",
                         "content": data.get("content", ""),
+                        "metadata": {"platform": {"run_id": self.run["id"]}},
                     }
                 )
             events.extend([MessagesSnapshotEvent(messages=messages), self.state()])
@@ -353,6 +428,29 @@ class Projection:
             self.messages = [
                 message.model_dump(by_alias=True) for message in event.messages
             ]
+        elif isinstance(event, ReasoningMessageStartEvent):
+            if not any(message["id"] == event.message_id for message in self.messages):
+                self.messages.append(
+                    {
+                        "id": event.message_id,
+                        "role": "reasoning",
+                        "content": "",
+                        "metadata": event.metadata or {},
+                    }
+                )
+        elif isinstance(event, ReasoningMessageContentEvent):
+            message = next(
+                message
+                for message in self.messages
+                if message["id"] == event.message_id
+            )
+            message["content"] += event.delta
+        elif isinstance(event, ReasoningEndEvent):
+            for message in self.messages:
+                if message["id"] == event.message_id and message["role"] == "reasoning":
+                    message["metadata"] = event.metadata or {
+                        "platform": {"reasoning_status": "complete"}
+                    }
         elif isinstance(event, TextMessageStartEvent):
             if not any(message["id"] == event.message_id for message in self.messages):
                 self.messages.append(

@@ -5,9 +5,9 @@ strings; accepting floats would silently discard supplier/customer precision.
 """
 
 from decimal import Decimal, InvalidOperation
-from typing import Annotated, Any
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field
 
 
 def money_string(value):
@@ -106,14 +106,24 @@ class SessionsResponse(ResponseModel):
 
 class MessageResponse(ResponseModel):
     id: str
+    run_id: str
     role: str
     content: str
+    created_at: str
+
+
+class ReasoningResponse(ResponseModel):
+    id: str
+    run_id: str
+    content: str
+    status: Literal["streaming", "complete", "interrupted"]
     created_at: str
 
 
 class SessionDetailResponse(SessionResponse):
     messages: list[MessageResponse]
     runs: list[RunResponse]
+    reasoning: list[ReasoningResponse] = Field(default_factory=list)
 
 
 class CallResponse(ResponseModel):

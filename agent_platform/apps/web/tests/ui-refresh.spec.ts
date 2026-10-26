@@ -21,7 +21,7 @@ const agents = [
   { id: "writer", name: "写作助手", description: "整理想法，完善文章。", builtin_key: null },
 ].map((agent) => ({ ...agent, model_id: null, system_prompt: "", temperature: 0.5, max_steps: 6, max_tokens: 2048, tools: [], published_version: 1, starter_prompts: ["帮我写一段产品介绍", "整理一份工作计划"], created_at: created }));
 
-async function fixture(page: Page, options: { failRun?: boolean; holdRun?: boolean; longHistory?: boolean; empty?: boolean; dropStream?: boolean } = {}) {
+async function fixture(page: Page, options: { failRun?: boolean; holdRun?: boolean; longHistory?: boolean; empty?: boolean; dropStream?: boolean; burst?: boolean; delayFinalSnapshot?: boolean } = {}) {
   const writes: { path: string; body: Record<string, unknown>; key?: string }[] = [];
   const errors: string[] = [];
   const resumes: string[] = [];
@@ -58,12 +58,15 @@ async function fixture(page: Page, options: { failRun?: boolean; holdRun?: boole
     if (resource === "/sessions" && method === "POST") { newSession.title = String(request.postDataJSON().title); return json(newSession, 201); }
     if (resource === "/sessions") return json({ items: options.empty ? [] : [session, ...(hasRun ? [newSession] : [])] });
     if (resource === "/sessions/history") return json({ ...session, messages, runs: [] });
-    if (resource === "/sessions/new-session") return json({ ...newSession, messages: newMessages, runs: hasRun ? [run()] : [] });
+    if (resource === "/sessions/new-session") {
+      if (options.delayFinalSnapshot && runStatus === "succeeded") await gate;
+      return json({ ...newSession, messages: newMessages, runs: hasRun ? [run()] : [] });
+    }
     const wire = (events: { id?: string; event: Record<string, unknown> }[]) => route.fulfill({ contentType: "text/event-stream", headers: { "X-Run-ID": "run-ui", "X-AG-UI-Protocol-Version": "1.0" }, body: events.map(({ id, event }) => `${id ? `id: ${id}\n` : ""}data: ${JSON.stringify(event)}\n\n`).join("") });
     const startFrames = () => [
       { event: { type: "RUN_STARTED", threadId: newSession.id, runId: wireRunId, protocolVersion: "1.0" } },
       { event: { type: "STATE_SNAPSHOT", snapshot: { run: run() } } },
-      { event: { type: "MESSAGES_SNAPSHOT", messages: newMessages } },
+      { event: { type: "MESSAGES_SNAPSHOT", messages: newMessages.map((message) => ({ ...message })) } },
     ];
     if (resource.endsWith("/ag-ui") && method === "POST") {
       if (options.failRun) return json({ error: { code: "gateway_not_configured", message: "网关暂时不可用，请稍后重试。" } }, 503);
@@ -78,6 +81,17 @@ async function fixture(page: Page, options: { failRun?: boolean; holdRun?: boole
         { id: "4.0", event: { type: "TEXT_MESSAGE_START", messageId: "assistant:run-ui:call-1", role: "assistant" } },
         { id: "4.1", event: { type: "TEXT_MESSAGE_CONTENT", messageId: "assistant:run-ui:call-1", delta: "先接收第一段，" } },
       ]);
+      if (options.burst) {
+        const chunks = Array.from({ length: 240 }, (_, index) => `片段${index}🌏，`);
+        runStatus = "succeeded";
+        newMessages.push({ id: "assistant:run-ui", role: "assistant", content: chunks.join(""), created_at: created });
+        return wire([...prefix,
+          { id: "3.0", event: { type: "TEXT_MESSAGE_START", messageId: "assistant:run-ui:call-1", role: "assistant" } },
+          ...chunks.map((delta, index) => ({ id: `${index + 4}.0`, event: { type: "TEXT_MESSAGE_CONTENT", messageId: "assistant:run-ui:call-1", delta } })),
+          { id: "244.0", event: { type: "TEXT_MESSAGE_END", messageId: "assistant:run-ui:call-1" } },
+          { id: "245.0", event: { type: "RUN_FINISHED", threadId: newSession.id, runId: wireRunId, outcome: { type: "success" } } },
+        ]);
+      }
       runStatus = "succeeded";
       newMessages.push({ id: "assistant:run-ui", role: "assistant", content: "已收到，我们一起把想法变成清晰的行动。", created_at: created });
       return wire([...prefix,
@@ -194,6 +208,43 @@ test("组织移到右上角，侧栏真实占位连续变化并记住折叠状�
   await page.getByRole("option", { name: /设计团队/ }).click();
   await expect(page).toHaveURL(/tenant=team-b/);
   await expect(picker).toContainText("设计团队");
+  expect(mock.errors).toEqual([]);
+});
+
+test("突发流式片段在动画帧暂停和最终快照迟到时仍完整显示", async ({ page }) => {
+  const mock = await fixture(page, { burst: true, delayFinalSnapshot: true });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.goto("/#playground?tenant=team-a");
+  const input = page.getByRole("textbox", { name: "发送给 Agent 的消息" });
+  await expect(input).toBeEnabled();
+  // Background tabs may defer animation frames indefinitely. Completion must
+  // flush accepted text independently, without waiting for another paint tick.
+  await page.evaluate(() => { window.requestAnimationFrame = () => 1; window.cancelAnimationFrame = () => {}; });
+  await input.fill("验证突发片段");
+  await input.press("Enter");
+  const answer = Array.from({ length: 240 }, (_, index) => `片段${index}🌏，`).join("");
+  await expect(page.getByText(answer, { exact: true })).toHaveCount(1);
+  await expect(page.getByRole("button", { name: "停止生成" })).toHaveCount(0);
+  mock.release();
+  await expect(page.getByRole("button", { name: "复制回复" })).toHaveCount(1);
+  await expect(page.getByText(answer, { exact: true })).toHaveCount(1);
+  await expect(input).toBeEnabled();
+  expect(mock.errors).toEqual([]);
+});
+
+test("切换新对话后迟到的流式快照不会恢复旧回复", async ({ page }) => {
+  const mock = await fixture(page, { burst: true, delayFinalSnapshot: true });
+  await page.goto("/#playground?tenant=team-a");
+  const input = page.getByRole("textbox", { name: "发送给 Agent 的消息" });
+  await expect(input).toBeEnabled();
+  await input.fill("验证切换对话");
+  await input.press("Enter");
+  await expect(page.getByText(/片段239🌏，$/)).toHaveCount(1);
+  await page.getByRole("button", { name: "新建对话", exact: true }).click();
+  mock.release();
+  await expect(page.getByRole("heading", { name: "今天想聊些什么？" })).toBeVisible();
+  await expect(page.locator(".pg-message-text")).toHaveCount(0);
+  await expect(input).toBeEnabled();
   expect(mock.errors).toEqual([]);
 });
 

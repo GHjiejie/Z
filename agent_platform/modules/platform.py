@@ -645,8 +645,11 @@ class Platform:
         return result
 
     def session_detail(self, user: dict, session_id: str) -> dict:
+        from agent_platform.modules.reasoning import session_reasoning
+
         with self.db.read() as connection:
             result = self.owned(connection, t.sessions, user, session_id, own=True)
+            result["reasoning"] = session_reasoning(connection, user, session_id)
             result["messages"] = [
                 dict(row)
                 for row in connection.execute(

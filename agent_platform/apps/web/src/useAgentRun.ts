@@ -67,9 +67,25 @@ export function useAgentRun(tenant: string, callbacks: {
     const valid = () => !controller.signal.aborted && generation.current === target.generation;
     let acknowledged = !target.accepted;
     let messages: AgentMessage[] = [];
+    let messagesDirty = false;
+    let messageFrame: number | null = null;
     let status = "running";
     let protocolRunId = "";
     const seen = new Set<string>();
+    const flushMessages = () => {
+      if (messageFrame !== null) cancelAnimationFrame(messageFrame);
+      messageFrame = null;
+      if (messagesDirty && valid()) {
+        messagesDirty = false;
+        handlers.current.messages(messages, currentRunId.current);
+      }
+    };
+    const scheduleMessages = () => {
+      messagesDirty = true;
+      // Decode and validate every event/cursor immediately; publish only the
+      // latest reduced snapshot per paint, including bursts after reconnect.
+      messageFrame ??= requestAnimationFrame(flushMessages);
+    };
     const stopForScope = () => controller.abort();
     window.addEventListener("tenant-scope-changed", stopForScope);
     const consume = async () => {
@@ -107,17 +123,23 @@ export function useAgentRun(tenant: string, callbacks: {
                 if (!acknowledged) { acknowledged = true; target.accepted?.resolve(nextRun); }
               }
               const updated = reduceMessages(messages, event);
-              if (updated !== messages) handlers.current.messages(updated, currentRunId.current);
+              const changed = updated !== messages;
               messages = updated;
+              if (changed) scheduleMessages();
               if (cursor) { lastCursor.current = cursor; retries = 0; }
               setConnection("open"); setError("");
               const key = cursor ?? (event.type === EventType.STATE_SNAPSHOT ? `state:${status}` : event.type);
-              if (![EventType.TEXT_MESSAGE_CONTENT, EventType.TEXT_MESSAGE_START, EventType.TEXT_MESSAGE_END, EventType.MESSAGES_SNAPSHOT, EventType.TOOL_CALL_ARGS, EventType.TOOL_CALL_END].includes(event.type) && !seen.has(key)) {
+              if (![EventType.TEXT_MESSAGE_CONTENT, EventType.TEXT_MESSAGE_START, EventType.TEXT_MESSAGE_END,
+                EventType.REASONING_MESSAGE_CONTENT, EventType.REASONING_MESSAGE_START, EventType.REASONING_MESSAGE_END,
+                EventType.MESSAGES_SNAPSHOT, EventType.TOOL_CALL_ARGS, EventType.TOOL_CALL_END].includes(event.type) && !seen.has(key)) {
                 seen.add(key);
                 setEvents((previous) => [...previous.filter((item) => item.id !== key).slice(-79), { id: key, event }]);
               }
               if (event.type === EventType.RUN_FINISHED || event.type === EventType.RUN_ERROR) {
                 if (!acknowledged) throw new ApiError("运行缺少状态快照。", 502, "ag_ui_invalid_event");
+                // Do not leave the final characters waiting for a background
+                // tab's animation frame or discard them on completion.
+                flushMessages();
                 setRun(null); setConnection("closed");
                 if (event.type === EventType.RUN_ERROR) { status = "failed"; setError(event.message); }
                 else if (event.outcome?.type === "cancelled") status = "cancelled";
@@ -128,6 +150,7 @@ export function useAgentRun(tenant: string, callbacks: {
           return;
         } catch (cause) {
           if (!valid()) return;
+          flushMessages();
           const failure = cause instanceof Error ? cause : new Error("实时连接未完成。");
           // A rejected initial request keeps the draft. Once the server has
           // acknowledged a run, reconnect with GET; never submit it again.
@@ -145,6 +168,7 @@ export function useAgentRun(tenant: string, callbacks: {
     void consume();
     return () => {
       controller.abort();
+      if (messageFrame !== null) cancelAnimationFrame(messageFrame);
       window.removeEventListener("tenant-scope-changed", stopForScope);
       if (!acknowledged) target.accepted?.reject(new ApiError("请求已取消或组织已切换。", 0, "scope_changed"));
     };

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import re
 import secrets
 import shutil
 import subprocess
@@ -311,8 +312,28 @@ class LocalGateway:
         if not runtime_key or runtime_key == self.compose_env["LITELLM_MASTER_KEY"]:
             raise RuntimeError("未生成有效的 LiteLLM 受限调用密钥。")
         self.key_file.chmod(0o600)
+        redis_url = self.env.get("PLATFORM_REDIS_URL", "").strip()
+        if not redis_url:
+            # API and Worker are separate host processes. An in-process notifier
+            # cannot wake the API after a worker commit; discover our loopback
+            # Redis mapping instead of falling back to the two-second DB poll.
+            result = subprocess.run(
+                [*self.command, "port", "redis", "6379"],
+                env=self.compose_env,
+                capture_output=True,
+                text=True,
+                check=False,
+                timeout=15,
+            )
+            binding = re.fullmatch(r"127\.0\.0\.1:(\d{1,5})", result.stdout.strip())
+            if result.returncode or not binding or not 1 <= int(binding[1]) <= 65535:
+                raise RuntimeError(
+                    "无法读取本地 Redis 的回环端口，请检查网关容器配置。"
+                )
+            redis_url = f"redis://127.0.0.1:{binding[1]}/0"
         return {
             **platform_environment(self.env),
+            "PLATFORM_REDIS_URL": redis_url,
             "PLATFORM_LITELLM_URL": self.url + "/v1",
             "PLATFORM_LITELLM_KEY": runtime_key,
             "PLATFORM_LITELLM_ADMIN_URL": self.url + "/ui",

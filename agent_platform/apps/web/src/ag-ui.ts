@@ -9,6 +9,12 @@ export type { AGUIEvent, Message as AgentMessage, RunAgentInput };
 export type AgentTrace = { id: string; event: AGUIEvent };
 export type AgentFrame = { cursor: string | null; event: AGUIEvent };
 
+export function messageRunId(message: Message): string | undefined {
+  const platform: unknown = message.metadata?.platform;
+  if (platform && typeof platform === "object" && "run_id" in platform && typeof platform.run_id === "string") return platform.run_id;
+  return message.id.startsWith("assistant:") ? message.id.split(":")[1] : undefined;
+}
+
 const runState = z.object({ run: z.object({
   id: z.string(), session_id: z.string(), tenant_id: z.string(), user_id: z.string(),
   agent_name: z.string(), created_at: z.string(), status: z.string(), error: z.string(),
@@ -123,7 +129,27 @@ export async function agentStream(options: {
 
 export function reduceMessages(messages: Message[], event: AGUIEvent): Message[] {
   switch (event.type) {
-    case EventType.MESSAGES_SNAPSHOT: return event.messages;
+    case EventType.MESSAGES_SNAPSHOT:
+      // These roles may exist only in the stream. Omission says nothing about
+      // them; an explicit set for that role replaces its previous messages.
+      return [...event.messages, ...messages.filter((message) =>
+        (message.role === "reasoning" || message.role === "activity") && !event.messages.some((incoming) => incoming.role === message.role))];
+    case EventType.REASONING_MESSAGE_START: {
+      const existing = messages.find((message) => message.id === event.messageId);
+      if (existing && existing.role !== "reasoning") throw new ApiError("推理消息标识与其他消息冲突。", 502, "ag_ui_invalid_event");
+      return existing ? messages : [...messages, {
+        id: event.messageId, role: "reasoning", content: "", metadata: event.metadata ?? { platform: { reasoning_status: "streaming" } },
+      }];
+    }
+    case EventType.REASONING_MESSAGE_CONTENT:
+      if (!messages.some((message) => message.id === event.messageId && message.role === "reasoning")) throw new ApiError("推理内容缺少开始事件。", 502, "ag_ui_invalid_event");
+      return messages.map((message) => message.id === event.messageId && message.role === "reasoning"
+        ? { ...message, content: message.content + event.delta } : message);
+    case EventType.REASONING_MESSAGE_END:
+    case EventType.REASONING_END:
+      return messages.map((message) => message.id === event.messageId && message.role === "reasoning" ? {
+        ...message, metadata: { ...message.metadata, ...event.metadata, platform: event.metadata?.platform ?? { reasoning_status: "complete" } },
+      } : message);
     case EventType.TEXT_MESSAGE_START:
       return messages.some((message) => message.id === event.messageId) ? messages : [
         ...messages, { id: event.messageId, role: event.role ?? "assistant", content: "" },

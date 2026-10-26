@@ -52,6 +52,10 @@ services:
     image: redis:7.4-alpine
     restart: unless-stopped
     command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    # Host API/Worker processes need the same commit notification channel.
+    # Port 0 lets Docker choose an available port; never bind beyond loopback.
+    ports:
+      - "127.0.0.1:${PLATFORM_LOCAL_REDIS_PORT:-0}:6379"
     volumes:
       - redis-data:/data
     healthcheck:

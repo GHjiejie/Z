@@ -1,4 +1,4 @@
-import type { CallResponse, PrincipalResponse, RunResponse, SessionResponse, WalletResponse } from "./api-contract.generated";
+import type { CallResponse, PrincipalResponse, ReasoningResponse, RunResponse, SessionResponse, WalletResponse } from "./api-contract.generated";
 
 export type User = {
   id: string;
@@ -46,8 +46,9 @@ export type Agent = {
 };
 export type Session = SessionResponse;
 export type Run = RunResponse;
-export type Message = { id?: string; role: string; content: string; created_at?: string };
-export type SessionDetail = Session & { messages: Message[]; runs: Run[] };
+export type Message = { id?: string; run_id?: string; role: string; content: string; created_at?: string };
+export type ReasoningTrace = ReasoningResponse;
+export type SessionDetail = Session & { messages: Message[]; runs: Run[]; reasoning?: ReasoningTrace[] };
 export type RunEvent = {
   sequence: number;
   type: string;

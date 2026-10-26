@@ -8,6 +8,10 @@ Python / FastAPI、React / TypeScript、LangGraph 与 LiteLLM 组成的多租户
 - [架构调整与验收](docs/architecture-adjustments.md)：八项架构改进、证据及升级契约。
 - [多租户实现说明](docs/multi-tenant-implementation.md)：当前架构、权限、数据库、网关、账务和交付状态。
 - [账号与前端角色权限](docs/roles-and-permissions.md)：7 种角色的菜单、可操作功能、当前本机账号与本地凭据文件位置。
+- [本机 DeepSeek 接入](docs/deepseek-provider.md)：当前上游、默认/可选模型、密钥位置与接入验证。
+- [Wylon 接入与默认模型](docs/wylon-provider.md)：新增 Wylon Flash 并设为默认，保留 DeepSeek 直连模型。
+- [Playground 流式输出优化](docs/streaming-performance.md)：本机跨进程通知、前端更新合并和延迟实测。
+- [推理显示与思考等级](docs/reasoning.md)：AG-UI 推理流、历史恢复、取消状态和 extra high 配置。
 - [多租户运行手册](docs/multi-tenant-operations.md)：部署、密钥、切库、备份、关闭与恢复。
 - [Kubernetes 本地部署](docs/kubernetes-local.md)：OrbStack 集群、数据迁移、更新、停启及恢复。
 - [迭代设计方案](docs/multi-tenant-iteration-design.md)：设计依据和正式验收矩阵。

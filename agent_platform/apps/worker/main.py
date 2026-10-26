@@ -687,6 +687,27 @@ class Worker:
             sent = True
             buffer = ""
             flushed_at = time.monotonic()
+            reasoning_buffer = ""
+            reasoning_open = False
+            reasoning_flushed_at = time.monotonic()
+
+            async def flush_reasoning(*, complete: bool = False) -> None:
+                nonlocal reasoning_buffer, reasoning_open, reasoning_flushed_at
+                if reasoning_buffer:
+                    await asyncio.to_thread(
+                        self.event,
+                        run,
+                        "reasoning.delta",
+                        {"text": reasoning_buffer, "call_id": call_id},
+                    )
+                    reasoning_buffer = ""
+                    reasoning_flushed_at = time.monotonic()
+                if complete and reasoning_open:
+                    await asyncio.to_thread(
+                        self.event, run, "reasoning.finished", {"call_id": call_id}
+                    )
+                    reasoning_open = False
+
             async for event in inference.stream(
                 messages,
                 routing["route"],
@@ -699,7 +720,20 @@ class Worker:
                     else {}
                 ),
             ):
-                if event.type == "text":
+                if event.type == "reasoning":
+                    if not reasoning_open:
+                        await asyncio.to_thread(
+                            self.event, run, "reasoning.started", {"call_id": call_id}
+                        )
+                        reasoning_open = True
+                    reasoning_buffer += event.data["text"]
+                    if (
+                        len(reasoning_buffer) >= 128
+                        or time.monotonic() - reasoning_flushed_at > 0.1
+                    ):
+                        await flush_reasoning()
+                elif event.type == "text":
+                    await flush_reasoning(complete=True)
                     buffer += event.data["text"]
                     if len(buffer) >= 128 or time.monotonic() - flushed_at > 0.1:
                         await asyncio.to_thread(
@@ -711,6 +745,7 @@ class Worker:
                         buffer, flushed_at = "", time.monotonic()
                 elif event.type == "result":
                     reply = event.data
+            await flush_reasoning(complete=True)
             if reply is None:
                 raise GatewayError(
                     "usage_unavailable", "模型未返回完整用量，费用等待核实。"

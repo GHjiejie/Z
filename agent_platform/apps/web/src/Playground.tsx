@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
+import { Fragment, memo, useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { FormEvent } from "react";
 import {
   AlertCircle, ArrowDown, ArrowUp, Bot, Check, ChevronRight, CircleStop,
@@ -7,9 +7,11 @@ import {
 } from "lucide-react";
 import { api, dateTime, getScopeRevision, getTenantId, scopeIsCurrent, tenantLink, terminal, write } from "./api";
 import { Button, Modal, SearchBox, Select, useResource, useToast } from "./components";
-import type { Agent, Model, Run, Session, SessionDetail } from "./types";
+import type { Agent, Model, ReasoningTrace, Run, Session, SessionDetail } from "./types";
 import type { AGUIEvent } from "./ag-ui";
+import { messageRunId } from "./ag-ui";
 import { useAgentRun } from "./useAgentRun";
+import { Reasoning, reasoningTrace } from "./Reasoning";
 
 const query = () => new URLSearchParams(location.hash.split("?")[1] ?? "");
 export function Playground({ name }: { name?: string }) {
@@ -26,12 +28,14 @@ export function Playground({ name }: { name?: string }) {
   const [detail, setDetail] = useState<SessionDetail | null>(null);
   const [draft, setDraft] = useState("");
   const [liveText, setLiveText] = useState("");
+  const [liveReasoning, setLiveReasoning] = useState<ReasoningTrace[]>([]);
   const [busy, setBusy] = useState(false);
   const [loading, setLoading] = useState(false);
   const [canceling, setCanceling] = useState(false);
   const [error, setError] = useState("");
   const [showEvents, setShowEvents] = useState(false);
   const viewport = useRef<HTMLDivElement>(null);
+  const scrollFrame = useRef<number | null>(null);
   const input = useRef<HTMLTextAreaElement>(null);
   const following = useRef(true);
   const [showLatest, setShowLatest] = useState(false);
@@ -57,16 +61,27 @@ export function Playground({ name }: { name?: string }) {
   const { run: activeRun, events, connection, error: streamError, start, attach, reset, reconnect } = useAgentRun(tenantScope, {
     messages: (messages, runId) => {
       const livePrefix = `assistant:${runId}:`;
-      setLiveText(messages.filter((message) => message.role === "assistant" && message.id.startsWith(livePrefix))
+      const isLiveReply = (id: string) => id === `assistant:${runId}` || id.startsWith(livePrefix);
+      setLiveReasoning(messages.flatMap((message) => {
+        const trace = reasoningTrace(message);
+        return trace?.run_id === runId ? [trace] : [];
+      }));
+      setLiveText(messages.filter((message) => message.role === "assistant" && isLiveReply(message.id))
         .map((message) => typeof message.content === "string" ? message.content : "").filter(Boolean).join("\n\n"));
-      const confirmed = messages.flatMap((message) => ["user", "assistant"].includes(message.role) && typeof message.content === "string" && message.content && !message.id.startsWith(livePrefix)
-        ? [{ id: message.id, role: message.role, content: message.content }] : []);
-      setDetail((current) => current ? { ...current, messages: confirmed } : current);
+      const confirmed = messages.flatMap((message) => ["user", "assistant"].includes(message.role) && typeof message.content === "string" && message.content && !isLiveReply(message.id)
+        ? [{ id: message.id, run_id: messageRunId(message), role: message.role, content: message.content }] : []);
+      setDetail((current) => {
+        if (!current || current.messages.length === confirmed.length && current.messages.every((message, index) =>
+          message.id === confirmed[index].id && message.run_id === confirmed[index].run_id && message.role === confirmed[index].role && message.content === confirmed[index].content)) return current;
+        return { ...current, messages: confirmed };
+      });
     },
     finished: (id, _status, message) => {
       setCanceling(false);
       if (message) setError(message);
-      void loadSession(id, false);
+      // Keep the last streamed text visible until its persisted replacement is
+      // ready, so completion cannot briefly empty the assistant bubble.
+      void loadSession(id, false).then((result) => { if (result) { setLiveText(""); setLiveReasoning([]); } });
       void sessions.reload();
     },
   });
@@ -109,6 +124,7 @@ export function Playground({ name }: { name?: string }) {
   useEffect(() => {
     reset();
     setLiveText("");
+    setLiveReasoning([]);
     setDetail(null);
     setError("");
     if (sessionId) void loadSession(sessionId);
@@ -121,9 +137,16 @@ export function Playground({ name }: { name?: string }) {
     };
   }, [sessionId, loadSession, reset]);
   useLayoutEffect(() => {
-    const element = viewport.current;
-    if (element && following.current) element.scrollTop = element.scrollHeight;
-  }, [detail?.messages.length, liveText, sessionId]);
+    if (following.current && scrollFrame.current === null) scrollFrame.current = requestAnimationFrame(() => {
+      scrollFrame.current = null;
+      const element = viewport.current;
+      if (element && following.current) element.scrollTop = element.scrollHeight;
+    });
+  }, [detail?.messages.length, detail?.reasoning?.length, liveText, liveReasoning, sessionId]);
+  useEffect(() => () => {
+    if (scrollFrame.current !== null) cancelAnimationFrame(scrollFrame.current);
+    scrollFrame.current = null;
+  }, []);
   useLayoutEffect(() => {
     if (!input.current) return;
     input.current.style.height = "auto";
@@ -166,6 +189,8 @@ export function Playground({ name }: { name?: string }) {
         };
       const restored = await loadSession(id, false);
       if (!restored || !scopeIsCurrent(scopeRevision)) return;
+      setLiveText("");
+      setLiveReasoning([]);
       await start({
         threadId: id, runId: sendKey.current.key, protocolVersion: "1.0",
         messages: [{ id: sendKey.current.messageId, role: "user", content: message }],
@@ -205,6 +230,7 @@ export function Playground({ name }: { name?: string }) {
     reset();
     selection.current++;
     setLiveText("");
+    setLiveReasoning([]);
     setError("");
     setDraft("");
     setCanceling(false);
@@ -224,13 +250,16 @@ export function Playground({ name }: { name?: string }) {
     location.hash = tenantLink(`playground?session=${session.id}`, tenantScope);
   }
   const effectiveError = error || streamError || agents.error || models.error || (!activeRun && latestRun && ["failed", "expired", "interrupted"].includes(latestRun.status) ? latestRun.error : "");
-  const hasMessages = Boolean(detail?.messages.length || activeRun || liveText);
+  const hasMessages = Boolean(detail?.messages.length || activeRun || liveText || liveReasoning.length);
   const availableModels = models.data?.items.filter((model) => model.active) ?? [];
   const automaticModel = availableModels.find((model) => model.id === selectedAgent?.model_id) ?? availableModels.find((model) => model.is_default);
   const recentSessions = sessions.data?.items.filter((session) => (session.title || "新对话").toLocaleLowerCase().includes(historyQuery.toLocaleLowerCase())) ?? [];
   const suggestions = selectedAgent?.starter_prompts?.length ? selectedAgent.starter_prompts.slice(0, 3) : [
     "请介绍你可以帮我完成哪些工作", "帮我把一个想法整理成行动计划", "把复杂的问题解释得简单一些",
   ];
+  const copyReply = useCallback((content: string) => {
+    void navigator.clipboard.writeText(content).then(() => toast("回复已复制")).catch(() => toast("无法复制，请手动选择文本", "error"));
+  }, [toast]);
   return <section className="pg-workspace" aria-label="Playground">
     <div className="pg-toolbar">
       <h1 className="sr-only">Playground</h1>
@@ -266,22 +295,14 @@ export function Playground({ name }: { name?: string }) {
             <h2>今天想聊些什么？</h2>
             {!agents.loading && !published.length && <p className="pg-empty-note">还没有已发布的 Agent。<a href={tenantLink("agents", tenantScope)}>先去创建并发布</a></p>}
           </div> : <div className="pg-message-list">
-            {detail?.messages.filter((message) => ["user", "assistant"].includes(message.role)).map((message, index) => <article
-              key={message.id ?? `${sessionId}-${message.role}-${message.created_at ?? index}`}
-              className={`pg-message ${message.role}`} aria-label={message.role === "user" ? "你的消息" : "Agent 的回复"}>
-              {message.role === "assistant" && <span className="pg-assistant-icon"><Sparkles size={22} strokeWidth={1.7} /></span>}
-              <div className="pg-message-content">
-                <div className="pg-message-text">{message.content}</div>
-                {message.role === "assistant" && <button className="pg-copy icon-button" aria-label="复制回复" onClick={() => {
-                  void navigator.clipboard.writeText(message.content).then(() => toast("回复已复制")).catch(() => toast("无法复制，请手动选择文本", "error"));
-                }}><Copy size={15} /></button>}
-              </div>
-            </article>)}
-            {activeRun && <article className="pg-message assistant" aria-label="Agent 正在回复">
+            <ConversationHistory messages={detail?.messages} reasoning={detail?.reasoning}
+              hiddenRunId={activeRun?.id ?? liveReasoning[0]?.run_id} sessionId={sessionId} copy={copyReply} />
+            {(activeRun || liveText || liveReasoning.length > 0) && <article className="pg-message assistant" aria-label={activeRun ? "Agent 正在回复" : "Agent 的回复"}>
               <span className="pg-assistant-icon"><Sparkles size={22} strokeWidth={1.7} /></span>
               <div className="pg-message-content">
-                {liveText ? <div className="pg-message-text">{liveText}<span className="typing-cursor" /></div>
-                  : <div className="pg-thinking" role="status"><span className="thinking-dots"><i /><i /><i /></span>{activeRun.status === "queued" ? "等待执行" : "正在思考"}</div>}
+                {liveReasoning.map((trace) => <Reasoning key={trace.id} trace={trace} />)}
+                {liveText ? <div className="pg-message-text">{liveText}{activeRun && <span className="typing-cursor" />}</div>
+                  : !liveReasoning.length && <div className="pg-thinking" role="status"><span className="thinking-dots"><i /><i /><i /></span>{activeRun?.status === "queued" ? "等待执行" : "正在思考"}</div>}
               </div>
             </article>}
           </div>}
@@ -350,6 +371,29 @@ export function Playground({ name }: { name?: string }) {
     </Modal>}
   </section>;
 }
+const ConversationHistory = memo(function ConversationHistory({ messages, reasoning, hiddenRunId, sessionId, copy }: {
+  messages: SessionDetail["messages"] | undefined;
+  reasoning: ReasoningTrace[] | undefined; hiddenRunId: string | undefined;
+  sessionId: string | null; copy: (content: string) => void;
+}) {
+  const runId = (message: SessionDetail["messages"][number]) => message.run_id ?? (message.id?.startsWith("assistant:") ? message.id.split(":")[1] : undefined);
+  const traces = (message: SessionDetail["messages"][number]) => reasoning?.filter((trace) => trace.run_id !== hiddenRunId && trace.run_id === runId(message)) ?? [];
+  return <>{messages?.filter((message) => ["user", "assistant"].includes(message.role)).map((message, index) => <Fragment
+    key={message.id ?? `${sessionId}-${message.role}-${message.created_at ?? index}`}
+    ><article
+    className={`pg-message ${message.role}`} aria-label={message.role === "user" ? "你的消息" : "Agent 的回复"}>
+    {message.role === "assistant" && <span className="pg-assistant-icon"><Sparkles size={22} strokeWidth={1.7} /></span>}
+    <div className="pg-message-content">
+      {message.role === "assistant" && traces(message).map((trace) => <Reasoning key={trace.id} trace={trace} />)}
+      <div className="pg-message-text">{message.content}</div>
+      {message.role === "assistant" && <button className="pg-copy icon-button" aria-label="复制回复" onClick={() => copy(message.content)}><Copy size={15} /></button>}
+    </div>
+  </article>
+    {message.role === "user" && !messages.some((item) => item.role === "assistant" && runId(item) === runId(message)) && traces(message).map((trace) =>
+      <article key={trace.id} className="pg-message assistant" aria-label="Agent 的思考"><span className="pg-assistant-icon"><Sparkles size={22} /></span>
+        <div className="pg-message-content"><Reasoning trace={trace} /></div></article>)}
+  </Fragment>)}</>;
+});
 function eventLabel(event: AGUIEvent): string {
   switch (event.type) {
     case "RUN_STARTED": return "运行已接收";
@@ -357,6 +401,8 @@ function eventLabel(event: AGUIEvent): string {
     case "RUN_ERROR": return "运行失败";
     case "STEP_STARTED": return "开始下一步骤";
     case "STEP_FINISHED": return "步骤结束";
+    case "REASONING_START": return "开始思考";
+    case "REASONING_END": return "思考结束";
     case "TOOL_CALL_START": return `正在调用：${event.toolCallName}`;
     case "TOOL_CALL_RESULT": return "工具已返回结果";
     case "STATE_SNAPSHOT": {

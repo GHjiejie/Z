@@ -40,7 +40,8 @@ class LocalGatewayTests(unittest.TestCase):
 
     @staticmethod
     def docker_ready(args, **kwargs):
-        return subprocess.CompletedProcess(args, 0, stdout="", stderr="")
+        output = "127.0.0.1:16379\n" if args[-3:] == ["port", "redis", "6379"] else ""
+        return subprocess.CompletedProcess(args, 0, stdout=output, stderr="")
 
     def test_controls_are_random_private_persistent_and_separate(self):
         first = LocalGateway(self.root / "first", self.env, 4000)
@@ -215,6 +216,7 @@ class LocalGatewayTests(unittest.TestCase):
             runtime["PLATFORM_LITELLM_ADMIN_URL"], "http://127.0.0.1:4010/ui"
         )
         self.assertEqual(runtime["PLATFORM_DEFAULT_MODEL"], "k3")
+        self.assertEqual(runtime["PLATFORM_REDIS_URL"], "redis://127.0.0.1:16379/0")
         self.assertEqual(runtime["PLATFORM_ADMIN_EMAIL"], "owner@example.com")
         for name in (
             *CONTROL_SECRETS,
@@ -233,6 +235,55 @@ class LocalGatewayTests(unittest.TestCase):
         self.assertIn("up", commands[1][0])
         self.assertIn("--reuse-existing", commands[2][0])
         self.assertEqual(commands[1][0][: len(gateway.command)], gateway.command)
+
+    def test_explicit_redis_is_preserved_without_discovering_a_host_port(self):
+        gateway = LocalGateway(
+            self.root,
+            {**self.env, "PLATFORM_REDIS_URL": "redis://custom-redis:6380/5"},
+            4010,
+        )
+        run, _ = self.successful_commands(gateway)
+        with (
+            patch("agent_platform.scripts.gateway.shutil.which", return_value="docker"),
+            patch(
+                "agent_platform.scripts.gateway.subprocess.run",
+                side_effect=self.docker_ready,
+            ) as docker,
+        ):
+            runtime = gateway.start(run, Mock())
+        self.assertEqual(runtime["PLATFORM_REDIS_URL"], "redis://custom-redis:6380/5")
+        self.assertFalse(
+            any(
+                call.args[0][-3:] == ["port", "redis", "6379"]
+                for call in docker.call_args_list
+            )
+        )
+
+    def test_managed_redis_discovery_rejects_missing_or_non_loopback_bindings(self):
+        for output in ("", "0.0.0.0:16379\n", "127.0.0.1:0\n", "127.0.0.1:65536\n"):
+            with self.subTest(binding=output):
+                gateway = LocalGateway(self.root, self.env, 4010)
+                run, _ = self.successful_commands(gateway)
+
+                def docker(args, binding=output, **kwargs):
+                    if args[-3:] == ["port", "redis", "6379"]:
+                        return subprocess.CompletedProcess(
+                            args, 0, stdout=binding, stderr=""
+                        )
+                    return self.docker_ready(args, **kwargs)
+
+                with (
+                    patch(
+                        "agent_platform.scripts.gateway.shutil.which",
+                        return_value="docker",
+                    ),
+                    patch(
+                        "agent_platform.scripts.gateway.subprocess.run",
+                        side_effect=docker,
+                    ),
+                    self.assertRaisesRegex(RuntimeError, "Redis"),
+                ):
+                    gateway.start(run, Mock())
 
     def test_occupied_port_is_rejected_before_up_and_stop_does_not_touch_docker(self):
         gateway = LocalGateway(self.root, self.env, 4000)

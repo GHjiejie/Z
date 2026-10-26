@@ -21,6 +21,19 @@ from agent_platform.tests.test_execution_lifecycle import OfflineControl
 class SmokeGateway:
     async def stream(self, messages, _model, _max_tokens, _temperature, _tools):
         last = messages[-1]
+        if last["role"] == "user" and "展示思考" in last["content"]:
+            yield GatewayEvent("reasoning", {"text": "先核对输入条件。"})
+            await asyncio.sleep(0.2)
+            yield GatewayEvent("reasoning", {"text": "再验证计算结果。"})
+            # Keep this phase open long enough to exercise refresh and cancel.
+            await asyncio.sleep(0.4)
+            if "等待取消" in last["content"]:
+                await asyncio.Event().wait()
+            yield GatewayEvent("text", {"text": "验证完成，结果为 300。"})
+            yield GatewayEvent(
+                "result", ModelReply("验证完成，结果为 300。", [], 20, 25, {})
+            )
+            return
         if last["role"] == "user" and "计算" in last["content"]:
             yield GatewayEvent(
                 "result",

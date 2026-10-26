@@ -52,13 +52,18 @@ data: {"type":"TEXT_MESSAGE_CONTENT","messageId":"assistant:run_demo:call_demo",
 | STATE_SNAPSHOT | `snapshot.run` 为调用者可见的运行投影，表达 queued / running / cancelling / 终态 |
 | MESSAGES_SNAPSHOT | 已授权会话历史、精确重连点的部分内容或最终持久化结果 |
 | TEXT_MESSAGE_START / CONTENT / END | 每轮模型文本开始、增量和结束，使用稳定 messageId |
+| REASONING_START / REASONING_MESSAGE_START / CONTENT / END / REASONING_END | 上游明确返回的可读推理，独立于正文，使用稳定 messageId |
 | STEP_STARTED / STEP_FINISHED | 有界执行步骤 |
 | TOOL_CALL_START / ARGS / END / RESULT | 工具身份、参数生成完成及服务端执行结果；END 表示参数结束 |
 | CUSTOM | `platform.queued`、`platform.model`、`platform.usage`，用于排队、模型展示和客户用量凭据 |
 | RUN_FINISHED | 正常完成使用 `outcome.type=success`；用户取消使用官方 `outcome.type=cancelled` |
 | RUN_ERROR | 失败、超时或中断，带安全 message / code |
 
-每个连接先输出 RUN_STARTED、STATE_SNAPSHOT、MESSAGES_SNAPSHOT，再输出持久事件的映射。成功终态用最终助手消息快照替换中间步骤文本及工具消息；失败或取消沿用平台既有持久化规则，保留用户消息。不会向浏览器输出 Agent 系统提示、模型/网关密钥、供应商成本或加密推理项。
+每个连接先输出 RUN_STARTED、STATE_SNAPSHOT、MESSAGES_SNAPSHOT，再输出持久事件的映射。成功终态用最终助手消息快照替换中间步骤文本及工具消息，并保留推理；失败或取消保留用户消息和已经收到的推理。不会向浏览器输出 Agent 系统提示、模型/网关密钥、供应商成本或加密推理项。
+
+原生 Responses 的 `response.reasoning_text.delta` 与 `response.reasoning_summary_text.delta` 转为可读推理，只有最终响应返回推理文本时补发一次。Worker 按正文相同的缓冲阈值持久化 `reasoning.started/delta/finished`，API 再转为上述标准事件，不使用已弃用的 THINKING 事件。推理消息 ID 为 `reasoning:{platform_run_id}:{call_id}`；`metadata.platform.reasoning_status` 为 `streaming`、`complete` 或 `interrupted`。正文、工具回合和运行结束都会正确闭合推理阶段。
+
+`GET sessions/{id}` 的 `reasoning` 字段从同一用户、同一组织、同一会话的持久事件恢复 `{id, run_id, content, status, created_at}`。Playground 实时展开推理，历史默认折叠，取消时显示“思考已中断”；刷新和重连只恢复已有事件。原生加密上下文、供应商 reasoning item ID 留在运行时；可读推理不混入助手答案或客户用量凭据。设置与兼容性见[推理显示与思考等级](reasoning.md)。
 
 ## 断线、刷新和取消
 
@@ -93,4 +98,4 @@ cd agent_platform/apps/web
 PLATFORM_AG_UI_SMOKE=1 PLATFORM_E2E_BASE_URL=http://127.0.0.1:18011 npx playwright test tests/ag-ui-live.spec.ts
 ```
 
-该 smoke app 验证真实 POST/SSE、工具参数/结果、官方 JavaScript schema 消费真实 Python 事件、刷新恢复且调用数不增加、取消与费用凭据。它只用于临时本地验证。
+该 smoke app 验证真实 POST/SSE、工具参数/结果、可读推理、官方 JavaScript schema 消费真实 Python 事件、刷新恢复且调用数不增加、取消与费用凭据。它只用于临时本地验证。

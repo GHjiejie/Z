@@ -4,11 +4,13 @@ model_list:
       model: os.environ/UPSTREAM_MODEL
       api_base: os.environ/UPSTREAM_API_BASE
       api_key: os.environ/UPSTREAM_API_KEY
-      reasoning_effort: high
+      reasoning_effort: xhigh
       store: false
       drop_params: true
       max_retries: 0
       timeout: 180
+    model_info:
+      mode: responses
 
 router_settings:
   num_retries: 0

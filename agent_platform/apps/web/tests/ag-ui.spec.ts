@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 import { EventType } from "@ag-ui/core";
 import type { AgentFrame } from "../src/ag-ui";
-import { decodeAgentEvents, reduceMessages } from "../src/ag-ui";
+import { decodeAgentEvents, messageRunId, reduceMessages } from "../src/ag-ui";
 
 async function decode(text: string, split: number) {
   const bytes = new TextEncoder().encode(text);
@@ -48,4 +48,28 @@ test("工具参数与结果累积到对应消息，快照可替换已重放的�
     { id: "result", role: "tool", toolCallId: "tool-1", content: '{"result":5}' },
   ]);
   expect(reduceMessages(messages, { type: EventType.MESSAGES_SNAPSHOT, messages: [{ id: "final", role: "assistant", content: "5" }] })).toEqual([{ id: "final", role: "assistant", content: "5" }]);
+});
+
+test("推理增量独立于正文，重连快照和中断状态保留内容", async () => {
+  const id = "reasoning:run:call";
+  const values = [
+    { type: "REASONING_START", messageId: id },
+    { type: "REASONING_MESSAGE_START", messageId: id, role: "reasoning" },
+    { type: "REASONING_MESSAGE_CONTENT", messageId: id, delta: "检查条件。" },
+    { type: "REASONING_MESSAGE_CONTENT", messageId: id, delta: "确认结果。" },
+    { type: "REASONING_MESSAGE_END", messageId: id },
+    { type: "REASONING_END", messageId: id, metadata: { platform: { reasoning_status: "interrupted" } } },
+  ];
+  for (const split of [1, 3, 4096]) {
+    const frames = await decode(values.map((value, index) => `id: ${index + 1}.0\ndata: ${JSON.stringify(value)}\n\n`).join(""), split);
+    const messages = frames.reduce((previous, frame) => reduceMessages(previous, frame.event), [] as Parameters<typeof reduceMessages>[0]);
+    expect(messages).toEqual([{ id, role: "reasoning", content: "检查条件。确认结果。", metadata: { platform: { reasoning_status: "interrupted" } } }]);
+    expect(reduceMessages(messages, { type: EventType.MESSAGES_SNAPSHOT, messages })).toEqual(messages);
+    expect(reduceMessages(messages, { type: EventType.MESSAGES_SNAPSHOT, messages: [{ id: "answer", role: "assistant", content: "结果" }] })).toContainEqual(messages[0]);
+  }
+  expect(() => reduceMessages([], { type: EventType.REASONING_MESSAGE_CONTENT, messageId: id, delta: "lost" })).toThrow("开始事件");
+  expect(() => reduceMessages([{ id, role: "assistant", content: "正文" }], { type: EventType.REASONING_MESSAGE_START, messageId: id, role: "reasoning" })).toThrow("冲突");
+  expect(messageRunId({ id: "user-message", role: "user", content: "停止后继续", metadata: { platform: { run_id: "cancelled-run" } } })).toBe("cancelled-run");
+  expect(messageRunId({ id: "assistant:complete-run", role: "assistant", content: "正文" })).toBe("complete-run");
+  expect(messageRunId({ id: "untrusted", role: "user", content: "消息", metadata: { platform: { run_id: { invalid: true } } } })).toBeUndefined();
 });

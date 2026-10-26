@@ -281,6 +281,7 @@ class Gateway:
         terminal: dict | None = None
         gateway_response_id: str | None = None
         deltas: list[str] = []
+        reasoning_deltas: list[str] = []
         try:
             body: dict[str, Any] = {
                 "model": model,
@@ -335,7 +336,19 @@ class Gateway:
                                     "模型网关响应标识不一致，费用等待核实。"
                                 )
                             gateway_response_id = provider_id
-                    if kind == "response.output_text.delta":
+                    if kind in {
+                        "response.reasoning_text.delta",
+                        "response.reasoning_summary_text.delta",
+                    }:
+                        delta = event.get("delta")
+                        if not isinstance(delta, str):
+                            raise ValueError("Invalid readable reasoning delta")
+                        reasoning_deltas.append(delta)
+                        if delta:
+                            # Only the provider's readable text is public. Native
+                            # item IDs and encrypted context stay in response_items.
+                            yield GatewayEvent("reasoning", {"text": delta})
+                    elif kind == "response.output_text.delta":
                         delta = event.get("delta")
                         if not isinstance(delta, str):
                             raise ValueError("Invalid text delta")
@@ -395,6 +408,7 @@ class Gateway:
         if not isinstance(output, list):
             raise UsageUnavailable()
         content = ""
+        reasoning_content = ""
         tool_calls = []
         for item in output:
             if not isinstance(item, dict):
@@ -413,6 +427,19 @@ class Gateway:
                         if not isinstance(text, str):
                             raise UsageUnavailable()
                         content += text
+            elif item.get("type") == "reasoning":
+                blocks = item.get("summary") or item.get("content") or []
+                if not isinstance(blocks, list):
+                    raise UsageUnavailable()
+                for block in blocks:
+                    if isinstance(block, dict) and block.get("type") in {
+                        "summary_text",
+                        "reasoning_text",
+                        "text",
+                    }:
+                        if not isinstance(block.get("text"), str):
+                            raise UsageUnavailable()
+                        reasoning_content += block["text"]
             elif item.get("type") == "function_call":
                 arguments = item.get("arguments", "")
                 if terminal["status"] == "completed" and item.get("status") not in {
@@ -436,6 +463,8 @@ class Gateway:
                         "args": arguments,
                     }
                 )
+        if reasoning_content and not reasoning_deltas:
+            yield GatewayEvent("reasoning", {"text": reasoning_content})
         if content and not deltas:
             yield GatewayEvent("text", {"text": content})
         finish_reason = (

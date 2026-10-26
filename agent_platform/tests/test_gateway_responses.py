@@ -469,9 +469,11 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.result(second).raw_usage["finish_reason"], "stop")
 
-    async def test_tool_loop_replays_opaque_reasoning_items_without_public_leaks(self):
+    async def test_tool_loop_replays_private_context_and_exposes_only_readable_reasoning(
+        self,
+    ):
         opaque = "synthetic-encrypted-reasoning-context"
-        reasoning_text = "synthetic-private-reasoning-summary"
+        reasoning_text = "synthetic-readable-reasoning-summary"
         reasoning = {
             "type": "reasoning",
             "id": "rs-item-a",
@@ -526,6 +528,8 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
                 values.append(value)
                 if value.type == "text":
                     public_events.append(("message.delta", value.data))
+                elif value.type == "reasoning":
+                    public_events.append(("reasoning.delta", value.data))
             reply = self.result(values)
             replies.append(reply)
             return reply
@@ -575,12 +579,73 @@ class GatewayResponsesTests(unittest.IsolatedAsyncioTestCase):
         evidence = json.dumps(
             {"events": public_events, "usage": [reply.raw_usage for reply in replies]}
         )
-        for private_value in (opaque, reasoning_text, reasoning["id"]):
+        for private_value in (opaque, reasoning["id"]):
             self.assertNotIn(private_value, evidence)
+        self.assertEqual(
+            [data for name, data in public_events if name == "reasoning.delta"],
+            [{"text": reasoning_text}],
+        )
+        self.assertNotIn(
+            reasoning_text, json.dumps([reply.raw_usage for reply in replies])
+        )
         self.assertEqual(
             [data["text"] for name, data in public_events if name == "message.delta"],
             ["5"],
         )
+
+    async def test_reasoning_text_and_summary_fallback_are_not_duplicated(self):
+        readable = "A public reasoning summary."
+        for field, block in (
+            ("summary", "summary_text"),
+            ("content", "reasoning_text"),
+        ):
+            for streamed in (False, True):
+                with self.subTest(field=field, streamed=streamed):
+                    reasoning = {
+                        "type": "reasoning",
+                        "id": "rs-private",
+                        field: [{"type": block, "text": readable}],
+                        "encrypted_content": "private-ciphertext",
+                    }
+                    final = response(output=[reasoning, text_item("Answer")])
+                    wire = []
+                    if streamed:
+                        wire.append(
+                            event(
+                                "response.reasoning_summary_text.delta"
+                                if field == "summary"
+                                else "response.reasoning_text.delta",
+                                0,
+                                delta=readable,
+                                item_id="rs-private",
+                            )
+                        )
+                    wire.append(event("response.completed", 1, response=final))
+                    values, _ = await self.run_sse(wire)
+                    self.assertEqual(
+                        [value.data for value in values if value.type == "reasoning"],
+                        [{"text": readable}],
+                    )
+                    self.assertEqual(self.result(values).content, "Answer")
+                    public = json.dumps(
+                        [value.data for value in values if value.type != "result"]
+                    )
+                    self.assertNotIn("rs-private", public)
+                    self.assertNotIn("private-ciphertext", public)
+
+    async def test_malformed_reasoning_delta_fails_safely(self):
+        with self.assertRaises(GatewayError) as caught:
+            await self.run_sse(
+                [
+                    event(
+                        "response.reasoning_text.delta",
+                        0,
+                        delta={"encrypted_content": "private-value"},
+                    ),
+                    event("response.completed", 1, response=response()),
+                ]
+            )
+        self.assertNotIn("private-value", str(caught.exception))
 
     async def test_sse_comments_and_multiline_data_preserve_terminal_reply(self):
         events, _ = await self.run_sse(completed_events(), multiline=True)
