@@ -1,5 +1,0 @@
-service:
-  type: LoadBalancer
-  port: 8010
-nodeSelector:
-  kubernetes.io/hostname: orbstack
