@@ -147,14 +147,6 @@ export function UserDialog({
       setFormError("请至少选择一个角色");
       return;
     }
-    if (
-      (kind === "create" || kind === "reset") &&
-      (Array.from(draft.password).length < 15 ||
-        Array.from(draft.password).length > 128)
-    ) {
-      setFormError("密码长度须为 15～128 个字符");
-      return;
-    }
     if (kind === "reset" && draft.password !== confirmation) {
       setFormError("两次输入的新密码不一致");
       return;
@@ -173,7 +165,7 @@ export function UserDialog({
           ...profile,
           username: draft.username.trim(),
         });
-        message = "用户已创建，首次登录后需修改初始密码";
+        message = "用户已创建，可直接登录";
       } else if (record) {
         if (kind === "edit") {
           updated = await api.profile(record, profile);
@@ -333,7 +325,6 @@ export function UserDialog({
                   autoComplete="new-password"
                   required
                   value={draft.password}
-                  hint="15～128 字符，支持长口令与空格"
                   onChange={(event) =>
                     setDraft((value) => ({
                       ...value,
@@ -379,7 +370,7 @@ export function UserDialog({
                 value={draft.password}
                 required
                 autoComplete="new-password"
-                hint="15～128 字符。请通过受控方式交付给用户。"
+                hint="请通过受控方式交付给用户"
                 onChange={(event) =>
                   setDraft((value) => ({
                     ...value,
@@ -420,7 +411,7 @@ export function UserDialog({
               <span>
                 {kind === "roles"
                   ? "角色权限取并集。调整后，用户的后续操作将使用新权限。"
-                  : "用户首次使用此密码登录时，需要先设置自己的新密码"}
+                  : "用户可以使用此密码直接登录"}
               </span>
             </div>
           )}

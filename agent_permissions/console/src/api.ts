@@ -26,7 +26,7 @@ export interface UserPage {
 export interface LoginResult {
   session_token: string;
   expires_in: number;
-  auth_scope: "full" | "password_change";
+  auth_scope: "full";
   user: User;
 }
 export interface RoleDefinition {
@@ -187,8 +187,7 @@ export class ApiClient {
       const code =
         typeof failure.code === "string" ? failure.code : "REQUEST_FAILED";
       if (response.status === 401 && path !== "/auth/login") this.onExpired();
-      if (code === "PERMISSION_DENIED" || code === "PASSWORD_CHANGE_REQUIRED")
-        this.onPermissionsChanged();
+      if (code === "PERMISSION_DENIED") this.onPermissionsChanged();
       const details = Array.isArray(failure.details)
         ? failure.details.flatMap((entry: unknown) => {
             if (
@@ -241,8 +240,7 @@ export class ApiClient {
     });
     return this.decode(result.data, (value) => {
       const data = object(value);
-      if (data.auth_scope !== "full" && data.auth_scope !== "password_change")
-        throw new Error("Invalid scope");
+      if (data.auth_scope !== "full") throw new Error("Invalid scope");
       return {
         session_token: text(data.session_token),
         expires_in: number(data.expires_in),

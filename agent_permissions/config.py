@@ -11,14 +11,12 @@ class Settings:
         default_factory=lambda: Path(__file__).resolve().parent / "data/users.sqlite3"
     )
     session_seconds: int = 28_800
-    password_session_seconds: int = 900
     login_account_limit: int = 10
     login_source_limit: int = 30
     password_limit: int = 10
     account_window_seconds: int = 300
     source_window_seconds: int = 60
     password_window_seconds: int = 300
-    password_blocklist: Path | None = None
 
     def __post_init__(self) -> None:
         for name in self.__dataclass_fields__:
@@ -34,7 +32,7 @@ class Settings:
             raw = os.getenv(f"AGENT_USERS_{name.upper()}")
             if raw is None:
                 values[name] = getattr(defaults, name)
-            elif name in {"database_path", "password_blocklist"}:
+            elif name == "database_path":
                 values[name] = Path(raw).expanduser().resolve()
             else:
                 values[name] = int(raw)

@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
-  ArrowLeft,
   ArrowRight,
   KeyRound,
   LockKeyhole,
@@ -163,12 +162,10 @@ export function PasswordForm({
   api,
   initial,
   onDone,
-  forced = false,
 }: {
   api: ApiClient;
   initial: UserRecord;
   onDone: () => void;
-  forced?: boolean;
 }) {
   const [record, setRecord] = useState(initial);
   const [current, setCurrent] = useState("");
@@ -197,16 +194,8 @@ export function PasswordForm({
     if (busy || reloading) return;
     setError(null);
     setValidation("");
-    if (Array.from(next).length < 15 || Array.from(next).length > 128) {
-      setValidation("新密码长度须为 15～128 个字符");
-      return;
-    }
     if (next !== confirm) {
       setValidation("两次输入的新密码不一致");
-      return;
-    }
-    if (current === next) {
-      setValidation("新密码不能与当前密码相同");
       return;
     }
     setBusy(true);
@@ -221,7 +210,7 @@ export function PasswordForm({
   return (
     <form className="form-stack password-form" onSubmit={submit}>
       <PasswordField
-        label={forced ? "初始密码" : "当前密码"}
+        label="当前密码"
         autoComplete="current-password"
         required
         value={current}
@@ -233,7 +222,6 @@ export function PasswordForm({
         autoComplete="new-password"
         required
         value={next}
-        hint="15～128 字符，支持空格与长口令"
         disabled={busy}
         onChange={(event) => setNext(event.target.value)}
       />
@@ -269,48 +257,11 @@ export function PasswordForm({
       >
         {busy || reloading ? (
           <Spinner label={reloading ? "正在读取最新信息" : "正在修改密码"} />
-        ) : forced ? (
-          "设置新密码"
         ) : (
           "更新密码"
         )}
       </button>
     </form>
-  );
-}
-
-export function FirstPasswordPage({
-  api,
-  record,
-  onDone,
-  onLogout,
-}: {
-  api: ApiClient;
-  record: UserRecord;
-  onDone: () => void;
-  onLogout: () => void;
-}) {
-  return (
-    <main className="first-password-page">
-      <Brand />
-      <section className="first-password-card">
-        <span className="login-icon">
-          <KeyRound size={18} />
-        </span>
-        <span className="step-badge">首次登录 · 账号安全</span>
-        <h1>设置你的新密码</h1>
-        <p>
-          你好，{record.user.display_name}
-          。为保护你的账号，请先将初始密码修改为仅你知道的新密码。
-        </p>
-        <PasswordForm api={api} initial={record} onDone={onDone} forced />
-        <button className="text-button return-login" onClick={onLogout}>
-          <ArrowLeft size={16} />
-          退出当前登录
-        </button>
-      </section>
-      <footer>Agent Console · 身份与访问管理</footer>
-    </main>
   );
 }
 

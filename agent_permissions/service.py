@@ -121,7 +121,7 @@ class UserService:
         self.database = database
         self.settings = settings
         self.clock = clock
-        self.passwords = Passwords(settings.password_blocklist)
+        self.passwords = Passwords()
         self.limiter = RateLimiter(database, clock)
 
     def _audit(
@@ -176,8 +176,6 @@ class UserService:
         authority: Authority,
         info: RequestInfo,
         permission: str | None,
-        *,
-        allow_password_change: bool = False,
     ) -> sqlite3.Row:
         session = connection.execute(
             "SELECT * FROM sessions WHERE token_digest=?", (authority.token_digest,)
@@ -194,10 +192,6 @@ class UserService:
         if not user or user["deleted_at"] or user["status"] != "active":
             raise ApiError(401, "UNAUTHENTICATED", "请重新登录")
         info.actor_user_id = user["id"]
-        if not allow_password_change and (
-            session["scope"] != "full" or user["must_change_password"]
-        ):
-            raise ApiError(403, "PASSWORD_CHANGE_REQUIRED", "请先修改初始密码")
         if permission and permission not in permissions_for(json.loads(user["roles"])):
             raise ApiError(403, "PERMISSION_DENIED", "没有执行该操作的权限")
         return user
@@ -220,18 +214,13 @@ class UserService:
         if expected != f'"v{user["version"]}"':
             raise ApiError(412, "VERSION_CONFLICT", "用户信息已变化，请重新读取后操作")
 
-    def _new_password(self, value: str, field: str) -> str:
-        if not 15 <= len(value) <= 128 or self.passwords.is_weak(value):
-            raise invalid_field(field, "密码须为 15～128 字符，且不能是常见弱密码")
-        return value
-
     def _insert_user(
         self,
         connection: sqlite3.Connection,
         payload: UserCreate,
         info: RequestInfo,
     ) -> dict:
-        value = self._new_password(payload.password.get_secret_value(), "password")
+        value = payload.password.get_secret_value()
         now = timestamp(self.clock())
         user_id = f"usr_{uuid4().hex}"
         try:
@@ -239,7 +228,7 @@ class UserService:
                 """INSERT INTO users
                 (id,username,display_name,email,password_hash,roles,status,
                  must_change_password,version,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'active',1,1,?,?)""",
+                VALUES(?,?,?,?,?,?,'active',0,1,?,?)""",
                 (
                     user_id,
                     payload.username,
@@ -306,12 +295,8 @@ class UserService:
                 or user["status"] != "active"
             ):
                 raise ApiError(401, "INVALID_CREDENTIALS", "用户名或密码错误")
-            scope = "password_change" if user["must_change_password"] else "full"
-            seconds = (
-                self.settings.password_session_seconds
-                if scope == "password_change"
-                else self.settings.session_seconds
-            )
+            scope = "full"
+            seconds = self.settings.session_seconds
             now = self.clock()
             token = secrets.token_urlsafe(32)
             connection.execute(
@@ -326,7 +311,8 @@ class UserService:
                 ),
             )
             connection.execute(
-                """UPDATE users SET last_login_at=?,updated_at=?,version=version+1
+                """UPDATE users SET must_change_password=0,
+                last_login_at=?,updated_at=?,version=version+1
                 WHERE id=?""",
                 (timestamp(now), timestamp(now), user["id"]),
             )
@@ -342,9 +328,7 @@ class UserService:
 
     def logout(self, authority: Authority, info: RequestInfo) -> None:
         with self.database.transaction(write=True) as connection:
-            user = self._authorize(
-                connection, authority, info, None, allow_password_change=True
-            )
+            user = self._authorize(connection, authority, info, None)
             connection.execute(
                 "UPDATE sessions SET revoked_at=? WHERE token_digest=?",
                 (timestamp(self.clock()), authority.token_digest),
@@ -359,7 +343,6 @@ class UserService:
                     authority,
                     info,
                     "user.self.read",
-                    allow_password_change=True,
                 )
             )
 
@@ -446,7 +429,6 @@ class UserService:
                 authority,
                 info,
                 operation,
-                allow_password_change=operation == "user.self.password.change",
             )
             user_id = actor["id"]
         # Persist attempts outside the business transaction so failures count.
@@ -530,7 +512,6 @@ class UserService:
                 authority,
                 info,
                 operation,
-                allow_password_change=operation == "user.self.password.change",
             )
             # Self operations can never be redirected to a caller-supplied ID.
             target_id = actor["id"] if operation.startswith("user.self.") else user_id
@@ -564,16 +545,10 @@ class UserService:
                         raise ApiError(
                             400, "CURRENT_PASSWORD_INCORRECT", "当前密码不正确"
                         )
-                value = self._new_password(
-                    payload["new_password"].get_secret_value(), "new_password"
-                )
-                if self.passwords.verify(target["password_hash"], value):
-                    raise ApiError(
-                        400, "PASSWORD_UNCHANGED", "新密码不能与当前密码相同"
-                    )
+                value = payload["new_password"].get_secret_value()
                 changes = {
                     "password_hash": self.passwords.hash(value),
-                    "must_change_password": int(operation == "user.password.reset"),
+                    "must_change_password": 0,
                 }
             else:
                 raise invalid_field("operation", "未知用户操作")
@@ -587,7 +562,6 @@ class UserService:
                 authority,
                 info,
                 operation,
-                allow_password_change=operation == "user.self.password.change",
             )
             if changes:
                 assignments = ",".join(f"{key}=?" for key in changes)

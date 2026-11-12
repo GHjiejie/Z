@@ -28,7 +28,7 @@ def main(
     args = parser.parse_args(argv)
     password_reader = password_reader or getpass.getpass
     try:
-        password = password_reader("请输入初始密码（15～128 字符）：")
+        password = password_reader("请输入初始密码：")
         confirmation = password_reader("请再次输入初始密码：")
         if password != confirmation:
             print("两次密码不一致，未创建用户。")
@@ -44,7 +44,7 @@ def main(
         database = Database(settings.database_path)
         database.initialize()
         user = UserService(database, settings).bootstrap_admin(payload)
-        print(f"已创建管理员 {user['username']}，首次登录后须先修改密码。")
+        print(f"已创建管理员 {user['username']}，可直接登录管理后台。")
         return 0
     except ValidationError as error:
         print("初始化参数不符合要求：")

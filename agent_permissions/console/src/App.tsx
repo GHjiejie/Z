@@ -8,12 +8,7 @@ import {
   UsersRound,
 } from "lucide-react";
 import { ApiError } from "./api";
-import {
-  FirstPasswordPage,
-  LoginPage,
-  ProfilePage,
-  RolesPage,
-} from "./AccountPages";
+import { LoginPage, ProfilePage, RolesPage } from "./AccountPages";
 import {
   Avatar,
   Brand,
@@ -57,11 +52,7 @@ export function App() {
   const canManage = session.permissions.includes("user.read");
   const canRoles = session.permissions.includes("user.roles.assign");
   useEffect(() => {
-    if (
-      session.record &&
-      !session.loading &&
-      !session.record.user.must_change_password
-    ) {
+    if (session.record && !session.loading) {
       if ((page === "users" && !canManage) || (page === "roles" && !canRoles))
         navigate("profile");
     }
@@ -106,24 +97,6 @@ export function App() {
           </button>
         </div>
       </main>
-    );
-  if (session.record.user.must_change_password)
-    return (
-      <>
-        <FirstPasswordPage
-          api={session.api}
-          record={session.record}
-          onDone={passwordDone}
-          onLogout={() => {
-            void logout();
-          }}
-        />
-        {Boolean(logoutError) && (
-          <div className="floating-error">
-            <ErrorBanner error={logoutError} />
-          </div>
-        )}
-      </>
     );
   const user = session.record.user;
   const title =

@@ -6,8 +6,8 @@
 
 当前阶段的用户管理服务使用系统角色 `admin`、`member`，默认通过 SQLite 持久化数据。
 
-- [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、首次改密、配置与测试。
-- [Console 页面说明](console/README.md)：登录、首次改密、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。
+- [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、登录、配置与测试。
+- [Console 页面说明](console/README.md)：登录、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。
 - [用户管理服务接口文档](docs/user-management-api.md)：当前阶段的登录、用户管理、改密、角色、错误响应和并发控制契约。
 - 本说明后续章节：Agent 业务操作授权的架构规划，其中的租户、项目与文档角色为后续业务示例，与用户管理服务的系统角色区分。
 
@@ -226,7 +226,6 @@ agent_permissions/
   security.py           # 密码与会话凭据处理
   console_ui.py         # 同源托管 Console 构建产物
   console/              # React、TypeScript、Vite 后台界面与浏览器测试
-  weak-passwords.txt    # 本地弱密码基线
   test_api.py           # 接口、并发与异常边界测试
   test_console.py       # Console 路由、静态资源与构建缺失检查
   docs/

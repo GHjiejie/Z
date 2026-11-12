@@ -57,9 +57,7 @@ export function useSession() {
     async function load() {
       try {
         const current = await api.me(controller.signal);
-        const granted = current.user.must_change_password
-          ? []
-          : await api.permissions(controller.signal);
+        const granted = await api.permissions(controller.signal);
         if (!controller.signal.aborted) {
           setRecord(current);
           setPermissions(granted);

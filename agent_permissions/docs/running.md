@@ -20,9 +20,9 @@ uv sync
 uv run python -m agent_permissions init-admin --username admin --display-name 管理员
 ```
 
-命令交互式读取两次初始密码，不显示密码，也不接受命令行密码参数。密码需为 15～128 字符，并通过本地弱密码筛选。
+命令交互式读取两次初始密码，不显示密码，也不接受命令行密码参数。密码必填，不限制长度、字符组合或弱密码。
 
-初始化仅在数据库没有用户时执行一次，不能通过重复运行覆盖已有用户或重置密码。新建管理员首次登录后必须修改初始密码。
+初始化仅在数据库没有用户时执行一次，不能通过重复运行覆盖已有用户或重置密码。创建成功后可使用设置的密码直接登录。
 
 ## 3. 启动 HTTP 服务
 
@@ -57,14 +57,13 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 4. 首次登录步骤
 
 1. 打开 `/console/`，使用初始化时创建的管理员账号和初始密码登录。
-2. 页面进入“设置你的新密码”，提交初始密码、新密码和新密码确认。
-3. 修改成功后回到登录页，使用新密码重新登录。
-4. 管理员进入用户管理页面，可以新增、搜索、编辑用户，设置角色，重置密码，启用、禁用或删除用户。
-5. 普通用户进入个人设置页面，只能修改自己的资料与密码；无法看到管理导航，也无法调用管理接口。
+2. 管理员直接进入用户管理页面，可以新增、搜索、编辑用户，设置角色，重置密码，启用、禁用或删除用户。
+3. 普通用户直接进入个人设置页面，只能修改自己的资料与密码；无法看到管理导航，也无法调用管理接口。
+4. 需要修改密码时，在个人设置中提交当前密码、新密码和新密码确认，成功后使用新密码重新登录。
 
-管理员创建的其他用户也按相同流程首次改密。页面自动管理登录令牌和版本头；版本冲突时保留输入，等待用户主动选择“载入最新信息”，不会自动覆盖其他人的修改。
+管理员创建用户或重置密码后，用户均可直接登录。页面自动管理登录令牌和版本头；版本冲突时保留输入，等待用户主动选择“载入最新信息”，不会自动覆盖其他人的修改。
 
-通过 Swagger 联调时，在 `POST /api/v1/auth/login` 获取 `session_token`，在 Authorize 中输入令牌本身；Swagger 会添加 `Bearer` 前缀。修改前查询用户详情，读取响应中的 `ETag`，在 `If-Match` 中填写完整标签。首次改密使用 `/users/me/password`。改密成功撤销全部旧会话，重新登录后更新令牌；成功登录也会更新用户版本。
+通过 Swagger 联调时，在 `POST /api/v1/auth/login` 获取 `session_token`，在 Authorize 中输入令牌本身；Swagger 会添加 `Bearer` 前缀。修改前查询用户详情，读取响应中的 `ETag`，在 `If-Match` 中填写完整标签。主动改密使用 `/users/me/password`。改密成功撤销全部旧会话，重新登录后更新令牌；成功登录也会更新用户版本。
 
 ## 5. 数据与配置
 
@@ -76,14 +75,12 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 | --- | --- | --- |
 | `AGENT_USERS_DATABASE_PATH` | 模块目录下的 `data/users.sqlite3` | SQLite 文件路径 |
 | `AGENT_USERS_SESSION_SECONDS` | `28800` | 完整会话的固定有效期，单位秒 |
-| `AGENT_USERS_PASSWORD_SESSION_SECONDS` | `900` | 首次改密受限会话有效期 |
 | `AGENT_USERS_LOGIN_ACCOUNT_LIMIT` | `10` | 每个账号在窗口内的登录尝试上限 |
 | `AGENT_USERS_LOGIN_SOURCE_LIMIT` | `30` | 每个连接来源在窗口内的登录尝试上限 |
 | `AGENT_USERS_PASSWORD_LIMIT` | `10` | 每个操作者、每类改密或重置操作的窗口内尝试上限 |
 | `AGENT_USERS_ACCOUNT_WINDOW_SECONDS` | `300` | 登录账号计数窗口 |
 | `AGENT_USERS_SOURCE_WINDOW_SECONDS` | `60` | 登录来源计数窗口 |
 | `AGENT_USERS_PASSWORD_WINDOW_SECONDS` | `300` | 改密和重置密码计数窗口 |
-| `AGENT_USERS_PASSWORD_BLOCKLIST` | 未设置 | 附加本地 UTF-8 弱密码表路径 |
 
 例如，使用指定数据文件：
 
@@ -97,7 +94,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 
 限流使用持久化固定窗口。进入登录验证流程的请求，不论成功或失败，均计数；改密失败也计数。触发限制后返回 `429` 和 `Retry-After` 秒数，窗口到期后恢复。
 
-弱密码筛选包含模块内的基线表，以及单字符、短模式重复检查。可通过 `AGENT_USERS_PASSWORD_BLOCKLIST` 追加更完整的本地弱密码表，每行一个密码，`#` 开头的行视为注释。此过程不访问外部网络，基线表不能视为完整的泄露密码库。
+创建用户、初始化管理员、本人改密和管理员重置密码均接受任意非空密码，允许与当前密码相同。前端只校验必填和两次输入一致；服务端按原始输入处理，不裁剪空格，并使用 Argon2id 哈希保存。
 
 ## 6. 验证
 
@@ -109,7 +106,7 @@ uv run ruff format --check agent_permissions
 
 测试使用临时数据库和受控时钟，不需要真实账户，不修改默认数据目录，不调用模型或外部业务服务。
 
-覆盖用户生命周期、强制改密、跨用户越权、非法字段、角色立即生效、会话撤销、限流、版本冲突、并发管理员保护、数据库不可用、审计失败回滚及错误脱敏。
+覆盖用户生命周期、首次登录直接访问、主动改密、跨用户越权、非法字段、角色立即生效、会话撤销、限流、版本冲突、并发管理员保护、数据库不可用、审计失败回滚及错误脱敏。
 
 前端验证在 Console 目录运行：
 
@@ -141,7 +138,7 @@ npm run test:e2e
 | `database.py` | SQLite schema、连接及事务 |
 | `models.py` | 请求与响应字段、输入校验 |
 | `permissions.py` | 系统角色与动作权限映射 |
-| `security.py`、`weak-passwords.txt` | 密码哈希、弱密码筛选、令牌摘要 |
+| `security.py` | 密码哈希、令牌摘要 |
 | `config.py` | 默认值和环境变量配置 |
 | `__main__.py` | 交互式管理员初始化 |
 | `test_api.py` | 离线接口与并发测试 |

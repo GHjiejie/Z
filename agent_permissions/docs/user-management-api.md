@@ -70,7 +70,7 @@
     "email": "zhangsan@example.com",
     "roles": ["member"],
     "status": "active",
-    "must_change_password": true,
+    "must_change_password": false,
     "version": 1,
     "last_login_at": null,
     "created_at": "2026-11-12T08:00:00Z",
@@ -152,7 +152,7 @@ If-Match: "v3"
 | 编号 | 方法 | 路径 | 功能 | 权限 | 成功状态 |
 | --- | --- | --- | --- | --- | --- |
 | API-01 | `POST` | `/api/v1/auth/login` | 登录 | 无需登录 | `200` |
-| API-02 | `POST` | `/api/v1/auth/logout` | 退出当前登录 | 有效会话，含改密受限会话 | `204` |
+| API-02 | `POST` | `/api/v1/auth/logout` | 退出当前登录 | 有效会话 | `204` |
 | API-03 | `GET` | `/api/v1/users/me` | 查询自己的信息 | `user.self.read` | `200` |
 | API-04 | `PATCH` | `/api/v1/users/me` | 更新自己的基本资料 | `user.self.update` | `200` |
 | API-05 | `PUT` | `/api/v1/users/me/password` | 修改自己的密码 | `user.self.password.change` | `204` |
@@ -167,7 +167,7 @@ If-Match: "v3"
 | API-14 | `PUT` | `/api/v1/users/{user_id}/roles` | 设置用户角色 | `user.roles.assign` | `200` |
 | API-15 | `GET` | `/api/v1/roles` | 查询可分配角色 | `user.roles.assign` | `200` |
 
-除登录外均需有效会话。改密受限会话仅允许 API-02、API-03、API-05，其他接口返回 `403 PASSWORD_CHANGE_REQUIRED`。静态路径 `/users/me` 及其子路径应与动态用户 ID 路由明确区分。
+除登录外均需有效会话，并逐次校验当前角色权限。首次登录及管理员重置密码后可直接访问有权限的接口。静态路径 `/users/me` 及其子路径应与动态用户 ID 路由明确区分。
 
 ## 4. 公共数据结构
 
@@ -181,7 +181,7 @@ If-Match: "v3"
 | `email` | string | 是 | 联系邮箱，不作为本版登录或密码找回凭据 |
 | `roles` | string[] | 否 | 角色代码，非空、去重、升序 |
 | `status` | string | 否 | `active` 或 `disabled` |
-| `must_change_password` | boolean | 否 | 是否必须先修改密码 |
+| `must_change_password` | boolean | 否 | 兼容字段；创建、改密和重置密码时为 `false`，历史值在成功登录时清除 |
 | `version` | integer | 否 | 大于等于 1 的用户版本 |
 | `last_login_at` | string | 是 | 最近成功登录的 UTC 时间 |
 | `created_at` | string | 否 | 创建时间 |
@@ -197,11 +197,11 @@ If-Match: "v3"
 | `display_name` | 去除首尾空格后为 1～100 字符；不能为空或 `null` |
 | `email` | 可省略或为 `null`；非空时去除首尾空格并验证邮箱格式，最长 254 字符；本版仅作为联系信息，不要求唯一 |
 | `roles` | 创建时可省略，默认 `["member"]`；显式传入时必须非空，元素仅为 `admin`、`member`；`null` 和未知角色返回 `422` |
-| 新密码 | 15～128 个 Unicode 字符；支持空格和长口令，不裁剪空格、不静默截断；拒绝常见弱密码 |
-| 登录密码、旧密码 | 1～128 字符，按原始输入核验，不套用新密码强度规则 |
+| 新密码 | 必填的非空 Unicode 字符串；不限制长度、字符组合或弱密码，允许与当前密码相同；不裁剪空格、不静默截断 |
+| 登录密码、旧密码 | 必填的非空 Unicode 字符串，按原始输入核验，不限制长度 |
 | `status` | 只接受小写 `active`、`disabled` |
 
-密码长度按当前不启用 MFA 的设计设定。长度与常见弱密码控制参考 [OWASP Authentication 指南](https://cheatsheetseries.owasp.org/cheatsheets/Authentication_Cheat_Sheet.html)。密码存储使用 Argon2id 和独立盐，参数在实现时按部署环境校准，参考 [OWASP Password Storage 指南](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。
+密码存储使用 Argon2id 和独立盐，参数在实现时按部署环境校准，参考 [OWASP Password Storage 指南](https://cheatsheetseries.owasp.org/cheatsheets/Password_Storage_Cheat_Sheet.html)。
 
 ## 5. 认证接口
 
@@ -260,14 +260,14 @@ Content-Type: application/json
 | `session_token` | 随机会话令牌，仅本次响应返回明文，服务端只保存摘要 |
 | `token_type` | 固定为 `Bearer` |
 | `expires_in` | 本次会话的有效秒数，以响应实际值为准 |
-| `auth_scope` | `full` 或 `password_change` |
+| `auth_scope` | 固定为 `full`；具体操作仍校验当前角色权限 |
 | `user` | 完整 `User` 对象，包含登录完成后的版本 |
 
 行为规则：
 
 1. 用户存在、未删除、已启用且密码正确时才签发会话。
-2. 默认完整会话有效期为 8 小时，即 `28800` 秒；改密受限会话为 15 分钟，即 `900` 秒。配置调整以响应中的 `expires_in` 为准。
-3. 当 `must_change_password=true` 时，只签发 `auth_scope=password_change` 的会话。服务端逐次强制检查该范围，客户端隐藏页面不能替代检查。
+2. 默认会话有效期为 8 小时，即 `28800` 秒。配置调整以响应中的 `expires_in` 为准。
+3. 所有成功登录均签发 `auth_scope=full` 的会话，同时清除历史 `must_change_password` 标记。用户可直接进入当前角色允许的页面。
 4. 会话采用固定到期时间，本版没有自动续期和刷新令牌接口。成功改密后重新登录取得新会话。
 5. 每次成功登录更新 `last_login_at`、`updated_at` 和 `version`。创建会话与账户状态检查使用一致的事务边界，避免并发禁用后仍签发有效会话。
 6. 不存在、密码错误、禁用、已删除统一返回 `401 INVALID_CREDENTIALS`，提示“用户名或密码错误”。
@@ -280,7 +280,7 @@ POST /api/v1/auth/logout
 Authorization: Bearer <session_token>
 ```
 
-无请求体，无 `If-Match` 要求。完整会话与改密受限会话都可调用。
+无请求体，无 `If-Match` 要求。有效会话可调用。
 
 成功返回 `204 No Content`。服务端撤销本次请求对应的会话，其他会话保持有效；客户端清除本地令牌。已撤销、过期或无效的会话返回 `401 UNAUTHENTICATED`，客户端同样清除令牌。
 
@@ -293,7 +293,7 @@ GET /api/v1/users/me
 Authorization: Bearer <session_token>
 ```
 
-- 权限：`user.self.read`，允许改密受限会话。
+- 权限：`user.self.read`。
 - 请求体：无。
 - 成功：`200 OK`，`data` 为当前登录用户的完整 `User`，并返回 `ETag`。
 - 当前用户从会话确定，不接受 `user_id`、`roles` 等查询参数覆盖身份。
@@ -343,11 +343,11 @@ If-Match: "v3"
 | 字段 | 必填 | 说明 |
 | --- | --- | --- |
 | `current_password` | 是 | 当前密码，必须核验成功 |
-| `new_password` | 是 | 满足新密码规则，且不能与当前密码相同 |
+| `new_password` | 是 | 任意非空密码，允许与当前密码相同 |
 
-- 权限：`user.self.password.change`，允许改密受限会话。
+- 权限：`user.self.password.change`。
 - 旧密码错误返回 `400 CURRENT_PASSWORD_INCORRECT`。
-- 新旧密码相同返回 `400 PASSWORD_UNCHANGED`；强度或格式错误返回 `422`。
+- 密码为空、类型错误或不是有效 Unicode 文本时返回 `422`。
 - 成功：`204 No Content`。
 - 同一事务内更新密码哈希、将 `must_change_password` 设为 `false`、增加用户版本并撤销该用户的全部会话，包括当前会话。
 - 本次响应成功后，客户端清除令牌并使用新密码重新登录。后续请求携带旧会话返回 `401`。
@@ -416,7 +416,7 @@ Content-Type: application/json
 | `roles` | 否 | 默认 `["member"]` |
 
 - 权限：`user.create`，完整会话。请求中包含 `admin` 角色时，还需 `user.roles.assign`；本版管理员拥有这两项权限。
-- `status` 固定初始化为 `active`，`must_change_password` 固定为 `true`，由后端赋值。
+- `status` 固定初始化为 `active`，`must_change_password` 固定为 `false`，由后端赋值；新用户可直接登录。
 - 成功：`201 Created`，`data` 为新用户 `User`，返回 `ETag: "v1"` 和 `Location: /api/v1/users/{user_id}`。
 - 用户名归一化后重复，包括与已删除用户重复，返回 `409 USERNAME_ALREADY_EXISTS`。
 - 数据库唯一约束负责兜底并发重名，不能只在插入前查询一次。
@@ -465,7 +465,7 @@ Authorization: Bearer <session_token>
         "email": "zhangsan@example.com",
         "roles": ["member"],
         "status": "active",
-        "must_change_password": true,
+        "must_change_password": false,
         "version": 1,
         "last_login_at": null,
         "created_at": "2026-11-12T08:00:00Z",
@@ -558,7 +558,7 @@ If-Match: "v3"
 - `status` 必填，只能为 `active`、`disabled`。
 - 成功：`200 OK`，`data` 为目标 `User`，返回最新 `ETag`。
 - 禁用时在同一事务中撤销目标用户全部会话，后续请求返回 `401`。
-- 重新启用只恢复登录资格，不恢复旧会话，也不清除 `must_change_password`。
+- 重新启用只恢复登录资格，不恢复旧会话。
 - 设置为已有状态时，仍需有效版本和授权，返回当前用户；无实际变化时不增加版本。
 - 禁用自己返回 `409 SELF_OPERATION_NOT_ALLOWED`；触发最后管理员保护返回 `409 LAST_ADMIN_PROTECTED`。
 - 不存在或已删除返回 `404`。
@@ -581,12 +581,12 @@ If-Match: "v3"
 ```
 
 - 权限：`user.password.reset`，完整会话。
-- `new_password` 必填，遵循新密码规则，无需提供目标用户旧密码。
-- 与目标用户现密码相同返回 `400 PASSWORD_UNCHANGED`；规则不满足返回 `422`。
+- `new_password` 必填，接受任意非空密码，允许与目标用户现密码相同，无需提供目标用户旧密码。
+- 密码为空、类型错误或不是有效 Unicode 文本时返回 `422`。
 - 成功：`204 No Content`。
-- 同一事务内更新密码哈希、将 `must_change_password` 设为 `true`、增加用户版本并撤销目标用户全部会话。
+- 同一事务内更新密码哈希、将 `must_change_password` 设为 `false`、增加用户版本并撤销目标用户全部会话。
 - 保留目标用户原来的启用或禁用状态；重置密码不自动启用账号。
-- 目标用户再次登录后只能进入改密流程，完成 API-05 后再重新登录。
+- 目标用户可以使用重置后的密码直接登录并访问有权限的页面。
 - 管理员对自己调用此接口返回 `409 SELF_OPERATION_NOT_ALLOWED`，自己的密码使用 API-05 修改。
 - 不存在或已删除返回 `404`。该接口也需限流并记录审计事件。
 
@@ -674,12 +674,11 @@ Authorization: Bearer <session_token>
 Authorization: Bearer <session_token>
 ```
 
-服务端读取会话记录并检查：令牌有效、会话未撤销且未过期、所属用户未删除且已启用、会话范围允许访问本接口、当前角色具备所需权限。
+服务端读取会话记录并检查：令牌有效、会话未撤销且未过期、所属用户未删除且已启用、当前角色具备所需权限。
 
 | 情况 | 返回 |
 | --- | --- |
 | 凭据缺失、无效、过期、已撤销，或所属用户已禁用、删除 | `401 UNAUTHENTICATED` |
-| 有效会话必须先改密，却访问了受限范围外的接口 | `403 PASSWORD_CHANGE_REQUIRED` |
 | 完整会话缺少操作权限 | `403 PERMISSION_DENIED` |
 | 无法读取认证或权限数据 | `503 SERVICE_UNAVAILABLE`，不执行受保护操作 |
 
@@ -691,7 +690,7 @@ Authorization: Bearer <session_token>
 - 管理员不能删除、禁用自己，不能移除自己的 `admin` 角色；这类请求返回 `SELF_OPERATION_NOT_ALLOWED`。
 - 删除、禁用、移除角色均不能使系统失去最后一名未删除且启用的管理员。
 - 最后管理员保护必须在事务中通过串行化校验或等效锁实现，覆盖两个管理员同时修改对方的情况；不能只做事务外计数。
-- 有效的初始管理员应在服务对外开放前完成初始化，设置初始密码后按同样的首次改密流程使用。
+- 有效的初始管理员应在服务对外开放前完成初始化，设置密码后即可直接登录管理后台。
 - 会话撤销、密码更新和账号状态变更需要原子提交，并与并发登录协调；事务失败不得只修改其中一部分。
 - 对已授权管理请求，未找到或已删除目标统一为 `404`。目标存在后再检查其版本条件，版本通过后检查自身操作和最后管理员保护。
 
@@ -719,11 +718,9 @@ Authorization: Bearer <session_token>
 | `201` | 不适用 | 创建用户成功 |
 | `204` | 不适用 | 退出、改密、重置密码、删除成功，无响应体 |
 | `400` | `CURRENT_PASSWORD_INCORRECT` | 当前密码验证失败 |
-| `400` | `PASSWORD_UNCHANGED` | 新密码与当前密码相同 |
 | `401` | `INVALID_CREDENTIALS` | 登录用户名或密码错误，或账号不能登录 |
 | `401` | `UNAUTHENTICATED` | 受保护接口的会话缺失、无效或失效 |
 | `403` | `PERMISSION_DENIED` | 当前用户缺少所需权限 |
-| `403` | `PASSWORD_CHANGE_REQUIRED` | 必须先完成改密 |
 | `404` | `USER_NOT_FOUND` | 目标用户不存在或已删除 |
 | `409` | `USERNAME_ALREADY_EXISTS` | 归一化用户名冲突 |
 | `409` | `SELF_OPERATION_NOT_ALLOWED` | 禁止的自身删除、禁用、降级或管理员重置自身密码 |
@@ -745,11 +742,11 @@ Authorization: Bearer <session_token>
 | --- | --- | --- |
 | AC-01 | 管理员新增普通用户并查询详情 | 创建 `201`；查询 `200`；无密码和内部凭据字段 |
 | AC-02 | 用户名大小写或首尾空格不同但归一化后相同 | `409 USERNAME_ALREADY_EXISTS` |
-| AC-03 | 用户使用初始密码登录 | 取得改密受限会话；除本人查询、改密、退出外均 `403` |
+| AC-03 | 用户使用初始密码登录 | 取得 `full` 会话；可直接访问当前角色允许的接口 |
 | AC-04 | 用户提交正确旧密码完成改密 | `204`；全部旧会话失效；新密码可重新登录 |
 | AC-05 | 普通用户查询、编辑其他用户，或分配角色 | `403 PERMISSION_DENIED`，目标数据不变 |
 | AC-06 | 在资料更新中注入角色、状态或密码字段 | `422 VALIDATION_ERROR`，无部分更新 |
-| AC-07 | 管理员重置他人密码 | `204`；旧会话失效；下次登录强制改密；原状态保留 |
+| AC-07 | 管理员重置他人密码 | `204`；旧会话失效；重置密码可直接登录；原状态保留 |
 | AC-08 | 禁用后重新启用用户 | 禁用时旧会话失效；启用后需重新登录 |
 | AC-09 | 两个客户端基于相同版本编辑同一用户 | 首次成功；旧版本修改返回 `412`，不覆盖首次修改 |
 | AC-10 | 删除用户后查询、登录、再次删除 | 查询及再次删除 `404`；登录统一 `401`；用户名仍保留 |

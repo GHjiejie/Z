@@ -148,7 +148,7 @@ class UserApiTests(unittest.TestCase):
         self.assertEqual(user["display_name"], "张三")
         self.assertEqual(user["email"], "zhangsan@example.com")
         self.assertEqual(user["roles"], ["member"])
-        self.assertTrue(user["must_change_password"])
+        self.assertFalse(user["must_change_password"])
         self.assertIsNone(user["last_login_at"])
         self.assertEqual(self.get_user(user["id"]), user)
         response = self.client.get("/api/v1/users", headers=self.headers(self.admin))
@@ -184,25 +184,28 @@ class UserApiTests(unittest.TestCase):
                     "USERNAME_ALREADY_EXISTS",
                 )
 
-    def test_first_login_scope_and_password_revokes_every_session(self) -> None:
-        user = self.create_user()
+    def test_first_login_has_full_access_and_password_revokes_every_session(
+        self,
+    ) -> None:
+        user = self.create_user(roles=["admin"])
         first = self.login(user["username"], INITIAL_PASSWORD)
         second = self.login(user["username"], INITIAL_PASSWORD)
-        self.assertEqual(first["auth_scope"], "password_change")
-        self.assertEqual(first["expires_in"], 900)
+        self.assertEqual(first["auth_scope"], "full")
+        self.assertEqual(first["expires_in"], 28_800)
+        self.assertFalse(first["user"]["must_change_password"])
         for method, path, body in (
             ("GET", "/api/v1/users", None),
             ("GET", "/api/v1/users/me/permissions", None),
             ("PATCH", "/api/v1/users/me", {"display_name": "尝试修改"}),
         ):
             with self.subTest(path=path):
-                self.assert_error(
-                    self.client.request(
-                        method, path, headers=self.headers(first), json=body
-                    ),
-                    403,
-                    "PASSWORD_CHANGE_REQUIRED",
+                response = self.client.request(
+                    method,
+                    path,
+                    headers=self.headers(first, second["user"]["version"]),
+                    json=body,
                 )
+                self.assertEqual(response.status_code, 200, response.text)
         me = self.client.get("/api/v1/users/me", headers=self.headers(first))
         self.assertEqual(me.status_code, 200)
         response = self.client.put(
@@ -221,6 +224,19 @@ class UserApiTests(unittest.TestCase):
         self.assertEqual(full["auth_scope"], "full")
         self.assertEqual(full["expires_in"], 28_800)
         self.assertFalse(full["user"]["must_change_password"])
+
+    def test_legacy_password_change_flag_does_not_restrict_login(self) -> None:
+        with self.database.transaction(write=True) as connection:
+            connection.execute(
+                "UPDATE users SET must_change_password=1 WHERE id=?",
+                (self.admin["user"]["id"],),
+            )
+        login = self.login("admin")
+        self.assertEqual(login["auth_scope"], "full")
+        self.assertFalse(login["user"]["must_change_password"])
+        self.assertFalse(self.get_user(login["user"]["id"])["must_change_password"])
+        response = self.client.get("/api/v1/users", headers=self.headers(login))
+        self.assertEqual(response.status_code, 200, response.text)
 
     def test_member_cannot_manage_users_or_roles_even_for_self(self) -> None:
         user = self.create_user()
@@ -437,7 +453,7 @@ class UserApiTests(unittest.TestCase):
         ).json()["data"]
         self.assertNotIn(user["id"], [item["id"] for item in page["items"]])
 
-    def test_admin_reset_preserves_status_and_forces_password_change(self) -> None:
+    def test_admin_reset_preserves_status_and_allows_direct_login(self) -> None:
         user = self.create_user()
         member = self.activate(user["username"])
         version = member["user"]["version"]
@@ -453,7 +469,8 @@ class UserApiTests(unittest.TestCase):
             "UNAUTHENTICATED",
         )
         reset_login = self.login(user["username"], RESET_PASSWORD)
-        self.assertEqual(reset_login["auth_scope"], "password_change")
+        self.assertEqual(reset_login["auth_scope"], "full")
+        self.assertFalse(reset_login["user"]["must_change_password"])
         response = self.client.put(
             f"/api/v1/users/{user['id']}/status",
             headers=self.headers(self.admin, reset_login["user"]["version"]),
@@ -468,16 +485,15 @@ class UserApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 204)
         self.assertEqual(self.get_user(user["id"])["status"], "disabled")
 
-    def test_password_wrong_unchanged_weak_and_secret_errors(self) -> None:
+    def test_password_wrong_and_invalid_input_errors_do_not_leak_secrets(self) -> None:
         user = self.create_user()
         restricted = self.login(user["username"], INITIAL_PASSWORD)
         version = restricted["user"]["version"]
         for old, new, status, code in (
             ("wrong", FINAL_PASSWORD, 400, "CURRENT_PASSWORD_INCORRECT"),
-            (INITIAL_PASSWORD, INITIAL_PASSWORD, 400, "PASSWORD_UNCHANGED"),
-            (INITIAL_PASSWORD, "passwordpassword", 422, "VALIDATION_ERROR"),
-            (INITIAL_PASSWORD, "AbcdAbcdAbcdAbcd", 422, "VALIDATION_ERROR"),
-            (INITIAL_PASSWORD, "super-secret", 422, "VALIDATION_ERROR"),
+            (INITIAL_PASSWORD, "", 422, "VALIDATION_ERROR"),
+            (INITIAL_PASSWORD, None, 422, "VALIDATION_ERROR"),
+            (INITIAL_PASSWORD, 12345, 422, "VALIDATION_ERROR"),
         ):
             response = self.client.put(
                 "/api/v1/users/me/password",
@@ -485,9 +501,55 @@ class UserApiTests(unittest.TestCase):
                 json={"current_password": old, "new_password": new},
             )
             self.assert_error(response, status, code)
-            self.assertNotIn(new, response.text)
-            self.assertNotIn(old, response.text)
+            for secret in (old, new):
+                if isinstance(secret, str) and secret:
+                    self.assertNotIn(secret, response.text)
         self.assertEqual(self.get_user(user["id"])["version"], version)
+
+    def test_simple_long_and_unchanged_passwords_work_through_the_lifecycle(
+        self,
+    ) -> None:
+        for password in (
+            "1",
+            "12345",
+            "passwordpassword",
+            "AbcdAbcdAbcdAbcd",
+            "long-password-" * 20,
+            "  ",
+        ):
+            with self.subTest(password=password):
+                user = self.create_user(password=password)
+                restricted = self.login(user["username"], password)
+                response = self.client.put(
+                    "/api/v1/users/me/password",
+                    headers=self.headers(restricted, restricted["user"]["version"]),
+                    json={"current_password": password, "new_password": password},
+                )
+                self.assertEqual(response.status_code, 204, response.text)
+                self.assert_error(
+                    self.client.get(
+                        "/api/v1/users/me", headers=self.headers(restricted)
+                    ),
+                    401,
+                    "UNAUTHENTICATED",
+                )
+                full = self.login(user["username"], password)
+                self.assertEqual(full["auth_scope"], "full")
+                self.assertFalse(full["user"]["must_change_password"])
+                response = self.client.put(
+                    f"/api/v1/users/{user['id']}/password",
+                    headers=self.headers(self.admin, full["user"]["version"]),
+                    json={"new_password": password},
+                )
+                self.assertEqual(response.status_code, 204, response.text)
+                self.assert_error(
+                    self.client.get("/api/v1/users/me", headers=self.headers(full)),
+                    401,
+                    "UNAUTHENTICATED",
+                )
+                reset = self.login(user["username"], password)
+                self.assertEqual(reset["auth_scope"], "full")
+                self.assertFalse(reset["user"]["must_change_password"])
 
     def test_admin_self_protection(self) -> None:
         user = self.admin["user"]
@@ -513,7 +575,7 @@ class UserApiTests(unittest.TestCase):
         password = "  支持中文的 Unicode passphrase 2026!  "
         user = self.create_user(password=password)
         login = self.login(user["username"], password)
-        self.assertEqual(login["auth_scope"], "password_change")
+        self.assertEqual(login["auth_scope"], "full")
         self.assert_error(
             self.client.post(
                 "/api/v1/auth/login",
@@ -952,6 +1014,7 @@ class UserApiTests(unittest.TestCase):
 
 class BootstrapCliTests(unittest.TestCase):
     def test_interactive_initialization_without_password_arguments(self) -> None:
+        password = "12345"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cli.sqlite3"
             with patch.dict(os.environ, {"AGENT_USERS_DATABASE_PATH": str(path)}):
@@ -959,20 +1022,32 @@ class BootstrapCliTests(unittest.TestCase):
                 with redirect_stdout(output):
                     code = cli_main(
                         ["init-admin", "--username", "admin"],
-                        password_reader=lambda _: INITIAL_PASSWORD,
+                        password_reader=lambda _: password,
                     )
                 self.assertEqual(code, 0)
-                self.assertNotIn(INITIAL_PASSWORD, output.getvalue())
+                self.assertNotIn(password, output.getvalue())
                 with closing(sqlite3.connect(path)) as connection:
                     row = connection.execute(
                         "SELECT roles,must_change_password FROM users"
                     ).fetchone()
                     self.assertEqual(json.loads(row[0]), ["admin"])
-                    self.assertEqual(row[1], 1)
+                    self.assertEqual(row[1], 0)
+                with TestClient(create_app(Settings(database_path=path))) as client:
+                    response = client.post(
+                        "/api/v1/auth/login",
+                        json={"username": "admin", "password": password},
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
+                    self.assertEqual(response.json()["data"]["auth_scope"], "full")
+                    token = response.json()["data"]["session_token"]
+                    response = client.get(
+                        "/api/v1/users", headers={"Authorization": f"Bearer {token}"}
+                    )
+                    self.assertEqual(response.status_code, 200, response.text)
                 with redirect_stdout(io.StringIO()):
                     code = cli_main(
                         ["init-admin", "--username", "other"],
-                        password_reader=lambda _: INITIAL_PASSWORD,
+                        password_reader=lambda _: password,
                     )
                 self.assertEqual(code, 1)
 

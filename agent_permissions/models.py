@@ -65,12 +65,7 @@ def password_text(value: object) -> str:
 Username = Annotated[str, BeforeValidator(normalized_username)]
 DisplayName = Annotated[str, BeforeValidator(normalized_name)]
 ContactEmail = Annotated[EmailStr | None, BeforeValidator(normalized_email)]
-NewPassword = Annotated[
-    SecretStr, Field(min_length=15, max_length=128), BeforeValidator(password_text)
-]
-ExistingPassword = Annotated[
-    SecretStr, Field(min_length=1, max_length=128), BeforeValidator(password_text)
-]
+Password = Annotated[SecretStr, Field(min_length=1), BeforeValidator(password_text)]
 
 
 class StrictModel(BaseModel):
@@ -79,14 +74,14 @@ class StrictModel(BaseModel):
 
 class LoginRequest(StrictModel):
     username: Username
-    password: ExistingPassword
+    password: Password
 
 
 class UserCreate(StrictModel):
     username: Username
     display_name: DisplayName
     email: ContactEmail = None
-    password: NewPassword
+    password: Password
     roles: list[Role] = Field(default_factory=lambda: ["member"], min_length=1)
 
     @field_validator("roles")
@@ -109,12 +104,12 @@ class UserUpdate(StrictModel):
 
 
 class PasswordChange(StrictModel):
-    current_password: ExistingPassword
-    new_password: NewPassword
+    current_password: Password
+    new_password: Password
 
 
 class PasswordReset(StrictModel):
-    new_password: NewPassword
+    new_password: Password
 
 
 class StatusUpdate(StrictModel):
@@ -172,7 +167,7 @@ class LoginResult(StrictModel):
     session_token: str
     token_type: Literal["Bearer"]
     expires_in: int
-    auth_scope: Literal["full", "password_change"]
+    auth_scope: Literal["full"]
     user: User
 
 

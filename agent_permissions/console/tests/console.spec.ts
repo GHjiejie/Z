@@ -1,7 +1,7 @@
 import { expect, test, type Page } from "@playwright/test";
 
-const adminPassword = "Console administrator password 2026!";
-const initialPassword = "Temporary welcome password 2026!";
+const adminPassword = "12345";
+const initialPassword = "12345";
 
 async function login(
   page: Page,
@@ -14,24 +14,34 @@ async function login(
   await page.getByRole("button", { name: "登录控制台" }).click();
 }
 
-test("首次登录必须改密，修改后重新登录并进入普通用户页面", async ({ page }) => {
-  await login(page, "first_login", initialPassword);
+test("管理员使用 12345 登录后直接进入用户管理", async ({ page }) => {
+  await login(page);
+  await expect(
+    page.getByRole("heading", { name: "用户管理", exact: true }),
+  ).toBeVisible();
   await expect(
     page.getByRole("heading", { name: "设置你的新密码" }),
+  ).toHaveCount(0);
+  await expect(page.getByRole("link", { name: "角色与权限" })).toBeVisible();
+});
+
+test("成员首次登录直接进入个人设置，可主动修改简单密码", async ({ page }) => {
+  await login(page, "first_login", initialPassword);
+  await expect(
+    page.getByRole("heading", { name: "个人设置", exact: true }),
   ).toBeVisible();
   await expect(
     page.getByRole("link", { name: "用户管理", exact: true }),
   ).toHaveCount(0);
-  await page.getByLabel("初始密码", { exact: true }).fill(initialPassword);
-  await page
-    .getByLabel("新密码", { exact: true })
-    .fill("New member personal passphrase 2026!");
-  await page
-    .getByLabel("确认新密码", { exact: true })
-    .fill("New member personal passphrase 2026!");
-  await page.getByRole("button", { name: "设置新密码" }).click();
+  await page.getByLabel("当前密码", { exact: true }).fill(initialPassword);
+  await page.getByLabel("新密码", { exact: true }).fill(initialPassword);
+  await page.getByLabel("确认新密码", { exact: true }).fill("different");
+  await page.getByRole("button", { name: "更新密码" }).click();
+  await expect(page.getByRole("alert")).toContainText("两次输入的新密码不一致");
+  await page.getByLabel("确认新密码", { exact: true }).fill(initialPassword);
+  await page.getByRole("button", { name: "更新密码" }).click();
   await expect(page.getByRole("status")).toContainText("密码已更新");
-  await login(page, "first_login", "New member personal passphrase 2026!");
+  await login(page, "first_login", initialPassword);
   await expect(
     page.getByRole("heading", { name: "个人设置", exact: true }),
   ).toBeVisible();
@@ -41,6 +51,7 @@ test("首次登录必须改密，修改后重新登录并进入普通用户页�
 test("真实 API 完成创建、编辑、角色、重置密码、启停和删除", async ({
   page,
 }) => {
+  const resetPassword = "Browser reset " + "long password ".repeat(20);
   await login(page);
   await expect(
     page.getByRole("heading", { name: "用户管理", exact: true }),
@@ -71,14 +82,16 @@ test("真实 API 完成创建、编辑、角色、重置密码、启停和删除
   await row.getByRole("button", { name: "更多操作：browser_created" }).click();
   await page.getByRole("menuitem", { name: "重置密码" }).click();
   dialog = page.getByRole("dialog");
-  await dialog
-    .getByLabel("新密码", { exact: true })
-    .fill("Reset from browser passphrase 2026!");
-  await dialog
-    .getByLabel("确认新密码", { exact: true })
-    .fill("Reset from browser passphrase 2026!");
+  await dialog.getByLabel("新密码", { exact: true }).fill(resetPassword);
+  await dialog.getByLabel("确认新密码", { exact: true }).fill(resetPassword);
   await dialog.getByRole("button", { name: "重置密码", exact: true }).click();
   await expect(dialog).not.toBeVisible();
+  const resetPage = await page.context().newPage();
+  await login(resetPage, "browser_created", resetPassword);
+  await expect(
+    resetPage.getByRole("heading", { name: "用户管理", exact: true }),
+  ).toBeVisible();
+  await resetPage.close();
   await row.getByRole("button", { name: "更多操作：browser_created" }).click();
   await page.getByRole("menuitem", { name: "禁用账号" }).click();
   await page
