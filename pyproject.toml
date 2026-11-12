@@ -26,10 +26,13 @@ dependencies = [
     "sqlalchemy>=2.0,<3",
     "uvicorn[standard]>=0.35.0",
     "ag-ui-protocol==1.0.0",
+    "email-validator>=2.2,<3",
+    "pydantic>=2.11,<3",
 ]
 
 [dependency-groups]
 dev = [
+    "httpx>=0.28,<1",
     "ruff>=0.16.3",
 ]
 rag = [
