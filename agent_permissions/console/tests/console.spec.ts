@@ -159,6 +159,7 @@ test("成员只可管理自己，角色说明与个人资料页面可用", async
   await page.screenshot({
     path: "test-results/console-profile.png",
     fullPage: true,
+    animations: "disabled",
   });
   await page.getByRole("button", { name: "退出登录", exact: true }).click();
   await login(page);
@@ -173,6 +174,7 @@ test("成员只可管理自己，角色说明与个人资料页面可用", async
   await page.screenshot({
     path: "test-results/console-roles.png",
     fullPage: true,
+    animations: "disabled",
   });
 });
 
@@ -215,7 +217,9 @@ test("查询失败可以重试，失效会话会回到登录页", async ({ page 
     }),
   );
   await page.getByRole("button", { name: "刷新", exact: true }).click();
-  await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "登录 Agent Console" }),
+  ).toBeVisible();
   await expect(page.getByRole("status")).toContainText("登录状态已失效");
 });
 
@@ -279,7 +283,9 @@ for (const status of [200, 401]) {
     await page.getByRole("button", { name: "保存资料" }).click();
     await entered;
     await page.getByRole("button", { name: "退出登录", exact: true }).click();
-    await expect(page.getByRole("heading", { name: "欢迎回来" })).toBeVisible();
+    await expect(
+      page.getByRole("heading", { name: "登录 Agent Console" }),
+    ).toBeVisible();
     await login(page, "console_member", "Console member password 2026!");
     await expect(
       page.getByRole("heading", { name: "个人设置", exact: true }),
@@ -306,6 +312,7 @@ test("桌面与窄屏布局，以及表单的键盘取消", async ({ page }) => 
   await page.screenshot({
     path: "test-results/console-login.png",
     fullPage: true,
+    animations: "disabled",
   });
   await login(page);
   await expect(
@@ -314,6 +321,7 @@ test("桌面与窄屏布局，以及表单的键盘取消", async ({ page }) => 
   await page.screenshot({
     path: "test-results/console-users.png",
     fullPage: true,
+    animations: "disabled",
   });
   await page.getByRole("button", { name: "新增用户", exact: true }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
@@ -334,6 +342,7 @@ test("桌面与窄屏布局，以及表单的键盘取消", async ({ page }) => 
   await page.screenshot({
     path: "test-results/console-mobile.png",
     fullPage: true,
+    animations: "disabled",
   });
   await page.getByRole("button", { name: "新增用户", exact: true }).click();
   const dialog = page.getByRole("dialog");
@@ -347,7 +356,22 @@ test("桌面与窄屏布局，以及表单的键盘取消", async ({ page }) => 
   await page.screenshot({
     path: "test-results/console-mobile-dialog.png",
     fullPage: true,
+    animations: "disabled",
   });
   await page.keyboard.press("Escape");
+  await page.setViewportSize({ width: 320, height: 720 });
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= window.innerWidth,
+    ),
+  ).toBe(true);
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.emulateMedia({ reducedMotion: "reduce" });
+  await page.getByRole("button", { name: "更多操作：console_admin" }).click();
+  const menu = page.getByRole("menu");
+  await expect(menu).toBeVisible();
+  await expect(menu).toHaveCSS("animation-name", "none");
+  await page.keyboard.press("Escape");
+  await expect(menu).not.toBeVisible();
   expect(errors).toEqual([]);
 });

@@ -55,37 +55,42 @@ export function LoginPage({
         <Brand />
         <div className="auth-story-main">
           <span className="story-icon">
-            <ShieldCheck size={29} />
+            <ShieldCheck size={18} />
           </span>
           <h1>
-            清晰的身份，
+            用户与角色
             <br />
-            有序的访问。
+            在一处管理
           </h1>
           <p>
-            集中管理系统成员与角色，
+            集中维护成员身份与角色
             <br />
-            让每一次操作都有明确的权限边界。
+            明确每个账号允许执行的操作
           </p>
           <div className="identity-diagram" aria-hidden="true">
             <div>
-              <UserRound size={20} />
+              <span className="diagram-icon">
+                <UserRound size={18} />
+              </span>
               <span>用户身份</span>
             </div>
             <span className="diagram-line" />
             <div>
-              <ShieldCheck size={20} />
+              <span className="diagram-icon">
+                <ShieldCheck size={18} />
+              </span>
               <span>访问角色</span>
             </div>
             <span className="diagram-line" />
             <div>
-              <KeyRound size={20} />
+              <span className="diagram-icon">
+                <KeyRound size={18} />
+              </span>
               <span>操作权限</span>
             </div>
           </div>
         </div>
         <footer>
-          <span className="story-dot" />
           Agent Console<span>用户与权限管理</span>
         </footer>
       </aside>
@@ -95,10 +100,10 @@ export function LoginPage({
             <Brand compact />
           </div>
           <span className="login-icon">
-            <LockKeyhole size={23} />
+            <LockKeyhole size={18} />
           </span>
-          <h2>欢迎回来</h2>
-          <p className="auth-subtitle">登录控制台，管理你的系统与成员。</p>
+          <h2>登录 Agent Console</h2>
+          <p className="auth-subtitle">使用你的系统账号登录</p>
           {notice && (
             <div className="success-note" role="status">
               {notice}
@@ -138,13 +143,13 @@ export function LoginPage({
               ) : (
                 <>
                   登录控制台
-                  <ArrowRight size={17} />
+                  <ArrowRight size={16} />
                 </>
               )}
             </button>
           </form>
           <div className="auth-help">
-            <ShieldCheck size={14} />
+            <ShieldCheck size={16} />
             <span>账号由管理员创建。如需帮助，请联系系统管理员。</span>
           </div>
         </div>
@@ -193,15 +198,15 @@ export function PasswordForm({
     setError(null);
     setValidation("");
     if (Array.from(next).length < 15 || Array.from(next).length > 128) {
-      setValidation("新密码长度须为 15～128 个字符。");
+      setValidation("新密码长度须为 15～128 个字符");
       return;
     }
     if (next !== confirm) {
-      setValidation("两次输入的新密码不一致。");
+      setValidation("两次输入的新密码不一致");
       return;
     }
     if (current === next) {
-      setValidation("新密码不能与当前密码相同。");
+      setValidation("新密码不能与当前密码相同");
       return;
     }
     setBusy(true);
@@ -228,7 +233,7 @@ export function PasswordForm({
         autoComplete="new-password"
         required
         value={next}
-        hint="15～128 字符，支持空格与长口令。"
+        hint="15～128 字符，支持空格与长口令"
         disabled={busy}
         onChange={(event) => setNext(event.target.value)}
       />
@@ -254,8 +259,8 @@ export function PasswordForm({
         />
       )}
       <div className="password-note">
-        <LockKeyhole size={15} />
-        <span>修改成功后，所有登录会话会失效，你需要使用新密码重新登录。</span>
+        <LockKeyhole size={16} />
+        <span>修改后将退出所有登录会话，请使用新密码重新登录</span>
       </div>
       <button
         className="button primary"
@@ -290,7 +295,7 @@ export function FirstPasswordPage({
       <Brand />
       <section className="first-password-card">
         <span className="login-icon">
-          <KeyRound size={23} />
+          <KeyRound size={18} />
         </span>
         <span className="step-badge">首次登录 · 账号安全</span>
         <h1>设置你的新密码</h1>
@@ -300,7 +305,7 @@ export function FirstPasswordPage({
         </p>
         <PasswordForm api={api} initial={record} onDone={onDone} forced />
         <button className="text-button return-login" onClick={onLogout}>
-          <ArrowLeft size={14} />
+          <ArrowLeft size={16} />
           退出当前登录
         </button>
       </section>
@@ -332,10 +337,10 @@ export function RolesPage({ api }: { api: ApiClient }) {
         <div>
           <div className="eyebrow">访问控制</div>
           <h1>角色与权限</h1>
-          <p>了解系统角色的能力范围，为成员分配合适的访问权限。</p>
+          <p>核对系统角色允许的操作，再为成员分配权限</p>
         </div>
         <span className="built-in-label">
-          <ShieldCheck size={15} />
+          <ShieldCheck size={16} />
           系统内置角色
         </span>
       </header>
@@ -353,13 +358,11 @@ export function RolesPage({ api }: { api: ApiClient }) {
       <div className="roles-grid">
         {roles?.map((role) => (
           <section className="panel role-card" key={role.code}>
-            <div
-              className={`role-card-icon ${role.code === "admin" ? "blue" : "green"}`}
-            >
+            <div className="role-card-icon">
               {role.code === "admin" ? (
-                <ShieldCheck size={24} />
+                <ShieldCheck size={18} />
               ) : (
-                <UserRound size={24} />
+                <UserRound size={18} />
               )}
             </div>
             <div className="role-card-title">
@@ -376,7 +379,7 @@ export function RolesPage({ api }: { api: ApiClient }) {
         ))}
       </div>
       <div className="role-explanation">
-        <ShieldCheck size={20} />
+        <ShieldCheck size={18} />
         <div>
           <h3>权限随角色分配，操作在服务端校验</h3>
           <p>
@@ -427,7 +430,7 @@ export function ProfilePage({
     event.preventDefault();
     if (busy) return;
     if (!name.trim()) {
-      setError(new ApiError("请输入展示名称。", "VALIDATION_ERROR"));
+      setError(new ApiError("请输入展示名称", "VALIDATION_ERROR"));
       return;
     }
     setBusy(true);
@@ -440,7 +443,7 @@ export function ProfilePage({
       );
       setEditRecord(current);
       onChanged(current);
-      notify("个人资料已更新。");
+      notify("个人资料已更新");
     } catch (failure) {
       setError(failure);
     } finally {
@@ -453,7 +456,7 @@ export function ProfilePage({
         <div>
           <div className="eyebrow">我的账号</div>
           <h1>个人设置</h1>
-          <p>维护个人资料，管理你的账号安全。</p>
+          <p>维护个人资料与账号安全</p>
         </div>
       </header>
       <div className="profile-layout">
@@ -484,11 +487,11 @@ export function ProfilePage({
               </span>
               <div>
                 <h2>基本资料</h2>
-                <p>这些信息用于在系统中识别你。</p>
+                <p>用于在系统中识别你的身份</p>
               </div>
             </div>
             <form className="form-stack" onSubmit={submit}>
-              <Field label="用户名" hint="登录名创建后不可修改。">
+              <Field label="用户名" hint="登录名创建后不可修改">
                 <input value={record.user.username} readOnly />
               </Field>
               <Field label="展示名称">
@@ -534,7 +537,7 @@ export function ProfilePage({
               </span>
               <div>
                 <h2>账号安全</h2>
-                <p>定期检查账号，使用仅你知道的安全口令。</p>
+                <p>设置仅你知道的安全口令</p>
               </div>
             </div>
             <PasswordForm api={api} initial={record} onDone={onPasswordDone} />

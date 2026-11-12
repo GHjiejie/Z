@@ -38,7 +38,7 @@ export function useSession() {
     setError(null);
     setNotice(message);
   }, []);
-  const expired = useCallback(() => end("登录状态已失效，请重新登录。"), [end]);
+  const expired = useCallback(() => end("登录状态已失效，请重新登录"), [end]);
   const api = useMemo(
     () =>
       new ApiClient(

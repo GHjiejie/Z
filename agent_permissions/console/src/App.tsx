@@ -73,7 +73,7 @@ export function App() {
     setLogoutError(null);
     try {
       await session.api.logout();
-      session.end("已退出登录。");
+      session.end("已退出登录");
       setToast(null);
     } catch (failure) {
       if (!(failure instanceof ApiError && failure.status === 401))
@@ -83,7 +83,7 @@ export function App() {
     }
   }
   const passwordDone = () => {
-    session.end("密码已更新，请使用新密码重新登录。");
+    session.end("密码已更新，请使用新密码重新登录");
     setToast(null);
   };
   if (!session.token)
@@ -143,9 +143,8 @@ export function App() {
               href="#users"
               aria-current={page === "users" ? "page" : undefined}
             >
-              <UsersRound size={19} />
+              <UsersRound size={18} />
               <span>用户管理</span>
-              {page === "users" && <span className="nav-indicator" />}
             </a>
           )}
           {canRoles && (
@@ -153,7 +152,7 @@ export function App() {
               href="#roles"
               aria-current={page === "roles" ? "page" : undefined}
             >
-              <ShieldCheck size={19} />
+              <ShieldCheck size={18} />
               <span>角色与权限</span>
             </a>
           )}
@@ -161,13 +160,13 @@ export function App() {
             href="#profile"
             aria-current={page === "profile" ? "page" : undefined}
           >
-            <UserRound size={19} />
+            <UserRound size={18} />
             <span>个人设置</span>
           </a>
         </nav>
         <div className="sidebar-bottom">
           <div className="sidebar-role">
-            <ShieldCheck size={17} />
+            <ShieldCheck size={16} />
             <div>
               <strong>
                 {user.roles.includes("admin") ? "管理员访问" : "普通用户访问"}
@@ -187,7 +186,7 @@ export function App() {
               className="documentation-link"
             >
               接口文档
-              <ArrowUpRight size={15} />
+              <ArrowUpRight size={16} />
             </a>
           )}
         </div>
@@ -196,7 +195,7 @@ export function App() {
         <header className="topbar">
           <div className="breadcrumb">
             <span>Console</span>
-            <ChevronRight size={14} />
+            <ChevronRight size={16} />
             <strong>{title}</strong>
           </div>
           <div className="topbar-account">
@@ -223,7 +222,7 @@ export function App() {
                 void logout();
               }}
             >
-              <LogOut size={17} />
+              <LogOut size={16} />
             </button>
           </div>
         </header>

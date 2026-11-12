@@ -123,12 +123,12 @@ export class ApiError extends Error {
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === "VERSION_CONFLICT")
-      return "该用户的信息已被其他操作更新，请载入最新信息后再保存。";
+      return "该用户的信息已被其他操作更新，请载入最新信息后再保存";
     if (error.code === "RATE_LIMITED")
       return `操作过于频繁，请在 ${error.retryAfter || "稍后几"} 秒后重试。`;
     return error.message;
   }
-  return "暂时无法完成操作，请重试。";
+  return "暂时无法完成操作，请重试";
 }
 export function aborted(error: unknown): boolean {
   return error instanceof DOMException && error.name === "AbortError";
@@ -165,7 +165,7 @@ export class ApiClient {
       });
     } catch (error) {
       if (aborted(error)) throw error;
-      throw new ApiError("无法连接到服务，请检查连接后重试。", "NETWORK_ERROR");
+      throw new ApiError("无法连接到服务，请检查连接后重试", "NETWORK_ERROR");
     }
     this.requireCurrentSession(path);
     if (response.status === 204) return { data: null, etag: null };
@@ -175,7 +175,7 @@ export class ApiClient {
     } catch {
       this.requireCurrentSession(path);
       throw new ApiError(
-        "服务返回的数据不完整，请重试。",
+        "服务返回的数据不完整，请重试",
         "INVALID_RESPONSE",
         response.status,
       );
@@ -204,7 +204,7 @@ export class ApiClient {
       throw new ApiError(
         typeof failure.message === "string"
           ? failure.message
-          : "操作失败，请稍后重试。",
+          : "操作失败，请稍后重试",
         code,
         response.status,
         details,
@@ -212,7 +212,7 @@ export class ApiClient {
       );
     }
     if (!isObject(payload) || !("data" in payload)) {
-      throw new ApiError("服务返回的数据不完整，请重试。", "INVALID_RESPONSE");
+      throw new ApiError("服务返回的数据不完整，请重试", "INVALID_RESPONSE");
     }
     return { data: payload.data, etag: response.headers.get("ETag") };
   }
@@ -222,7 +222,7 @@ export class ApiClient {
       return decoder(data);
     } catch {
       throw new ApiError(
-        "服务返回的数据不完整，请刷新后重试。",
+        "服务返回的数据不完整，请刷新后重试",
         "INVALID_RESPONSE",
       );
     }
@@ -230,10 +230,7 @@ export class ApiClient {
   private record(result: { data: unknown; etag: string | null }): UserRecord {
     const user = this.decode(result.data, decodeUser);
     if (!result.etag || !/^"v[1-9][0-9]*"$/.test(result.etag)) {
-      throw new ApiError(
-        "无法读取用户的最新版本，请重试。",
-        "INVALID_RESPONSE",
-      );
+      throw new ApiError("无法读取用户的最新版本，请重试", "INVALID_RESPONSE");
     }
     return { user, etag: result.etag };
   }

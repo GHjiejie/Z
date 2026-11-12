@@ -39,7 +39,7 @@ export function Brand({ compact = false }: { compact?: boolean }) {
 export function Spinner({ label = "正在加载" }: { label?: string }) {
   return (
     <span className="loading-inline" role="status">
-      <LoaderCircle size={17} className="spin" aria-hidden="true" />
+      <LoaderCircle size={16} className="spin" aria-hidden="true" />
       {label}
     </span>
   );
@@ -51,14 +51,9 @@ export function Avatar({
   user: User;
   large?: boolean;
 }) {
-  const tone =
-    Array.from(user.username).reduce(
-      (sum, char) => sum + char.charCodeAt(0),
-      0,
-    ) % 5;
   return (
     <span
-      className={`avatar avatar-${tone}${large ? " avatar-large" : ""}`}
+      className={`avatar${large ? " avatar-large" : ""}`}
       aria-hidden="true"
     >
       {Array.from(user.display_name)[0]?.toUpperCase() || "U"}
@@ -68,7 +63,7 @@ export function Avatar({
 export function RoleBadge({ admin }: { admin: boolean }) {
   return (
     <span className={`role-badge${admin ? " role-admin" : ""}`}>
-      {admin && <ShieldCheck size={12} aria-hidden="true" />}
+      {admin && <ShieldCheck size={16} aria-hidden="true" />}
       {admin ? "管理员" : "普通用户"}
     </span>
   );
@@ -126,7 +121,7 @@ export function PasswordField({
           aria-label={`${visible ? "隐藏" : "显示"}${label}`}
           onClick={() => setVisible((value) => !value)}
         >
-          {visible ? <EyeOff size={17} /> : <Eye size={17} />}
+          {visible ? <EyeOff size={16} /> : <Eye size={16} />}
         </button>
       </div>
       {hint && <small className="field-hint">{hint}</small>}
@@ -154,7 +149,7 @@ export function ErrorBanner({
             {error.details.map((detail, index) => (
               <li key={`${detail.field}-${index}`}>
                 {/^[\x00-\x7F]*$/.test(detail.message)
-                  ? "请检查表单中的字段格式与填写要求。"
+                  ? "请检查表单中的字段格式与填写要求"
                   : detail.message}
               </li>
             ))}
@@ -162,7 +157,7 @@ export function ErrorBanner({
         )}
         {conflict && onReload && (
           <button type="button" className="text-button" onClick={onReload}>
-            <RefreshCw size={14} />
+            <RefreshCw size={16} />
             载入最新信息
           </button>
         )}
@@ -187,7 +182,7 @@ export function EmptyState({
   return (
     <div className="empty-state">
       <div className="empty-symbol">
-        <AlertCircle size={23} />
+        <AlertCircle size={18} />
       </div>
       <h3>{title}</h3>
       {description && <p>{description}</p>}
@@ -259,7 +254,7 @@ export function Modal({
             disabled={busy}
             onClick={onClose}
           >
-            <X size={19} />
+            <X size={18} />
           </button>
         </header>
         <div className="modal-body">{children}</div>
@@ -338,7 +333,7 @@ export function ActionMenu({
             setPosition({
               left: Math.max(
                 8,
-                Math.min(window.innerWidth - 163, rect.right - 155),
+                Math.min(window.innerWidth - 168, rect.right - 160),
               ),
               top:
                 window.innerHeight - rect.bottom > height + 10
@@ -349,7 +344,7 @@ export function ActionMenu({
           setOpen((value) => !value);
         }}
       >
-        <MoreHorizontal size={19} />
+        <MoreHorizontal size={18} />
       </button>
       {open &&
         createPortal(
@@ -426,10 +421,10 @@ export function Toast({
   if (!value) return null;
   return (
     <div className="toast" role="status">
-      <CheckCircle2 size={19} />
+      <CheckCircle2 size={18} />
       <span>{value.text}</span>
       <button className="icon-button" aria-label="关闭提示" onClick={onDismiss}>
-        <X size={15} />
+        <X size={16} />
       </button>
     </div>
   );
@@ -451,7 +446,7 @@ export function PermissionList({ permissions }: { permissions: string[] }) {
     <ul className="permission-list">
       {permissions.map((permission) => (
         <li key={permission}>
-          <Check size={15} aria-hidden="true" />
+          <Check size={16} aria-hidden="true" />
           <span>{permissionLabels[permission] || permission}</span>
         </li>
       ))}

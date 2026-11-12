@@ -133,18 +133,18 @@ export function UserDialog({
       (kind === "create" || kind === "edit") &&
       (!draft.display_name.trim() || draft.display_name.trim().length > 100)
     ) {
-      setFormError("请输入 1～100 字符的展示名称。");
+      setFormError("请输入 1～100 字符的展示名称");
       return;
     }
     if (
       kind === "create" &&
       !/^[A-Za-z0-9._-]{3,64}$/.test(draft.username.trim())
     ) {
-      setFormError("用户名须为 3～64 位字母、数字、点、下划线或连字符。");
+      setFormError("用户名须为 3～64 位字母、数字、点、下划线或连字符");
       return;
     }
     if ((kind === "create" || kind === "roles") && !draft.roles.length) {
-      setFormError("请至少选择一个角色。");
+      setFormError("请至少选择一个角色");
       return;
     }
     if (
@@ -152,11 +152,11 @@ export function UserDialog({
       (Array.from(draft.password).length < 15 ||
         Array.from(draft.password).length > 128)
     ) {
-      setFormError("密码长度须为 15～128 个字符。");
+      setFormError("密码长度须为 15～128 个字符");
       return;
     }
     if (kind === "reset" && draft.password !== confirmation) {
-      setFormError("两次输入的新密码不一致。");
+      setFormError("两次输入的新密码不一致");
       return;
     }
     setBusy(true);
@@ -173,30 +173,30 @@ export function UserDialog({
           ...profile,
           username: draft.username.trim(),
         });
-        message = "用户已创建，首次登录后需修改初始密码。";
+        message = "用户已创建，首次登录后需修改初始密码";
       } else if (record) {
         if (kind === "edit") {
           updated = await api.profile(record, profile);
-          message = "用户资料已更新。";
+          message = "用户资料已更新";
         }
         if (kind === "roles") {
           updated = await api.setRoles(record, draft.roles);
-          message = "用户角色已更新，新权限立即生效。";
+          message = "用户角色已更新，新权限立即生效";
         }
         if (kind === "reset") {
           await api.resetPassword(record, draft.password);
-          message = "密码已重置，该用户下次登录时需修改密码。";
+          message = "密码已重置，该用户下次登录时需修改密码";
         }
         if (kind === "delete") {
           await api.removeUser(record);
-          message = "用户已删除。";
+          message = "用户已删除";
         }
         if (state.kind === "status") {
           updated = await api.setStatus(record, state.nextStatus);
           message =
             state.nextStatus === "active"
-              ? "账号已启用，用户可重新登录。"
-              : "账号已禁用，现有登录会话已撤销。";
+              ? "账号已启用，用户可重新登录"
+              : "账号已禁用，现有登录会话已撤销";
         }
       }
       onSaved(message, updated);
@@ -228,7 +228,7 @@ export function UserDialog({
     <Modal
       title={title}
       description={
-        kind === "create" ? "创建账号，并为用户分配合适的访问角色。" : undefined
+        kind === "create" ? "创建账号，并为用户分配合适的访问角色" : undefined
       }
       busy={busy}
       onClose={onClose}
@@ -277,8 +277,8 @@ export function UserDialog({
                 label="用户名"
                 hint={
                   kind === "create"
-                    ? "用于登录，创建后不可修改。"
-                    : "用户名创建后不可修改。"
+                    ? "用于登录，创建后不可修改"
+                    : "用户名创建后不可修改"
                 }
               >
                 <input
@@ -333,7 +333,7 @@ export function UserDialog({
                   autoComplete="new-password"
                   required
                   value={draft.password}
-                  hint="15～128 字符，支持长口令与空格。"
+                  hint="15～128 字符，支持长口令与空格"
                   onChange={(event) =>
                     setDraft((value) => ({
                       ...value,
@@ -359,9 +359,9 @@ export function UserDialog({
                   />
                   <span className="role-option-icon">
                     {definition.code === "admin" ? (
-                      <ShieldCheck size={19} />
+                      <ShieldCheck size={18} />
                     ) : (
-                      <UserRound size={19} />
+                      <UserRound size={18} />
                     )}
                   </span>
                   <span>
@@ -399,7 +399,7 @@ export function UserDialog({
           {kind === "delete" && (
             <div className="confirmation-copy">
               <span className="confirmation-icon">
-                <AlertTriangle size={23} />
+                <AlertTriangle size={18} />
               </span>
               <p>确定删除这位用户吗？</p>
               <small>
@@ -420,7 +420,7 @@ export function UserDialog({
               <span>
                 {kind === "roles"
                   ? "角色权限取并集。调整后，用户的后续操作将使用新权限。"
-                  : "用户首次使用此密码登录时，需要先设置自己的新密码。"}
+                  : "用户首次使用此密码登录时，需要先设置自己的新密码"}
               </span>
             </div>
           )}

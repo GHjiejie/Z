@@ -8,8 +8,6 @@ import {
   RefreshCw,
   Search,
   ShieldCheck,
-  UserCheck,
-  UsersRound,
   X,
 } from "lucide-react";
 import {
@@ -192,14 +190,14 @@ export function UsersPage({
         <div>
           <div className="eyebrow">成员与访问</div>
           <h1>用户管理</h1>
-          <p>管理系统成员、访问角色和账号状态。</p>
+          <p>管理系统成员、访问角色和账号状态</p>
         </div>
         {can("user.create") && (
           <button
             className="button primary"
             onClick={() => setDialog({ kind: "create" })}
           >
-            <Plus size={17} />
+            <Plus size={16} />
             新增用户
           </button>
         )}
@@ -210,22 +208,16 @@ export function UsersPage({
             label: "系统用户",
             value: stats?.total,
             hint: "当前系统中的全部用户",
-            icon: UsersRound,
-            tone: "blue",
           },
           {
             label: "已启用账号",
             value: stats?.active,
             hint: "可以登录并访问系统",
-            icon: UserCheck,
-            tone: "green",
           },
           {
             label: "管理员",
             value: stats?.admins,
             hint: "已分配管理员角色的用户",
-            icon: ShieldCheck,
-            tone: "indigo",
           },
         ].map((item) => (
           <section className="stat-card" key={item.label}>
@@ -236,9 +228,6 @@ export function UsersPage({
                 {statsError ? "暂时无法更新，点击刷新重试" : item.hint}
               </small>
             </div>
-            <span className={`stat-icon ${item.tone}`}>
-              <item.icon size={21} />
-            </span>
           </section>
         ))}
       </div>
@@ -249,7 +238,7 @@ export function UsersPage({
               全部用户{" "}
               <span className="count-badge">{stats?.total ?? "—"}</span>
             </h2>
-            <p>维护成员信息，并为每位用户分配合适的权限。</p>
+            <p>核对成员信息、角色与账号状态</p>
           </div>
           <button
             type="button"
@@ -257,13 +246,13 @@ export function UsersPage({
             disabled={loading}
             onClick={refresh}
           >
-            <RefreshCw size={15} className={loading ? "spin" : ""} />
+            <RefreshCw size={16} className={loading ? "spin" : ""} />
             刷新
           </button>
         </div>
         <div className="filters">
           <div className="search-control">
-            <Search size={17} aria-hidden="true" />
+            <Search size={16} aria-hidden="true" />
             <input
               aria-label="搜索用户"
               placeholder="搜索用户名、名称或邮箱"
@@ -277,12 +266,12 @@ export function UsersPage({
                 aria-label="清空搜索"
                 onClick={() => setSearch("")}
               >
-                <X size={14} />
+                <X size={16} />
               </button>
             )}
           </div>
           <div className="filter-control">
-            <ListFilter size={15} aria-hidden="true" />
+            <ListFilter size={16} aria-hidden="true" />
             <select
               aria-label="角色筛选"
               value={query.role}
@@ -344,7 +333,7 @@ export function UsersPage({
           </select>
         </div>
         <p className="table-mobile-hint">
-          <ArrowLeftRight size={12} />
+          <ArrowLeftRight size={16} />
           左右滑动查看完整列表与操作
         </p>
         {Boolean(error) && (
@@ -451,8 +440,8 @@ export function UsersPage({
               title={filtered ? "没有找到符合条件的用户" : "还没有用户"}
               description={
                 filtered
-                  ? "试试其他关键词，或调整角色和状态筛选。"
-                  : "添加第一位成员，开始管理访问权限。"
+                  ? "试试其他关键词，或调整角色和状态筛选"
+                  : "添加第一位成员，开始管理访问权限"
               }
               action={
                 filtered && (
@@ -526,8 +515,8 @@ export function UsersPage({
         </footer>
       </section>
       <div className="page-footnote">
-        <ShieldCheck size={14} />
-        角色和账号状态的变更，将应用于用户的后续操作。
+        <ShieldCheck size={16} />
+        角色和账号状态的变更将应用于后续操作
       </div>
       {dialog && (
         <UserDialog
