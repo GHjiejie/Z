@@ -4,11 +4,13 @@ import argparse
 import getpass
 import sqlite3
 from collections.abc import Callable
+from pathlib import Path
 
+import psycopg
 from pydantic import ValidationError
 
 from agent_permissions.config import Settings
-from agent_permissions.database import Database
+from agent_permissions.database import create_database
 from agent_permissions.errors import ApiError
 from agent_permissions.models import UserCreate
 from agent_permissions.service import UserService
@@ -27,6 +29,7 @@ def main(
     initialize.add_argument("--username", required=True)
     initialize.add_argument("--display-name", default="管理员")
     initialize.add_argument("--email")
+    initialize.add_argument("--env-file", type=Path, help="读取本模块的数据库配置文件")
     initialize.add_argument(
         "--prompt-password", action="store_true", help="交互式设置自定义初始密码"
     )
@@ -47,8 +50,8 @@ def main(
             password=password,
             roles=["admin"],
         )
-        settings = Settings.from_env()
-        database = Database(settings.database_path)
+        settings = Settings.from_env(args.env_file)
+        database = create_database(settings)
         database.initialize()
         user = UserService(database, settings).bootstrap_admin(payload)
         print(f"已创建管理员 {user['username']}，可直接登录管理后台。")
@@ -59,7 +62,7 @@ def main(
             print(detail["msg"])
     except ApiError as error:
         print(error.message)
-    except (sqlite3.Error, OSError, ValueError):
+    except (sqlite3.Error, psycopg.Error, OSError, ValueError):
         print("初始化失败，请检查配置和数据库访问权限。")
     except (EOFError, KeyboardInterrupt):
         print("已取消初始化。")

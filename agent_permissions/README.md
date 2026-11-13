@@ -4,8 +4,9 @@
 
 当前已实现 Python + FastAPI 用户管理服务，包含 21 个接口，以及对应的 Console 后台 UI；后续章节中的 Agent 业务授权仍为架构规划。
 
-用户权限采用可配置 RBAC：用户绑定多个角色，角色绑定操作权限；内置 `admin`、`member` 并支持自定义角色。账号及授权关联通过 SQLite 持久化。
+用户权限采用可配置 RBAC：用户绑定多个角色，角色绑定操作权限；内置 `admin`、`member` 并支持自定义角色。账号及授权关联支持 Docker PostgreSQL 18 和本地 SQLite 持久化。
 
+- [Docker 数据库与迁移](docs/docker-database.md)：启动独立 PostgreSQL、迁移 SQLite 全量数据及切换后台连接。
 - [可配置 RBAC](docs/rbac.md)：数据模型、角色管理接口、授权边界和旧数据库迁移。
 - [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、登录、配置与测试。
 - [Console 页面说明](console/README.md)：登录、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。
@@ -221,6 +222,11 @@ agent_permissions/
   __main__.py           # 本地管理员初始化
   config.py             # 环境变量与默认配置
   database.py           # SQLite schema 和事务
+  postgres.py           # PostgreSQL 连接、schema 与事务级写锁
+  storage.py            # 两种数据库共享的 SQL 接口
+  migrate_postgres.py   # SQLite 全量迁移与校验
+  setup_postgres.py     # 生成本地 Docker 数据库配置
+  deploy/               # Docker Compose 与配置示例
   models.py             # 用户管理请求、响应与校验
   permissions.py        # 权限目录和角色授权查询
   rbac.py               # 角色定义及多对多关联

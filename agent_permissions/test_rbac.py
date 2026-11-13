@@ -22,9 +22,12 @@ BASE = ["user.self.read", "user.self.update", "user.self.password.change"]
 
 
 class RbacTests(unittest.TestCase):
+    def settings_for(self, path: Path) -> Settings:
+        return Settings(database_path=path)
+
     def setUp(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
-        self.settings = Settings(database_path=Path(directory) / "rbac.sqlite3")
+        self.settings = self.settings_for(Path(directory) / "rbac.sqlite3")
         self.app = create_app(self.settings)
         self.client = self.enterContext(TestClient(self.app))
         self.app.state.service.bootstrap_admin(

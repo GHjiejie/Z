@@ -1,23 +1,22 @@
 """Role records and validated many-to-many relationships in one transaction."""
 
-import sqlite3
-
 from agent_permissions.errors import ApiError, invalid_field
+from agent_permissions.storage import Connection
 
 
-def require_roles(connection: sqlite3.Connection, codes: list[str]) -> None:
+def require_roles(connection: Connection, codes: list[str]) -> None:
     known = {row[0] for row in connection.execute("SELECT code FROM roles")}
     if not codes or not set(codes) <= known:
         raise invalid_field("roles", "请选择至少一个已存在的角色")
 
 
-def require_permissions(connection: sqlite3.Connection, codes: list[str]) -> None:
+def require_permissions(connection: Connection, codes: list[str]) -> None:
     known = {row[0] for row in connection.execute("SELECT code FROM permissions")}
     if not set(codes) <= known:
         raise invalid_field("permissions", "存在未定义的操作权限")
 
 
-def role_permissions(connection: sqlite3.Connection, code: str) -> list[str]:
+def role_permissions(connection: Connection, code: str) -> list[str]:
     return [
         row[0]
         for row in connection.execute(
@@ -27,7 +26,7 @@ def role_permissions(connection: sqlite3.Connection, code: str) -> list[str]:
     ]
 
 
-def role_record(connection: sqlite3.Connection, code: str) -> dict:
+def role_record(connection: Connection, code: str) -> dict:
     row = connection.execute("SELECT * FROM roles WHERE code=?", (code,)).fetchone()
     if row is None:
         raise ApiError(404, "ROLE_NOT_FOUND", "角色不存在")
@@ -43,9 +42,7 @@ def role_record(connection: sqlite3.Connection, code: str) -> dict:
     }
 
 
-def assign_roles(
-    connection: sqlite3.Connection, user_id: str, codes: list[str]
-) -> None:
+def assign_roles(connection: Connection, user_id: str, codes: list[str]) -> None:
     require_roles(connection, codes)
     connection.execute("DELETE FROM user_roles WHERE user_id=?", (user_id,))
     connection.executemany(
@@ -55,7 +52,7 @@ def assign_roles(
 
 
 def assign_permissions(
-    connection: sqlite3.Connection, code: str, permissions: list[str]
+    connection: Connection, code: str, permissions: list[str]
 ) -> None:
     require_permissions(connection, permissions)
     connection.execute("DELETE FROM role_permissions WHERE role_code=?", (code,))

@@ -12,10 +12,10 @@ from datetime import UTC, datetime
 from typing import Any, Literal
 from uuid import uuid4
 
+import psycopg
 from pydantic import ValidationError
 
 from agent_permissions.config import Settings
-from agent_permissions.database import Database
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
     PasswordChange,
@@ -39,6 +39,7 @@ from agent_permissions.rbac import (
     role_record,
 )
 from agent_permissions.security import Passwords, token_digest
+from agent_permissions.storage import Connection, DatabaseBackend
 
 logger = logging.getLogger(__name__)
 Clock = Callable[[], datetime]
@@ -75,9 +76,7 @@ class RequestInfo:
     actor_user_id: str | None = None
 
 
-def public_user(
-    connection: sqlite3.Connection, row: Mapping[str, Any]
-) -> dict[str, Any]:
+def public_user(connection: Connection, row: Mapping[str, Any]) -> dict[str, Any]:
     fields = {name: row[name] for name in User.model_fields if name != "roles"}
     fields["roles"] = roles_for(connection, row["id"])
     return User.model_validate(fields).model_dump(mode="json")
@@ -86,7 +85,7 @@ def public_user(
 class RateLimiter:
     """Persistent fixed-window buckets, shared by local service workers."""
 
-    def __init__(self, database: Database, clock: Clock) -> None:
+    def __init__(self, database: DatabaseBackend, clock: Clock) -> None:
         self.database = database
         self.clock = clock
 
@@ -128,7 +127,7 @@ class RateLimiter:
 
 class UserService:
     def __init__(
-        self, database: Database, settings: Settings, *, clock: Clock = utc_now
+        self, database: DatabaseBackend, settings: Settings, *, clock: Clock = utc_now
     ) -> None:
         self.database = database
         self.settings = settings
@@ -138,7 +137,7 @@ class UserService:
 
     def _audit(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         info: RequestInfo,
         action: str,
         target: str | None,
@@ -185,17 +184,17 @@ class UserService:
                     reason=code,
                     changes={"role_code": role_code} if role_code else None,
                 )
-        except sqlite3.Error:
+        except (sqlite3.Error, psycopg.Error):
             # The failed request remains failed; never log its body or token.
             logger.error("Failure audit unavailable request_id=%s", info.request_id)
 
     def _authorize(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         authority: Authority,
         info: RequestInfo,
         permission: str | None,
-    ) -> sqlite3.Row:
+    ) -> Mapping[str, Any]:
         session = connection.execute(
             "SELECT * FROM sessions WHERE token_digest=?", (authority.token_digest,)
         ).fetchone()
@@ -216,7 +215,7 @@ class UserService:
         return user
 
     @staticmethod
-    def _target(connection: sqlite3.Connection, user_id: str) -> sqlite3.Row:
+    def _target(connection: Connection, user_id: str) -> Mapping[str, Any]:
         user = connection.execute(
             "SELECT * FROM users WHERE id=? AND deleted_at IS NULL", (user_id,)
         ).fetchone()
@@ -225,7 +224,7 @@ class UserService:
         return user
 
     @staticmethod
-    def _version(user: sqlite3.Row, expected: str | None) -> None:
+    def _version(user: Mapping[str, Any], expected: str | None) -> None:
         if expected is None:
             raise ApiError(428, "PRECONDITION_REQUIRED", "请提供记录版本 If-Match")
         if not re.fullmatch(r'"v[1-9][0-9]{0,18}"', expected):
@@ -235,7 +234,7 @@ class UserService:
 
     def _insert_user(
         self,
-        connection: sqlite3.Connection,
+        connection: Connection,
         payload: UserCreate,
         info: RequestInfo,
     ) -> dict:
@@ -258,8 +257,15 @@ class UserService:
                     now,
                 ),
             )
-        except sqlite3.IntegrityError as error:
-            if "users.username" not in str(error):
+        except (sqlite3.IntegrityError, psycopg.errors.UniqueViolation) as error:
+            username_conflict = (
+                isinstance(error, sqlite3.IntegrityError)
+                and "users.username" in str(error)
+            ) or (
+                isinstance(error, psycopg.errors.UniqueViolation)
+                and error.diag.constraint_name == "users_username_key"
+            )
+            if not username_conflict:
                 raise
             raise ApiError(
                 409,
@@ -433,8 +439,8 @@ class UserService:
             params.append(query.role)
         if query.q and query.q.strip():
             conditions.append(
-                """(instr(casefold(u.username),?)>0 OR
-                instr(casefold(u.display_name),?)>0 OR instr(casefold(u.email),?)>0)"""
+                """(app_contains(u.username,?)>0 OR
+                app_contains(u.display_name,?)>0 OR app_contains(u.email,?)>0)"""
             )
             params.extend([query.q.strip().casefold()] * 3)
         where = " AND ".join(conditions)
@@ -491,9 +497,9 @@ class UserService:
 
     @staticmethod
     def _guard_admin(
-        connection: sqlite3.Connection,
-        actor: sqlite3.Row,
-        target: sqlite3.Row,
+        connection: Connection,
+        actor: Mapping[str, Any],
+        target: Mapping[str, Any],
         changes: dict,
         operation: Operation,
     ) -> None:
@@ -662,7 +668,7 @@ class UserService:
 
     @staticmethod
     def _check_grants(
-        connection: sqlite3.Connection, actor: sqlite3.Row, permissions: list[str]
+        connection: Connection, actor: Mapping[str, Any], permissions: list[str]
     ) -> None:
         if not set(permissions) <= set(permissions_for(connection, actor["id"])):
             raise ApiError(

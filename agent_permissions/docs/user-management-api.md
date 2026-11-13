@@ -54,6 +54,7 @@
 ### 2.1 请求、时间和标识
 
 - 所有路径均以 `/api/v1` 开头。
+- SQLite 与 PostgreSQL 使用相同接口与授权契约；Docker 数据库和迁移说明见 [运行配置](docker-database.md)。
 - 有请求体时使用 `Content-Type: application/json`，响应编码为 UTF-8。
 - 生产环境使用 HTTPS；登录令牌通过 `Authorization` 请求头传递。
 - 时间统一使用 UTC、ISO 8601 格式，例如 `2026-11-12T08:00:00Z`。

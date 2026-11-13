@@ -55,9 +55,12 @@ class TestClock:
 
 
 class UserApiTests(unittest.TestCase):
+    def settings_for(self, path: Path) -> Settings:
+        return Settings(database_path=path)
+
     def setUp(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
-        self.settings = Settings(database_path=Path(directory) / "users.sqlite3")
+        self.settings = self.settings_for(Path(directory) / "users.sqlite3")
         self.clock = TestClock()
         self.app = create_app(self.settings, clock=self.clock)
         self.client = self.enterContext(TestClient(self.app))

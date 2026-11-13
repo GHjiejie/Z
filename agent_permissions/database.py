@@ -7,11 +7,13 @@ from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
 
+from agent_permissions.config import Settings
 from agent_permissions.permissions import (
     ADMIN_PERMISSIONS,
     MEMBER_PERMISSIONS,
     PERMISSION_CATALOG,
 )
+from agent_permissions.storage import Connection, DatabaseBackend
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -127,7 +129,7 @@ class Database:
                 raise
 
     @staticmethod
-    def _execute_schema(connection: sqlite3.Connection, schema: str) -> None:
+    def _execute_schema(connection: Connection, schema: str) -> None:
         # executescript commits an open transaction; execute DDL individually so
         # the role backfill, old-column removal and version change are atomic.
         for statement in schema.split(";"):
@@ -135,7 +137,7 @@ class Database:
                 connection.execute(statement)
 
     @staticmethod
-    def _seed_catalog(connection: sqlite3.Connection) -> None:
+    def _seed_catalog(connection: Connection) -> None:
         connection.executemany(
             """INSERT INTO permissions(code,display_name,resource) VALUES(?,?,?)
             ON CONFLICT(code) DO UPDATE SET
@@ -148,15 +150,15 @@ class Database:
             ("member", "普通用户", "管理自己的基本资料和密码", MEMBER_PERMISSIONS),
         ]:
             inserted = connection.execute(
-                """INSERT OR IGNORE INTO roles
+                """INSERT INTO roles
                 (code,display_name,description,built_in,version,created_at,updated_at)
-                VALUES(?,?,?,1,1,?,?)""",
+                VALUES(?,?,?,1,1,?,?) ON CONFLICT(code) DO NOTHING""",
                 (code, name, description, now, now),
             ).rowcount
             if inserted or code == "admin":
                 connection.executemany(
-                    """INSERT OR IGNORE INTO role_permissions(role_code,permission_code)
-                    VALUES(?,?)""",
+                    """INSERT INTO role_permissions(role_code,permission_code)
+                    VALUES(?,?) ON CONFLICT(role_code,permission_code) DO NOTHING""",
                     [(code, permission) for permission in permissions],
                 )
 
@@ -170,6 +172,14 @@ class Database:
                 "casefold",
                 1,
                 lambda value: (value or "").casefold(),
+                deterministic=True,
+            )
+            connection.create_function(
+                "app_contains",
+                2,
+                lambda value, needle: (
+                    (value or "").casefold().find(needle.casefold()) + 1
+                ),
                 deterministic=True,
             )
             yield connection
@@ -187,3 +197,11 @@ class Database:
             except BaseException:
                 connection.rollback()
                 raise
+
+
+def create_database(settings: Settings) -> DatabaseBackend:
+    if settings.database_url:
+        from agent_permissions.postgres import PostgresDatabase
+
+        return PostgresDatabase(settings.database_url)
+    return Database(settings.database_path)

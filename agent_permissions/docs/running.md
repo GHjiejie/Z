@@ -1,6 +1,6 @@
 # 用户管理服务运行说明
 
-当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理页面。默认使用单机 SQLite 持久化用户、会话、审计与限流记录，无需外部数据库或模型服务。
+当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理页面。支持 Docker PostgreSQL 18 和本地 SQLite，持久化账号、RBAC、会话、审计与限流记录。当前 Docker 启动与数据迁移见 [数据库部署说明](docker-database.md)。无需模型服务。
 
 ## 1. 准备环境
 
@@ -13,6 +13,8 @@ uv sync
 服务复用仓库根目录的 `pyproject.toml`、`uv.lock` 和 `.venv`，不需要建立单独的 Python 环境。
 
 ## 2. 初始化管理员
+
+未配置 PostgreSQL 时，以下命令使用本地 SQLite。Docker 新项目初始化需添加 `--env-file agent_permissions/deploy/.env`；已有账号迁移后无需重新初始化。
 
 首次使用时执行：
 
@@ -43,7 +45,13 @@ npm run build
 cd ../..
 ```
 
-再启动 FastAPI。构建后的页面由同一服务提供，无需单独运行 Node 服务：
+构建后的页面由 FastAPI 提供，无需单独运行 Node 服务。Docker 数据库部署使用：
+
+```bash
+uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers --env-file agent_permissions/deploy/.env
+```
+
+继续使用本地 SQLite 时运行：
 
 ```bash
 uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
@@ -81,6 +89,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 
 | 环境变量 | 默认值 | 含义 |
 | --- | --- | --- |
+| `AGENT_USERS_DATABASE_URL` | 未配置 | PostgreSQL URL；配置后优先于 SQLite，连接失败不回退 |
 | `AGENT_USERS_DATABASE_PATH` | 模块目录下的 `data/users.sqlite3` | SQLite 文件路径 |
 | `AGENT_USERS_SESSION_SECONDS` | `28800` | 完整会话的固定有效期，单位秒 |
 | `AGENT_USERS_LOGIN_ACCOUNT_LIMIT` | `10` | 每个账号在窗口内的登录尝试上限 |
@@ -98,7 +107,7 @@ uv run python -m agent_permissions init-admin --username admin
 uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
-所有时间和次数配置必须为正整数。代码不自动读取仓库其他模块的 `.env`。管理员初始化默认使用密码 `12345`，仅在空数据库中生效；已有用户的密码不会在初始化或服务启动时被覆盖。
+所有时间和次数配置必须为正整数。代码不自动读取仓库其他模块的 `.env`；通过 Uvicorn 或管理员命令的 `--env-file` 显式载入本模块部署配置。管理员初始化默认使用密码 `12345`，仅在空数据库中生效；已有用户的密码不会在初始化或服务启动时被覆盖。
 
 限流使用持久化固定窗口。进入登录验证流程的请求，不论成功或失败，均计数；改密失败也计数。触发限制后返回 `429` 和 `Retry-After` 秒数，窗口到期后恢复。
 
@@ -130,8 +139,8 @@ npm run test:e2e
 
 ## 7. 实现边界
 
-- 当前持久化后端仅支持本机 SQLite 文件；多个进程可共享同一份本地文件，通过数据库写锁协调权限变化。
-- 写事务使用 `BEGIN IMMEDIATE`，将操作者权限复核、目标版本检查、更新、会话撤销及成功审计串行提交。适合当前单机用户管理服务，不提供跨主机部署或网络共享盘数据库的保证。
+- 支持 PostgreSQL 18+ 和本机 SQLite。PostgreSQL 可供多个服务进程连接；SQLite 文件仅支持同机共享，不使用网络共享盘。
+- SQLite 写事务使用 `BEGIN IMMEDIATE`；PostgreSQL 写事务使用统一的事务级 advisory lock。权限复核、目标版本检查、业务修改、会话撤销及成功审计均在持锁事务中串行提交；PostgreSQL 查询采用只读 `REPEATABLE READ`。
 - 生产升级数据库结构前需增加对应迁移。当前 schema 版本为 2，支持空库初始化及 schema 1 的原子迁移；保留账号、密码与会话，遇到未知版本停止启动。具体流程见 [RBAC 迁移说明](rbac.md#旧数据库升级)。
 - 初始管理员创建属于本地维护入口；HTTP API 不提供公开注册、找回密码、删除恢复。
 - 业务日志和接口错误不输出密码、密码哈希或会话令牌；排查时可通过 `request_id` 关联数据库中的审计事件。
@@ -143,7 +152,9 @@ npm run test:e2e
 | `main.py` | Uvicorn 应用入口 |
 | `api.py` | FastAPI 路由、请求约束、统一响应与错误处理 |
 | `service.py` | 用户业务、事务内鉴权、会话、审计与持久化限流 |
-| `database.py` | SQLite schema、连接及事务 |
+| `database.py`、`postgres.py`、`storage.py` | 数据库选择、SQLite/PostgreSQL 连接、事务与 SQL 边界 |
+| `migrate_postgres.py` | SQLite 快照、整批迁移、行数及摘要校验 |
+| `deploy/compose.yaml`、`setup_postgres.py` | Docker PostgreSQL 与本地私有连接配置 |
 | `models.py` | 请求与响应字段、输入校验 |
 | `permissions.py` | 权限目录和数据库授权查询 |
 | `security.py` | 密码哈希、令牌摘要 |

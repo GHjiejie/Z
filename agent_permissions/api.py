@@ -8,6 +8,7 @@ from pathlib import Path as FilePath
 from typing import Annotated
 from uuid import uuid4
 
+import psycopg
 from fastapi import APIRouter, Depends, FastAPI, Header, Path, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
@@ -19,7 +20,7 @@ from starlette.responses import JSONResponse
 
 from agent_permissions.config import Settings
 from agent_permissions.console_ui import mount_console
-from agent_permissions.database import Database
+from agent_permissions.database import create_database
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
     Envelope,
@@ -458,7 +459,7 @@ def create_app(
     console_directory: FilePath | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
-    database = Database(settings.database_path)
+    database = create_database(settings)
     service = UserService(database, settings, clock=clock)
 
     @asynccontextmanager
@@ -516,8 +517,11 @@ def create_app(
             ApiError(422, "VALIDATION_ERROR", "请求参数不符合要求", details=details),
         )
 
+    @app.exception_handler(psycopg.Error)
     @app.exception_handler(sqlite3.Error)
-    def persistence_error(request: Request, error: sqlite3.Error) -> JSONResponse:
+    def persistence_error(
+        request: Request, error: sqlite3.Error | psycopg.Error
+    ) -> JSONResponse:
         return error_response(
             request,
             ApiError(503, "SERVICE_UNAVAILABLE", "暂时无法完成请求，请稍后重试"),

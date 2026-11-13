@@ -33,6 +33,8 @@ def normalized_name(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("展示名称必须是字符串")  # noqa: TRY004 -- Pydantic requires ValueError
     value = value.strip()
+    if "\x00" in value:
+        raise ValueError("展示名称不能包含空字符")
     if not 1 <= len(value) <= 100:
         raise ValueError("展示名称去除首尾空格后须为 1～100 字符")
     try:
@@ -53,6 +55,8 @@ def normalized_email(value: object) -> object:
 def normalized_description(value: object) -> str:
     if not isinstance(value, str):
         raise ValueError("角色说明必须是字符串")  # noqa: TRY004 -- Pydantic requires ValueError
+    if "\x00" in value:
+        raise ValueError("角色说明不能包含空字符")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError:
@@ -148,6 +152,18 @@ class UserQuery(StrictModel):
         "username", "display_name", "created_at", "updated_at", "last_login_at"
     ] = "created_at"
     sort_order: Literal["asc", "desc"] = "desc"
+
+    @field_validator("q")
+    @classmethod
+    def valid_search_text(cls, value: str | None) -> str | None:
+        if value is not None:
+            if "\x00" in value:
+                raise ValueError("搜索关键词不能包含空字符")
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError:
+                raise ValueError("搜索关键词必须是有效的 Unicode 文本") from None
+        return value
 
 
 class User(StrictModel):

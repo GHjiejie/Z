@@ -1,6 +1,6 @@
 """Permission catalog and database-backed RBAC queries."""
 
-import sqlite3
+from agent_permissions.storage import Connection
 
 PERMISSION_CATALOG = [
     ("user.self.read", "查看自己的信息与权限", "个人账号"),
@@ -24,7 +24,7 @@ MEMBER_PERMISSIONS = frozenset(
 ADMIN_PERMISSIONS = frozenset(code for code, _, _ in PERMISSION_CATALOG)
 
 
-def roles_for(connection: sqlite3.Connection, user_id: str) -> list[str]:
+def roles_for(connection: Connection, user_id: str) -> list[str]:
     return [
         row[0]
         for row in connection.execute(
@@ -34,7 +34,7 @@ def roles_for(connection: sqlite3.Connection, user_id: str) -> list[str]:
     ]
 
 
-def permissions_for(connection: sqlite3.Connection, user_id: str) -> list[str]:
+def permissions_for(connection: Connection, user_id: str) -> list[str]:
     return [
         row[0]
         for row in connection.execute(
