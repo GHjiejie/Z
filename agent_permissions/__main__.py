@@ -1,4 +1,4 @@
-"""Local, one-time administrator initialization with an interactive password."""
+"""Local, one-time administrator initialization with a default password."""
 
 import argparse
 import getpass
@@ -13,6 +13,8 @@ from agent_permissions.errors import ApiError
 from agent_permissions.models import UserCreate
 from agent_permissions.service import UserService
 
+INITIAL_ADMIN_PASSWORD = "12345"
+
 
 def main(
     argv: list[str] | None = None,
@@ -25,14 +27,19 @@ def main(
     initialize.add_argument("--username", required=True)
     initialize.add_argument("--display-name", default="管理员")
     initialize.add_argument("--email")
+    initialize.add_argument(
+        "--prompt-password", action="store_true", help="交互式设置自定义初始密码"
+    )
     args = parser.parse_args(argv)
-    password_reader = password_reader or getpass.getpass
     try:
-        password = password_reader("请输入初始密码：")
-        confirmation = password_reader("请再次输入初始密码：")
-        if password != confirmation:
-            print("两次密码不一致，未创建用户。")
-            return 1
+        password = INITIAL_ADMIN_PASSWORD
+        if args.prompt_password:
+            password_reader = password_reader or getpass.getpass
+            password = password_reader("请输入初始密码：")
+            confirmation = password_reader("请再次输入初始密码：")
+            if password != confirmation:
+                print("两次密码不一致，未创建用户。")
+                return 1
         payload = UserCreate(
             username=args.username,
             display_name=args.display_name,

@@ -20,7 +20,15 @@ uv sync
 uv run python -m agent_permissions init-admin --username admin --display-name 管理员
 ```
 
-命令交互式读取两次初始密码，不显示密码，也不接受命令行密码参数。密码必填，不限制长度、字符组合或弱密码。
+命令默认将管理员初始密码设置为 `12345`，无需交互输入。以上命令创建的账号可使用 `admin / 12345` 直接登录。
+
+如需自定义初始密码，添加 `--prompt-password`：
+
+```bash
+uv run python -m agent_permissions init-admin --username admin --prompt-password
+```
+
+该选项会交互式读取两次密码，不回显输入，也不接受命令行密码参数。自定义密码必填，不限制长度、字符组合或弱密码。
 
 初始化仅在数据库没有用户时执行一次，不能通过重复运行覆盖已有用户或重置密码。创建成功后可使用设置的密码直接登录。
 
@@ -90,7 +98,7 @@ uv run python -m agent_permissions init-admin --username admin
 uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
-所有时间和次数配置必须为正整数。代码不自动读取仓库其他模块的 `.env`，也不提供默认管理员密码。
+所有时间和次数配置必须为正整数。代码不自动读取仓库其他模块的 `.env`。管理员初始化默认使用密码 `12345`，仅在空数据库中生效；已有用户的密码不会在初始化或服务启动时被覆盖。
 
 限流使用持久化固定窗口。进入登录验证流程的请求，不论成功或失败，均计数；改密失败也计数。触发限制后返回 `429` 和 `Retry-After` 秒数，窗口到期后恢复。
 
@@ -140,7 +148,7 @@ npm run test:e2e
 | `permissions.py` | 系统角色与动作权限映射 |
 | `security.py` | 密码哈希、令牌摘要 |
 | `config.py` | 默认值和环境变量配置 |
-| `__main__.py` | 交互式管理员初始化 |
+| `__main__.py` | 默认密码或交互式自定义密码的管理员初始化 |
 | `test_api.py` | 离线接口与并发测试 |
 | `console_ui.py`、`test_console.py` | Console 静态页面托管及隔离验证 |
 | `console/` | React + TypeScript 页面、接口客户端与浏览器测试 |

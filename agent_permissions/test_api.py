@@ -1013,15 +1013,64 @@ class UserApiTests(unittest.TestCase):
 
 
 class BootstrapCliTests(unittest.TestCase):
+    def test_default_initialization_uses_12345_without_prompting(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "cli.sqlite3"
+            with (
+                patch.dict(os.environ, {"AGENT_USERS_DATABASE_PATH": str(path)}),
+                patch(
+                    "agent_permissions.__main__.getpass.getpass",
+                    side_effect=AssertionError("默认初始化不应提示输入密码"),
+                ),
+                redirect_stdout(io.StringIO()),
+            ):
+                self.assertEqual(cli_main(["init-admin", "--username", "admin"]), 0)
+            with TestClient(create_app(Settings(database_path=path))) as client:
+                response = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "12345"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                data = response.json()["data"]
+                self.assertEqual(data["auth_scope"], "full")
+                self.assertEqual(data["user"]["roles"], ["admin"])
+                response = client.get(
+                    "/api/v1/users",
+                    headers={"Authorization": f"Bearer {data['session_token']}"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+                response = client.put(
+                    "/api/v1/users/me/password",
+                    headers={
+                        "Authorization": f"Bearer {data['session_token']}",
+                        "If-Match": f'"v{data["user"]["version"]}"',
+                    },
+                    json={
+                        "current_password": "12345",
+                        "new_password": "Updated initial password",
+                    },
+                )
+                self.assertEqual(response.status_code, 204, response.text)
+                with (
+                    patch.dict(os.environ, {"AGENT_USERS_DATABASE_PATH": str(path)}),
+                    redirect_stdout(io.StringIO()),
+                ):
+                    self.assertEqual(cli_main(["init-admin", "--username", "admin"]), 1)
+                response = client.post(
+                    "/api/v1/auth/login",
+                    json={"username": "admin", "password": "Updated initial password"},
+                )
+                self.assertEqual(response.status_code, 200, response.text)
+
     def test_interactive_initialization_without_password_arguments(self) -> None:
-        password = "12345"
+        password = "Custom initial password"
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "cli.sqlite3"
             with patch.dict(os.environ, {"AGENT_USERS_DATABASE_PATH": str(path)}):
                 output = io.StringIO()
                 with redirect_stdout(output):
                     code = cli_main(
-                        ["init-admin", "--username", "admin"],
+                        ["init-admin", "--username", "admin", "--prompt-password"],
                         password_reader=lambda _: password,
                     )
                 self.assertEqual(code, 0)
@@ -1046,7 +1095,7 @@ class BootstrapCliTests(unittest.TestCase):
                     self.assertEqual(response.status_code, 200, response.text)
                 with redirect_stdout(io.StringIO()):
                     code = cli_main(
-                        ["init-admin", "--username", "other"],
+                        ["init-admin", "--username", "other", "--prompt-password"],
                         password_reader=lambda _: password,
                     )
                 self.assertEqual(code, 1)
