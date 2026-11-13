@@ -19,6 +19,7 @@ from agent_permissions.__main__ import main as cli_main
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
 from agent_permissions.migrate_postgres import TABLE_COLUMNS, fingerprint, migrate
+from agent_permissions.migrate_postgres import main as migrate_main
 from agent_permissions.models import UserCreate
 from agent_permissions.postgres import PostgresDatabase
 
@@ -51,7 +52,9 @@ class PostgresFixture:
                 )
             )
         )
-        return Settings(database_path=path, database_url=url)
+        return Settings(
+            database_path=path, database_url=url, db_pool_min_size=1, db_pool_max_size=2
+        )
 
 
 @unittest.skipUnless(
@@ -75,7 +78,10 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
     def setUp(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
         self.path = Path(directory) / "source.sqlite3"
-        self.target = PostgresDatabase(self.settings_for(self.path).database_url)
+        settings = self.settings_for(self.path)
+        self.target = PostgresDatabase(settings.database_url, settings=settings)
+        self.addCleanup(self.target.close)
+        self.target.open()
 
     def source(self) -> None:
         with TestClient(create_app(Settings(database_path=self.path))) as client:
@@ -189,7 +195,7 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                         "database-password-must-stay-private"
                     ),
                 ),
-                self.assertLogs("agent_permissions.service", level="ERROR"),
+                self.assertLogs("agent_permissions.api", level="ERROR"),
             ):
                 response = client.get(
                     "/api/v1/users/me", headers={"Authorization": "Bearer sample-token"}
@@ -217,6 +223,40 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                 "/api/v1/auth/login", json={"username": "admin", "password": "12345"}
             )
             self.assertEqual(response.status_code, 200)
+
+    def test_migration_cli_closes_target_on_success_and_repeated_import(self) -> None:
+        self.source()
+        config = self.path.parent / "migration.env"
+        config.write_text(
+            f"AGENT_USERS_DATABASE_URL={self.target.database_url}\n"
+            "AGENT_USERS_DB_POOL_MIN_SIZE=1\nAGENT_USERS_DB_POOL_MAX_SIZE=1\n"
+        )
+        config.chmod(0o600)
+        created = []
+
+        def target_factory(*args, **kwargs):
+            target = PostgresDatabase(*args, **kwargs)
+            created.append(target)
+            return target
+
+        for expected in (0, 1):
+            with (
+                patch(
+                    "agent_permissions.migrate_postgres.PostgresDatabase",
+                    side_effect=target_factory,
+                ),
+                redirect_stdout(io.StringIO()) as output,
+            ):
+                result = migrate_main(
+                    ["--source", str(self.path), "--env-file", str(config)]
+                )
+            self.assertEqual(result, expected)
+            self.assertEqual(created[-1].pool_stats(), {})
+            self.assertNotIn(self.target.database_url, output.getvalue())
+        with self.target.transaction() as connection:
+            self.assertEqual(
+                connection.execute("SELECT count(*) FROM users").fetchone()[0], 2
+            )
 
 
 if __name__ == "__main__":

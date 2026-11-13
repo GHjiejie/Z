@@ -14,6 +14,7 @@ from agent_permissions.database import create_database
 from agent_permissions.errors import ApiError
 from agent_permissions.models import UserCreate
 from agent_permissions.service import UserService
+from agent_permissions.storage import DatabaseBackend
 
 INITIAL_ADMIN_PASSWORD = "12345"
 
@@ -34,6 +35,7 @@ def main(
         "--prompt-password", action="store_true", help="交互式设置自定义初始密码"
     )
     args = parser.parse_args(argv)
+    database: DatabaseBackend | None = None
     try:
         password = INITIAL_ADMIN_PASSWORD
         if args.prompt_password:
@@ -52,6 +54,7 @@ def main(
         )
         settings = Settings.from_env(args.env_file)
         database = create_database(settings)
+        database.open()
         database.initialize()
         user = UserService(database, settings).bootstrap_admin(payload)
         print(f"已创建管理员 {user['username']}，可直接登录管理后台。")
@@ -62,10 +65,13 @@ def main(
             print(detail["msg"])
     except ApiError as error:
         print(error.message)
-    except (sqlite3.Error, psycopg.Error, OSError, ValueError):
+    except (sqlite3.Error, psycopg.Error, OSError, ValueError, RuntimeError):
         print("初始化失败，请检查配置和数据库访问权限。")
     except (EOFError, KeyboardInterrupt):
         print("已取消初始化。")
+    finally:
+        if database is not None:
+            database.close()
     return 1
 
 

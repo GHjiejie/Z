@@ -1,23 +1,23 @@
 # 数据库连接池改造方案
 
-- 文档状态：待评审，尚未实施。
+- 文档状态：已按本方案实施；实现与验收记录见[连接池验证报告](connection-pool-validation.md)。
 - 编写日期：2026-11-13。
 - 适用模块：`agent_permissions` 用户管理与 RBAC 后台。
-- 代码基线：`b5f49e0`，已支持 PostgreSQL 18 与 SQLite。
+- 改造前代码基线：`b5f49e0`，已支持 PostgreSQL 18 与 SQLite。下文“改造前行为”用于说明原始约束。
 
 ## 1. 建议结论
 
 为 PostgreSQL 接入同步 `psycopg_pool.ConnectionPool`，每个 API worker 独立持有一个连接池，业务事务从池中借用连接，完成后归还。继续复用当前 `PostgresConnection`、`Result` 和 `DatabaseBackend` SQL 边界。
 
-本稿建议每个 worker 以 **最小 2、最大 10 条连接，借用等待 3 秒、最多 20 个等待者**作为起步配置。它们是待实施的初始参数，不是当前已生效的配置，也不是经过压测确认的容量。
+每个 worker 默认使用 **最小 2、最大 10 条连接，借用等待 3 秒、最多 20 个等待者**。这些参数已经生效，本地压测验证了连接复用与容量上限；40 并发时出现队列过载，因此它们仍是需要按目标负载调整的起步配置。
 
 SQLite 保留现有的短连接模式，作为本地运行和离线测试后端；补齐统一生命周期接口。连接池不能改变 SQLite 的写入串行特性，池化还会引入跨线程连接管理，本轮将资源复用集中在当前 PostgreSQL 服务端连接上。
 
 预期收益是减少 PostgreSQL 建连与认证开销、限制每个进程的数据库连接数，并为连接等待和过载提供明确边界。实际延迟与吞吐收益在实施后的相同负载压测中确认。
 
-## 2. 当前实现与约束
+## 2. 改造前实现与约束
 
-| 位置 | 当前行为 | 改造要求 |
+| 位置 | 改造前行为 | 改造要求 |
 | --- | --- | --- |
 | [postgres.py](../postgres.py) `PostgresDatabase.connect()` | 每次调用 `psycopg.connect()`，上下文退出后关闭连接 | 改为借用、归还池中连接 |
 | [postgres.py](../postgres.py) `transaction()` | 读事务使用只读 `REPEATABLE READ`；写事务先取得统一事务级 advisory lock | 保留隔离级别、写锁顺序和提交、回滚语义 |
@@ -26,7 +26,7 @@ SQLite 保留现有的短连接模式，作为本地运行和离线测试后端�
 | [service.py](../service.py) 登录、改密和失败审计 | 一个请求可能依次执行多个独立事务 | 每个事务独立借还，保持各自提交边界 |
 | [__main__.py](../__main__.py)、[migrate_postgres.py](../migrate_postgres.py) | 一次性工具直接创建数据库适配器 | 工具也需要显式关闭自己的池 |
 
-当前根环境安装 `psycopg 3.3.6`，`pyproject.toml` 声明 `psycopg[binary]>=3.2,<4`；环境和 `uv.lock` 均没有 `psycopg-pool`。实施时需在根依赖中增加 `psycopg-pool>=3.2,<4`，由 `uv` 解析兼容版本并更新根锁文件、复用根 `.venv`。驱动与池是独立发行包，见 [Psycopg 官方连接池说明](https://www.psycopg.org/psycopg3/docs/advanced/pool.html)。
+根环境使用 `psycopg 3.3.6`，`pyproject.toml` 声明 `psycopg[binary]>=3.2,<4`。本次已增加 `psycopg-pool>=3.2,<4`，由 `uv` 锁定为 `3.3.3`，复用根 `.venv`。驱动与池是独立发行包，见 [Psycopg 官方连接池说明](https://www.psycopg.org/psycopg3/docs/advanced/pool.html)。
 
 ## 3. 生命周期与资源归属
 
@@ -38,7 +38,7 @@ SQLite 保留现有的短连接模式，作为本地运行和离线测试后端�
 
 物理连接与用户登录会话没有一对一关系。连接轮换或应用正常重启不主动撤销持久化会话，用户仍通过原令牌在新的数据库连接上完成当前身份与权限校验。
 
-数据库协议拟增加以下同步方法，方法名和行为在实施时保持统一：
+数据库协议已经增加以下同步方法，方法名和行为保持统一：
 
 | 方法 | PostgreSQL | SQLite |
 | --- | --- | --- |
@@ -52,7 +52,7 @@ SQLite 保留现有的短连接模式，作为本地运行和离线测试后端�
 
 ### 3.2 FastAPI 启停
 
-拟采用以下生命周期顺序；这是设计草图，不是已经接入的实现：
+已接入以下生命周期顺序：
 
 ```text
 进入 lifespan
@@ -113,9 +113,9 @@ SQLite 保留现有的短连接模式，作为本地运行和离线测试后端�
 
 ## 5. 配置建议与容量预算
 
-### 5.1 拟议配置
+### 5.1 已实施配置
 
-以下环境变量均为本次方案拟新增项，作用于 PostgreSQL 后端，单位已经写入名称：
+以下环境变量均已新增，作用于 PostgreSQL 后端，单位已经写入名称：
 
 | 环境变量 | 建议默认值 | 用途 |
 | --- | ---: | --- |
@@ -141,7 +141,7 @@ SQLite 保留现有的短连接模式，作为本地运行和离线测试后端�
 
 现有物理建连 `connect_timeout=10`、事务锁超时 10 秒和单条 SQL 超时 30 秒保持原有值。池预热超时只覆盖预热等待，不等同于整个应用初始化超时；schema 初始化仍受其事务和 SQL 规则约束。
 
-示例为实施后可加入部署配置的非敏感参数；保留原数据库连接串即可：
+部署配置可以覆盖以下非敏感参数；保留原数据库连接串即可：
 
 ```dotenv
 AGENT_USERS_DB_POOL_MIN_SIZE=2
@@ -189,7 +189,7 @@ API 预算 + CLI/迁移池预算 + 其他客户端预算
 
 当前 `error_response()` 会调用 `record_failure()`，后者再次申请数据库事务。若首次错误来自池耗尽或连接不可用，再走同一条路径会重复等待。
 
-拟将明确的池可用性错误和建连类错误直接记录为结构化应用日志，跳过数据库失败审计的第二次借用。日志仅包含 `request_id`、动作、故障类别、worker 和可用池指标；不打印数据库 URL、密码、令牌或异常原文。其他业务拒绝仍沿用独立失败审计；成功变更及其审计继续原子提交。
+明确的池可用性错误和建连类错误已改为直接记录结构化应用日志，跳过数据库失败审计的第二次借用。日志仅包含 `request_id`、动作、故障类别、worker 和可用池指标；不打印数据库 URL、密码、令牌或异常原文。其他业务拒绝仍沿用独立失败审计；成功变更及其审计继续原子提交。
 
 具体在仍持有原异常的 `persistence_error()` 中识别池异常，以及经异常来源、连接状态或 SQLSTATE 确认的连接故障，再通过 `error_response()` 的显式审计开关控制是否调用 `record_failure()`。不能把所有 `OperationalError` 都直接等同于连接不可用，也不能在统一包装成 `ApiError` 后才尝试还原故障类别。
 
@@ -220,9 +220,9 @@ API 预算 + CLI/迁移池预算 + 其他客户端预算
 
 统计按进程标记，不包含用户、密码和连接串。本期先提供内部采集与受控日志，不为池状态新增公开业务接口。若接入现有监控系统，再沿用该系统的指标出口。
 
-## 8. 预计修改文件
+## 8. 实施文件
 
-| 文件 | 预计改动 |
+| 文件 | 改动 |
 | --- | --- |
 | 根 `pyproject.toml`、`uv.lock` | 增加并锁定 `psycopg-pool` 依赖 |
 | `agent_permissions/config.py` | 池参数、浮点解析、交叉校验 |
@@ -230,18 +230,18 @@ API 预算 + CLI/迁移池预算 + 其他客户端预算
 | `agent_permissions/postgres.py` | 池的创建、借还、游标清理、关闭与统计 |
 | `agent_permissions/database.py` | SQLite 生命周期兼容及工厂传递配置 |
 | `agent_permissions/api.py` | lifespan 完整清理及池故障错误边界 |
-| `agent_permissions/service.py` | 池可用性故障的失败审计降级，保留业务事务 |
+| 新增 `agent_permissions/database_errors.py` | 分类池故障与连接故障；失败审计降级在 API 错误边界完成，`service.py` 事务保持不变 |
 | `agent_permissions/__main__.py` | 管理员初始化工具的资源归属 |
 | `agent_permissions/migrate_postgres.py` | 迁移 CLI 的目标池生命周期 |
 | `agent_permissions/test_postgres.py` | 直接构造适配器与测试清理适配 |
-| 拟新增 `agent_permissions/test_connection_pool.py` | 池复用、过载、故障和生命周期测试 |
+| 新增 `agent_permissions/test_connection_pool.py` | 池复用、过载、故障和生命周期测试 |
 | `agent_permissions/deploy/.env.example` 与运行文档 | 参数示例、容量预算和运维说明 |
 
 沿用现有 21 个业务接口、前端交互、RBAC schema 2 和数据源选择规则。此次池化不要求重新导入数据或重新初始化管理员。
 
 ## 9. 验证与验收
 
-以下是实施阶段需要执行的验证，本轮方案编写未进行池化实现或池性能测试。
+以下为本次改造的验收标准；执行结果、测试范围与本地压测限制见[连接池验证报告](connection-pool-validation.md)。
 
 | 场景 | 方法与通过条件 |
 | --- | --- |

@@ -107,7 +107,9 @@ uv run python -m agent_permissions init-admin --username admin
 uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-proxy-headers
 ```
 
-所有时间和次数配置必须为正整数。代码不自动读取仓库其他模块的 `.env`；通过 Uvicorn 或管理员命令的 `--env-file` 显式载入本模块部署配置。管理员初始化默认使用密码 `12345`，仅在空数据库中生效；已有用户的密码不会在初始化或服务启动时被覆盖。
+会话、限流的时间和次数必须为正整数。PostgreSQL 默认每个 worker 最小 2、最大 10 条连接，等待借用 3 秒、最多 20 个等待者；池的秒数支持有限正浮点数。全部 9 项配置、生命周期及容量预算见[连接池运行说明](docker-database.md#postgresql-连接池)。
+
+代码不自动读取仓库其他模块的 `.env`；通过 Uvicorn 或管理员命令的 `--env-file` 显式载入本模块部署配置。管理员初始化默认使用密码 `12345`，仅在空数据库中生效；已有用户的密码不会在初始化或服务启动时被覆盖。
 
 限流使用持久化固定窗口。进入登录验证流程的请求，不论成功或失败，均计数；改密失败也计数。触发限制后返回 `429` 和 `Retry-After` 秒数，窗口到期后恢复。
 
@@ -116,7 +118,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 6. 验证
 
 ```bash
-uv run python -m unittest agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console -v
+uv run python -m unittest agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
 uv run ruff check agent_permissions
 uv run ruff format --check agent_permissions
 ```
@@ -124,6 +126,8 @@ uv run ruff format --check agent_permissions
 测试使用临时数据库和受控时钟，不需要真实账户，不修改默认数据目录，不调用模型或外部业务服务。
 
 覆盖用户生命周期、首次登录直接访问、主动改密、跨用户越权、非法字段、角色立即生效、会话撤销、限流、版本冲突、并发管理员保护、数据库不可用、审计失败回滚及错误脱敏。
+
+真实 PostgreSQL 回归和连接池测试必须使用专用测试数据库，按[集成验证步骤](docker-database.md#postgresql-集成验证)运行；不能用默认 SQLite 浏览器测试证明连接复用。执行记录和本地对比压测见[连接池验证报告](connection-pool-validation.md)。
 
 前端验证在 Console 目录运行：
 
@@ -153,6 +157,7 @@ npm run test:e2e
 | `api.py` | FastAPI 路由、请求约束、统一响应与错误处理 |
 | `service.py` | 用户业务、事务内鉴权、会话、审计与持久化限流 |
 | `database.py`、`postgres.py`、`storage.py` | 数据库选择、SQLite/PostgreSQL 连接、事务与 SQL 边界 |
+| `database_errors.py`、`test_connection_pool.py` | 连接可用性分类及连接池生命周期、过载和故障测试 |
 | `migrate_postgres.py` | SQLite 快照、整批迁移、行数及摘要校验 |
 | `deploy/compose.yaml`、`setup_postgres.py` | Docker PostgreSQL 与本地私有连接配置 |
 | `models.py` | 请求与响应字段、输入校验 |

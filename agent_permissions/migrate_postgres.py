@@ -12,8 +12,8 @@ from typing import Any
 from uuid import uuid4
 
 import psycopg
-from dotenv import dotenv_values
 
+from agent_permissions.config import Settings
 from agent_permissions.postgres import PostgresDatabase
 
 TABLE_COLUMNS = {
@@ -155,22 +155,26 @@ def main(argv: list[str] | None = None) -> int:
         "--env-file", type=Path, default=Path(__file__).parent / "deploy/.env"
     )
     args = parser.parse_args(argv)
-    database_url = os.getenv("AGENT_USERS_DATABASE_URL") or dotenv_values(
-        args.env_file
-    ).get("AGENT_USERS_DATABASE_URL")
-    if not database_url:
-        print("缺少 AGENT_USERS_DATABASE_URL，请先生成部署配置")
-        return 1
+    target: PostgresDatabase | None = None
     try:
-        report = migrate(args.source, PostgresDatabase(database_url))
+        settings = Settings.from_env(args.env_file if args.env_file.is_file() else None)
+        if not settings.database_url:
+            print("缺少 AGENT_USERS_DATABASE_URL，请先生成部署配置")
+            return 1
+        target = PostgresDatabase(settings.database_url, settings=settings)
+        target.open()
+        report = migrate(args.source, target)
     except ValueError as error:
         print(str(error))
         return 1
-    except (sqlite3.Error, psycopg.Error, OSError):
+    except (sqlite3.Error, psycopg.Error, OSError, RuntimeError):
         print(
             "迁移失败，原 SQLite 和已生成的备份保留；请检查数据库连接、字段内容和文件访问权限"
         )
         return 1
+    finally:
+        if target is not None:
+            target.close()
     encoded = json.dumps(report, ensure_ascii=False, indent=2)
     print(encoded)
     manifest = Path(report["backup"]).with_suffix(".migration.json")

@@ -94,6 +94,15 @@ class Database:
     def __init__(self, path: Path) -> None:
         self.path = path
 
+    def open(self) -> None:
+        """SQLite connections remain scoped to individual transactions."""
+
+    def close(self) -> None:
+        """There are no long-lived SQLite connections to release."""
+
+    def pool_stats(self) -> dict[str, int]:
+        return {}
+
     def initialize(self) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         self.path.touch(mode=0o600, exist_ok=True)
@@ -203,5 +212,5 @@ def create_database(settings: Settings) -> DatabaseBackend:
     if settings.database_url:
         from agent_permissions.postgres import PostgresDatabase
 
-        return PostgresDatabase(settings.database_url)
+        return PostgresDatabase(settings.database_url, settings=settings)
     return Database(settings.database_path)

@@ -1,5 +1,7 @@
 """FastAPI routes and transport-only contract enforcement."""
 
+import logging
+import os
 import sqlite3
 from collections import Counter
 from collections.abc import AsyncIterator, Awaitable, Callable
@@ -21,6 +23,7 @@ from starlette.responses import JSONResponse
 from agent_permissions.config import Settings
 from agent_permissions.console_ui import mount_console
 from agent_permissions.database import create_database
+from agent_permissions.database_errors import connection_failure_reason
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
     Envelope,
@@ -51,6 +54,8 @@ from agent_permissions.service import (
     UserService,
     utc_now,
 )
+
+logger = logging.getLogger(__name__)
 
 
 class ContractRoute(APIRoute):
@@ -420,10 +425,12 @@ def delete_role(
     return Response(status_code=204)
 
 
-def error_response(request: Request, error: ApiError) -> JSONResponse:
+def error_response(
+    request: Request, error: ApiError, *, audit_failure: bool = True
+) -> JSONResponse:
     info = request.state.info
     route = request.scope.get("route")
-    if route and getattr(route, "path", "").startswith("/api/v1/"):
+    if audit_failure and route and getattr(route, "path", "").startswith("/api/v1/"):
         request.app.state.service.record_failure(
             info,
             route.name,
@@ -464,8 +471,12 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-        await run_in_threadpool(database.initialize)
-        yield
+        try:
+            await run_in_threadpool(database.open)
+            await run_in_threadpool(database.initialize)
+            yield
+        finally:
+            await run_in_threadpool(database.close)
 
     app = FastAPI(
         title="Agent 用户管理服务",
@@ -522,9 +533,25 @@ def create_app(
     def persistence_error(
         request: Request, error: sqlite3.Error | psycopg.Error
     ) -> JSONResponse:
+        reason = connection_failure_reason(error)
+        if reason:
+            route = request.scope.get("route")
+            logger.error(
+                "Database request unavailable reason=%s request_id=%s",
+                reason,
+                request.state.info.request_id,
+                extra={
+                    "db_reason": reason,
+                    "request_id": request.state.info.request_id,
+                    "action": getattr(route, "name", "unknown"),
+                    "worker_pid": os.getpid(),
+                    "pool_stats": database.pool_stats(),
+                },
+            )
         return error_response(
             request,
             ApiError(503, "SERVICE_UNAVAILABLE", "暂时无法完成请求，请稍后重试"),
+            audit_failure=reason is None,
         )
 
     @app.exception_handler(HTTPException)
