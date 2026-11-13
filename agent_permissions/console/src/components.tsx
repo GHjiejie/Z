@@ -19,7 +19,7 @@ import {
   ShieldCheck,
   X,
 } from "lucide-react";
-import { ApiError, errorMessage, type User } from "./api";
+import { ApiError, errorMessage, type RoleOption, type User } from "./api";
 
 export function Brand({ compact = false }: { compact?: boolean }) {
   return (
@@ -60,12 +60,26 @@ export function Avatar({
     </span>
   );
 }
-export function RoleBadge({ admin }: { admin: boolean }) {
+export function roleLabel(code: string): string {
+  return code === "admin" ? "管理员" : code === "member" ? "普通用户" : code;
+}
+export function RoleBadge({
+  roles,
+  definitions = [],
+}: {
+  roles: string[];
+  definitions?: RoleOption[];
+}) {
   return (
-    <span className={`role-badge${admin ? " role-admin" : ""}`}>
-      {admin && <ShieldCheck size={16} aria-hidden="true" />}
-      {admin ? "管理员" : "普通用户"}
-    </span>
+    <div className="role-badges">
+      {roles.map((code) => (
+        <span className="role-badge" key={code} title={code}>
+          {code === "admin" && <ShieldCheck size={16} aria-hidden="true" />}
+          {definitions.find((value) => value.code === code)?.display_name ||
+            roleLabel(code)}
+        </span>
+      ))}
+    </div>
   );
 }
 export function StatusBadge({ status }: { status: User["status"] }) {
@@ -439,7 +453,11 @@ export const permissionLabels: Record<string, string> = {
   "user.delete": "删除用户",
   "user.status.update": "启用或禁用用户",
   "user.password.reset": "重置用户密码",
-  "user.roles.assign": "查看与分配系统角色",
+  "user.roles.assign": "分配用户角色",
+  "role.read": "查看角色与权限",
+  "role.create": "新增角色",
+  "role.update": "编辑角色及权限",
+  "role.delete": "删除角色",
 };
 export function PermissionList({ permissions }: { permissions: string[] }) {
   return (

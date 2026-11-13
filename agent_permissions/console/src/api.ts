@@ -1,4 +1,4 @@
-export type RoleCode = "admin" | "member";
+export type RoleCode = string;
 export type UserStatus = "active" | "disabled";
 export interface User {
   id: string;
@@ -29,11 +29,37 @@ export interface LoginResult {
   auth_scope: "full";
   user: User;
 }
-export interface RoleDefinition {
+export interface RoleOption {
   code: RoleCode;
   display_name: string;
   description: string;
+}
+export interface RoleDefinition extends RoleOption {
   permissions: string[];
+  built_in: boolean;
+  user_count: number;
+  version: number;
+  created_at: string;
+  updated_at: string;
+}
+export interface RoleRecord {
+  role: RoleDefinition;
+  etag: string;
+}
+export interface RoleDraft {
+  code: string;
+  display_name: string;
+  description: string;
+  permissions: string[];
+}
+export interface PermissionDefinition {
+  code: string;
+  display_name: string;
+  resource: string;
+}
+export interface OwnPermissions {
+  permissions: string[];
+  role_details: RoleOption[];
 }
 export interface UserQuery {
   page: number;
@@ -73,8 +99,30 @@ function strings(value: unknown): string[] {
   return value.map(text);
 }
 function role(value: unknown): RoleCode {
-  if (value !== "admin" && value !== "member") throw new Error("Invalid role");
+  if (typeof value !== "string" || !/^[a-z][a-z0-9_-]{2,63}$/.test(value))
+    throw new Error("Invalid role");
   return value;
+}
+function decodeRoleOption(value: unknown): RoleOption {
+  const data = object(value);
+  return {
+    code: role(data.code),
+    display_name: text(data.display_name),
+    description: text(data.description),
+  };
+}
+function decodeRole(value: unknown): RoleDefinition {
+  const data = object(value);
+  if (typeof data.built_in !== "boolean") throw new Error("Invalid role");
+  return {
+    ...decodeRoleOption(data),
+    permissions: strings(data.permissions),
+    built_in: data.built_in,
+    user_count: number(data.user_count),
+    version: number(data.version),
+    created_at: text(data.created_at),
+    updated_at: text(data.updated_at),
+  };
 }
 function roles(value: unknown): RoleCode[] {
   if (!Array.isArray(value) || value.length === 0)
@@ -123,7 +171,7 @@ export class ApiError extends Error {
 export function errorMessage(error: unknown): string {
   if (error instanceof ApiError) {
     if (error.code === "VERSION_CONFLICT")
-      return "该用户的信息已被其他操作更新，请载入最新信息后再保存";
+      return "该记录的信息已被其他操作更新，请载入最新信息后再保存";
     if (error.code === "RATE_LIMITED")
       return `操作过于频繁，请在 ${error.retryAfter || "稍后几"} 秒后重试。`;
     return error.message;
@@ -187,7 +235,12 @@ export class ApiClient {
       const code =
         typeof failure.code === "string" ? failure.code : "REQUEST_FAILED";
       if (response.status === 401 && path !== "/auth/login") this.onExpired();
-      if (code === "PERMISSION_DENIED") this.onPermissionsChanged();
+      if (
+        code === "PERMISSION_DENIED" &&
+        path !== "/users/me" &&
+        path !== "/users/me/permissions"
+      )
+        this.onPermissionsChanged();
       const details = Array.isArray(failure.details)
         ? failure.details.flatMap((entry: unknown) => {
             if (
@@ -255,25 +308,86 @@ export class ApiClient {
   async me(signal?: AbortSignal): Promise<UserRecord> {
     return this.record(await this.send("/users/me", { signal }));
   }
-  async permissions(signal?: AbortSignal): Promise<string[]> {
+  async permissions(signal?: AbortSignal): Promise<OwnPermissions> {
     const result = await this.send("/users/me/permissions", { signal });
-    return this.decode(result.data, (value) =>
-      strings(object(value).permissions),
-    );
+    return this.decode(result.data, (value) => {
+      const data = object(value);
+      if (!Array.isArray(data.role_details)) throw new Error("Invalid roles");
+      return {
+        permissions: strings(data.permissions),
+        role_details: data.role_details.map(decodeRoleOption),
+      };
+    });
   }
   async roles(signal?: AbortSignal): Promise<RoleDefinition[]> {
     const result = await this.send("/roles", { signal });
     return this.decode(result.data, (value) => {
       if (!Array.isArray(value)) throw new Error("Invalid array");
-      return value.map((entry: unknown) => {
+      return value.map(decodeRole);
+    });
+  }
+  async roleOptions(signal?: AbortSignal): Promise<RoleOption[]> {
+    const result = await this.send("/role-options", { signal });
+    return this.decode(result.data, (value) => {
+      if (!Array.isArray(value)) throw new Error("Invalid roles");
+      return value.map(decodeRoleOption);
+    });
+  }
+  async permissionCatalog(
+    signal?: AbortSignal,
+  ): Promise<PermissionDefinition[]> {
+    const result = await this.send("/permissions", { signal });
+    return this.decode(result.data, (value) => {
+      if (!Array.isArray(value)) throw new Error("Invalid permissions");
+      return value.map((entry) => {
         const data = object(entry);
         return {
-          code: role(data.code),
+          code: text(data.code),
           display_name: text(data.display_name),
-          description: text(data.description),
-          permissions: strings(data.permissions),
+          resource: text(data.resource),
         };
       });
+    });
+  }
+  private roleRecord(result: {
+    data: unknown;
+    etag: string | null;
+  }): RoleRecord {
+    const value = this.decode(result.data, decodeRole);
+    if (!result.etag || !/^"v[1-9][0-9]*"$/.test(result.etag))
+      throw new ApiError("无法读取角色的最新版本，请重试", "INVALID_RESPONSE");
+    return { role: value, etag: result.etag };
+  }
+  async getRole(code: string, signal?: AbortSignal): Promise<RoleRecord> {
+    return this.roleRecord(
+      await this.send(`/roles/${encodeURIComponent(code)}`, { signal }),
+    );
+  }
+  async createRole(draft: RoleDraft): Promise<RoleRecord> {
+    return this.roleRecord(
+      await this.send("/roles", {
+        method: "POST",
+        body: JSON.stringify(draft),
+      }),
+    );
+  }
+  async updateRole(record: RoleRecord, draft: RoleDraft): Promise<RoleRecord> {
+    return this.roleRecord(
+      await this.send(`/roles/${encodeURIComponent(record.role.code)}`, {
+        method: "PATCH",
+        headers: { "If-Match": record.etag },
+        body: JSON.stringify({
+          display_name: draft.display_name,
+          description: draft.description,
+          permissions: draft.permissions,
+        }),
+      }),
+    );
+  }
+  async deleteRole(record: RoleRecord): Promise<void> {
+    await this.send(`/roles/${encodeURIComponent(record.role.code)}`, {
+      method: "DELETE",
+      headers: { "If-Match": record.etag },
     });
   }
   async users(

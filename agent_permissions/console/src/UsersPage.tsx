@@ -17,6 +17,7 @@ import {
   type UserPage,
   type UserQuery,
   type UserRecord,
+  type RoleOption,
 } from "./api";
 import {
   ActionMenu,
@@ -69,8 +70,24 @@ export function UsersPage({
   } | null>(null);
   const [statsError, setStatsError] = useState(false);
   const [dialog, setDialog] = useState<UserDialogState | null>(null);
+  const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
+  const [rolesError, setRolesError] = useState<unknown>(null);
   const refresh = () => setRevision((value) => value + 1);
   const can = (action: string) => permissions.includes(action);
+  useEffect(() => {
+    const controller = new AbortController();
+    setRolesError(null);
+    void api
+      .roleOptions(controller.signal)
+      .then((options) => {
+        if (!controller.signal.aborted) setRoleOptions(options);
+      })
+      .catch((failure) => {
+        if (!aborted(failure) && !controller.signal.aborted)
+          setRolesError(failure);
+      });
+    return () => controller.abort();
+  }, [api, revision]);
   useEffect(() => {
     const timer = window.setTimeout(
       () =>
@@ -277,17 +294,19 @@ export function UsersPage({
               value={query.role}
               onChange={(event) => {
                 const value = event.target.value;
-                if (value === "" || value === "admin" || value === "member")
-                  setQuery((previous) => ({
-                    ...previous,
-                    page: 1,
-                    role: value,
-                  }));
+                setQuery((previous) => ({
+                  ...previous,
+                  page: 1,
+                  role: value,
+                }));
               }}
             >
               <option value="">全部角色</option>
-              <option value="admin">管理员</option>
-              <option value="member">普通用户</option>
+              {roleOptions.map((option) => (
+                <option key={option.code} value={option.code}>
+                  {option.display_name} ({option.code})
+                </option>
+              ))}
             </select>
           </div>
           <select
@@ -340,6 +359,11 @@ export function UsersPage({
           <div className="list-error">
             <ErrorBanner error={error} onRetry={refresh} />
             {page && <small>当前保留上次成功加载的结果。</small>}
+          </div>
+        )}
+        {Boolean(rolesError) && (
+          <div className="list-error">
+            <ErrorBanner error={rolesError} onRetry={refresh} />
           </div>
         )}
         {loading && !page ? (
@@ -398,7 +422,7 @@ export function UsersPage({
                       </div>
                     </td>
                     <td>
-                      <RoleBadge admin={user.roles.includes("admin")} />
+                      <RoleBadge roles={user.roles} definitions={roleOptions} />
                     </td>
                     <td>
                       <StatusBadge status={user.status} />
@@ -522,6 +546,7 @@ export function UsersPage({
         <UserDialog
           state={dialog}
           api={api}
+          permissions={permissions}
           onClose={() => setDialog(null)}
           onSaved={saved}
         />

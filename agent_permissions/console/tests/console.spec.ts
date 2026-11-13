@@ -318,6 +318,196 @@ for (const status of [200, 401]) {
   });
 }
 
+test("可配置 RBAC 完成角色授权、多角色分配、撤销与删除", async ({ page }) => {
+  await login(page);
+  await page.getByRole("link", { name: "角色与权限", exact: true }).click();
+  await page.getByRole("button", { name: "新增角色", exact: true }).click();
+  let dialog = page.getByRole("dialog");
+  await dialog.getByLabel("角色编码", { exact: true }).fill("browser_auditor");
+  await dialog.getByLabel("角色名称", { exact: true }).fill("浏览器审计员");
+  await dialog.getByLabel("角色说明", { exact: true }).fill("只读查看系统用户");
+  await dialog.getByRole("checkbox", { name: /查询系统用户/ }).check();
+  await page.setViewportSize({ width: 390, height: 844 });
+  expect(
+    await dialog.evaluate(
+      (element) => element.scrollWidth <= element.clientWidth,
+    ),
+  ).toBe(true);
+  await page.screenshot({
+    path: "test-results/console-rbac-role-dialog.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await dialog.getByRole("button", { name: "创建角色", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  const card = page.getByRole("region", {
+    name: "角色：浏览器审计员",
+    exact: true,
+  });
+  await expect(card).toContainText("4 项权限");
+  await page.screenshot({
+    path: "test-results/console-rbac-roles.png",
+    fullPage: true,
+    animations: "disabled",
+  });
+  await page.getByRole("link", { name: "用户管理", exact: true }).click();
+  await page.getByRole("button", { name: "新增用户", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByLabel("用户名", { exact: true }).fill("rbac_browser");
+  await dialog.getByLabel("展示名称", { exact: true }).fill("审计用户");
+  await dialog.getByLabel("初始密码", { exact: true }).fill("12345");
+  await dialog.getByRole("checkbox", { name: /浏览器审计员/ }).check();
+  await dialog.getByRole("button", { name: "创建用户", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await page.getByRole("textbox", { name: "搜索用户" }).fill("rbac_browser");
+  const row = page.getByRole("row").filter({ hasText: "rbac_browser" });
+  await expect(row).toContainText("浏览器审计员");
+  await expect(row).toContainText("普通用户");
+  await page.getByLabel("角色筛选").selectOption("browser_auditor");
+  await expect(row).toBeVisible();
+  const reader = await page.context().newPage();
+  await login(reader, "rbac_browser", "12345");
+  await expect(
+    reader.getByRole("heading", { name: "用户管理", exact: true }),
+  ).toBeVisible();
+  await expect(
+    reader.getByRole("button", { name: "新增用户", exact: true }),
+  ).toHaveCount(0);
+  await expect(reader.getByRole("button", { name: /编辑用户：/ })).toHaveCount(
+    0,
+  );
+  await expect(
+    reader.getByRole("link", { name: "角色与权限", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("link", { name: "角色与权限", exact: true }).click();
+  await expect(
+    card.getByRole("button", { name: "删除角色", exact: true }),
+  ).toBeDisabled();
+  await card.getByRole("button", { name: "编辑角色", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByRole("checkbox", { name: /查询系统用户/ }).uncheck();
+  await dialog.getByRole("button", { name: "保存角色", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await reader.evaluate(() => window.dispatchEvent(new Event("focus")));
+  await expect(
+    reader.getByRole("heading", { name: "个人设置", exact: true }),
+  ).toBeVisible();
+  await expect(
+    reader.getByRole("link", { name: "用户管理", exact: true }),
+  ).toHaveCount(0);
+  await reader.close();
+  await page.getByRole("link", { name: "用户管理", exact: true }).click();
+  await page.getByRole("textbox", { name: "搜索用户" }).fill("rbac_browser");
+  await row.getByRole("button", { name: "更多操作：rbac_browser" }).click();
+  await page.getByRole("menuitem", { name: "设置角色", exact: true }).click();
+  dialog = page.getByRole("dialog");
+  await dialog.getByRole("checkbox", { name: /浏览器审计员/ }).uncheck();
+  await dialog.getByRole("button", { name: "保存更改", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await page.getByRole("link", { name: "角色与权限", exact: true }).click();
+  await expect(
+    card.getByRole("button", { name: "删除角色", exact: true }),
+  ).toBeEnabled();
+  await card.getByRole("button", { name: "删除角色", exact: true }).click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "确认删除", exact: true })
+    .click();
+  await expect(card).toHaveCount(0);
+});
+
+test("角色编辑冲突保留草稿，并支持主动载入最新定义", async ({ page }) => {
+  await login(page);
+  await page.getByRole("link", { name: "角色与权限", exact: true }).click();
+  await page.getByRole("button", { name: "新增角色", exact: true }).click();
+  const dialog = page.getByRole("dialog");
+  await dialog
+    .getByLabel("角色编码", { exact: true })
+    .fill("browser_conflict_role");
+  await dialog.getByLabel("角色名称", { exact: true }).fill("待编辑角色");
+  await dialog.getByRole("button", { name: "创建角色", exact: true }).click();
+  await expect(dialog).not.toBeVisible();
+  await page
+    .getByRole("region", { name: "角色：待编辑角色", exact: true })
+    .getByRole("button", { name: "编辑角色", exact: true })
+    .click();
+  await dialog.getByLabel("角色名称", { exact: true }).fill("角色草稿");
+  const loginResponse = await page.request.post("/api/v1/auth/login", {
+    data: { username: "console_admin", password: adminPassword },
+  });
+  const token = (await loginResponse.json()).data.session_token;
+  const headers = { Authorization: `Bearer ${token}` };
+  const current = await page.request.get(
+    "/api/v1/roles/browser_conflict_role",
+    { headers },
+  );
+  const etag = current.headers().etag;
+  if (!etag) throw new Error("角色详情缺少 ETag");
+  const updated = await page.request.patch(
+    "/api/v1/roles/browser_conflict_role",
+    {
+      headers: { ...headers, "If-Match": etag },
+      data: { display_name: "其他管理员更新的角色" },
+    },
+  );
+  expect(updated.ok()).toBe(true);
+  await dialog.getByRole("button", { name: "保存角色", exact: true }).click();
+  await expect(dialog.getByRole("alert")).toContainText("信息已被其他操作更新");
+  await expect(dialog.getByLabel("角色名称", { exact: true })).toHaveValue(
+    "角色草稿",
+  );
+  await dialog
+    .getByRole("button", { name: "载入最新信息", exact: true })
+    .click();
+  await expect(dialog.getByLabel("角色名称", { exact: true })).toHaveValue(
+    "其他管理员更新的角色",
+  );
+  await page.keyboard.press("Escape");
+  await expect(dialog).not.toBeVisible();
+});
+
+test("没有 Console 基础权限的角色显示拒绝状态且不循环刷新", async ({
+  page,
+}) => {
+  const auth = await page.request.post("/api/v1/auth/login", {
+    data: { username: "console_admin", password: adminPassword },
+  });
+  const headers = {
+    Authorization: `Bearer ${(await auth.json()).data.session_token}`,
+  };
+  const role = await page.request.post("/api/v1/roles", {
+    headers,
+    data: {
+      code: "browser_no_access",
+      display_name: "无访问权限",
+      permissions: [],
+    },
+  });
+  expect(role.ok()).toBe(true);
+  const user = await page.request.post("/api/v1/users", {
+    headers,
+    data: {
+      username: "browser_no_access",
+      display_name: "无权限用户",
+      password: "12345",
+      roles: ["browser_no_access"],
+    },
+  });
+  expect(user.ok()).toBe(true);
+  let identityReads = 0;
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/v1/users/me")
+      identityReads += 1;
+  });
+  await login(page, "browser_no_access", "12345");
+  await expect(
+    page.getByRole("button", { name: "返回登录", exact: true }),
+  ).toBeVisible();
+  await expect(page.getByRole("alert")).toContainText("没有执行该操作的权限");
+  expect(identityReads).toBe(1);
+});
+
 test("桌面与窄屏布局，以及表单的键盘取消", async ({ page }) => {
   const errors: string[] = [];
   page.on("pageerror", (error) => errors.push(error.message));

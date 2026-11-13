@@ -16,7 +16,7 @@ from pydantic import (
     model_validator,
 )
 
-Role = Literal["admin", "member"]
+Role = Annotated[StrictStr, Field(pattern=r"^[a-z][a-z0-9_-]{2,63}$")]
 Status = Literal["active", "disabled"]
 
 
@@ -50,6 +50,16 @@ def normalized_email(value: object) -> object:
     return value
 
 
+def normalized_description(value: object) -> str:
+    if not isinstance(value, str):
+        raise ValueError("角色说明必须是字符串")  # noqa: TRY004 -- Pydantic requires ValueError
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError:
+        raise ValueError("角色说明必须是有效的 Unicode 文本") from None
+    return value
+
+
 def password_text(value: object) -> str:
     if isinstance(value, SecretStr):
         value = value.get_secret_value()
@@ -66,6 +76,9 @@ Username = Annotated[str, BeforeValidator(normalized_username)]
 DisplayName = Annotated[str, BeforeValidator(normalized_name)]
 ContactEmail = Annotated[EmailStr | None, BeforeValidator(normalized_email)]
 Password = Annotated[SecretStr, Field(min_length=1), BeforeValidator(password_text)]
+Description = Annotated[
+    str, Field(max_length=500), BeforeValidator(normalized_description)
+]
 
 
 class StrictModel(BaseModel):
@@ -175,6 +188,7 @@ class OwnPermissions(StrictModel):
     user_id: str
     roles: list[Role]
     permissions: list[str]
+    role_details: list["RoleOption"]
 
 
 class RoleDefinition(StrictModel):
@@ -182,6 +196,51 @@ class RoleDefinition(StrictModel):
     display_name: str
     description: str
     permissions: list[str]
+    built_in: bool
+    user_count: int
+    version: int
+    created_at: datetime
+    updated_at: datetime
+
+
+class RoleOption(StrictModel):
+    code: Role
+    display_name: str
+    description: str
+
+
+class PermissionDefinition(StrictModel):
+    code: str
+    display_name: str
+    resource: str
+
+
+class RoleCreate(StrictModel):
+    code: Role
+    display_name: DisplayName
+    description: Description = ""
+    permissions: list[StrictStr] = Field(default_factory=list, max_length=128)
+
+    @field_validator("permissions")
+    @classmethod
+    def unique_permissions(cls, permissions: list[str]) -> list[str]:
+        return sorted(set(permissions))
+
+
+class RoleUpdate(StrictModel):
+    display_name: DisplayName | None = None
+    description: Description | None = None
+    permissions: list[StrictStr] | None = Field(default=None, max_length=128)
+
+    @model_validator(mode="after")
+    def valid_update(self) -> "RoleUpdate":
+        if not self.model_fields_set or any(
+            getattr(self, field) is None for field in self.model_fields_set
+        ):
+            raise ValueError("至少提交一个非空的角色字段，不允许 null")
+        if self.permissions is not None:
+            self.permissions = sorted(set(self.permissions))
+        return self
 
 
 class ErrorDetail(StrictModel):

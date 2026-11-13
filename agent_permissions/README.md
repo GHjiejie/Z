@@ -2,10 +2,11 @@
 
 本目录用于设计和实现 Agent 代表当前用户执行操作时的权限控制。
 
-当前已实现 Python + FastAPI 用户管理服务，包含 15 个接口，以及对应的 Console 后台 UI；后续章节中的 Agent 业务授权仍为架构规划。
+当前已实现 Python + FastAPI 用户管理服务，包含 21 个接口，以及对应的 Console 后台 UI；后续章节中的 Agent 业务授权仍为架构规划。
 
-当前阶段的用户管理服务使用系统角色 `admin`、`member`，默认通过 SQLite 持久化数据。
+用户权限采用可配置 RBAC：用户绑定多个角色，角色绑定操作权限；内置 `admin`、`member` 并支持自定义角色。账号及授权关联通过 SQLite 持久化。
 
+- [可配置 RBAC](docs/rbac.md)：数据模型、角色管理接口、授权边界和旧数据库迁移。
 - [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、登录、配置与测试。
 - [Console 页面说明](console/README.md)：登录、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。
 - [用户管理服务接口文档](docs/user-management-api.md)：当前阶段的登录、用户管理、改密、角色、错误响应和并发控制契约。
@@ -221,7 +222,8 @@ agent_permissions/
   config.py             # 环境变量与默认配置
   database.py           # SQLite schema 和事务
   models.py             # 用户管理请求、响应与校验
-  permissions.py        # 系统角色到动作权限的映射
+  permissions.py        # 权限目录和角色授权查询
+  rbac.py               # 角色定义及多对多关联
   service.py            # 用户、会话、授权、审计与限流
   security.py           # 密码与会话凭据处理
   console_ui.py         # 同源托管 Console 构建产物

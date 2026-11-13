@@ -1,5 +1,11 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { aborted, ApiClient, type UserRecord } from "./api";
+import {
+  aborted,
+  ApiClient,
+  ApiError,
+  type RoleOption,
+  type UserRecord,
+} from "./api";
 
 const STORAGE_KEY = "agent-console-session";
 function readToken(): string | null {
@@ -23,6 +29,7 @@ export function useSession() {
   const currentToken = useRef(token);
   const [record, setRecord] = useState<UserRecord | null>(null);
   const [permissions, setPermissions] = useState<string[]>([]);
+  const [roles, setRoles] = useState<RoleOption[]>([]);
   const [loading, setLoading] = useState(Boolean(token));
   const [error, setError] = useState<unknown>(null);
   const [notice, setNotice] = useState("");
@@ -34,6 +41,7 @@ export function useSession() {
     setToken(null);
     setRecord(null);
     setPermissions([]);
+    setRoles([]);
     setLoading(false);
     setError(null);
     setNotice(message);
@@ -60,11 +68,20 @@ export function useSession() {
         const granted = await api.permissions(controller.signal);
         if (!controller.signal.aborted) {
           setRecord(current);
-          setPermissions(granted);
+          setPermissions(granted.permissions);
+          setRoles(granted.role_details);
           setLoading(false);
         }
       } catch (failure) {
         if (!aborted(failure) && !controller.signal.aborted) {
+          if (
+            failure instanceof ApiError &&
+            failure.code === "PERMISSION_DENIED"
+          ) {
+            setRecord(null);
+            setPermissions([]);
+            setRoles([]);
+          }
           setError(failure);
           setLoading(false);
         }
@@ -88,6 +105,7 @@ export function useSession() {
       storeToken(result.session_token);
       setRecord(null);
       setPermissions([]);
+      setRoles([]);
       setError(null);
       setNotice("");
       setLoading(true);
@@ -101,6 +119,7 @@ export function useSession() {
     token,
     record,
     permissions,
+    roles,
     loading,
     error,
     notice,

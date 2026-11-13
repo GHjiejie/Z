@@ -24,9 +24,11 @@
 
 用户可以拥有一个或多个已定义的角色，动作权限取各角色权限的并集。角色列表必须非空，重复角色去重并按代码升序返回。
 
-第一版角色定义固定，通过接口查询并分配；多租户、开放注册、邮箱找回密码、自定义角色编辑和 Agent 工具接口不在本契约范围内。
+角色采用可配置 RBAC，支持新增角色、编辑权限及用户多角色分配。内置 `admin` 受保护；`member` 的默认权限可以编辑。多租户、开放注册、邮箱找回密码和 Agent 工具接口不在本契约范围内。完整模型和新增接口见 [RBAC 说明](rbac.md)。
 
 ### 1.1 权限代码
+
+下表表示内置角色的初始授权，实际权限以当前数据库中的角色配置为准。
 
 | 权限 | 含义 | `member` | `admin` |
 | --- | --- | --- | --- |
@@ -39,7 +41,11 @@
 | `user.delete` | 删除用户 | 无 | 有 |
 | `user.status.update` | 启用、禁用用户 | 无 | 有 |
 | `user.password.reset` | 重置其他用户的密码 | 无 | 有 |
-| `user.roles.assign` | 查询可分配角色、设置用户角色 | 无 | 有 |
+| `user.roles.assign` | 设置用户角色 | 无 | 有 |
+| `role.read` | 查看角色定义与权限目录 | 无 | 有 |
+| `role.create` | 新增角色 | 无 | 有 |
+| `role.update` | 编辑角色及权限 | 无 | 有 |
+| `role.delete` | 删除自定义角色 | 无 | 有 |
 
 接口按具体权限鉴权，后端根据用户当前角色解析权限。客户端传入的用户 ID、角色或权限声明不能替代登录身份。
 
@@ -165,7 +171,13 @@ If-Match: "v3"
 | API-12 | `PUT` | `/api/v1/users/{user_id}/status` | 启用、禁用用户 | `user.status.update` | `200` |
 | API-13 | `PUT` | `/api/v1/users/{user_id}/password` | 管理员重置密码 | `user.password.reset` | `204` |
 | API-14 | `PUT` | `/api/v1/users/{user_id}/roles` | 设置用户角色 | `user.roles.assign` | `200` |
-| API-15 | `GET` | `/api/v1/roles` | 查询可分配角色 | `user.roles.assign` | `200` |
+| API-15 | `GET` | `/api/v1/roles` | 查询角色及权限 | `role.read` | `200` |
+| API-16 | `GET` | `/api/v1/role-options` | 用户表单可选角色 | `user.read` / `user.create` / `user.roles.assign` / `role.read` 任一 | `200` |
+| API-17 | `GET` | `/api/v1/permissions` | 查询操作权限目录 | `role.read` | `200` |
+| API-18 | `POST` | `/api/v1/roles` | 新增角色并绑定权限 | `role.create` | `201` |
+| API-19 | `GET` | `/api/v1/roles/{role_code}` | 查询角色详情与版本 | `role.read` | `200` |
+| API-20 | `PATCH` | `/api/v1/roles/{role_code}` | 编辑角色及权限 | `role.update` | `200` |
+| API-21 | `DELETE` | `/api/v1/roles/{role_code}` | 删除未使用的自定义角色 | `role.delete` | `204` |
 
 除登录外均需有效会话，并逐次校验当前角色权限。首次登录及管理员重置密码后可直接访问有权限的接口。静态路径 `/users/me` 及其子路径应与动态用户 ID 路由明确区分。
 
@@ -196,7 +208,7 @@ If-Match: "v3"
 | `username` | 去除首尾空格并转为小写；3～64 字符；只允许 ASCII 字母、数字、`.`、`_`、`-`；归一化后全系统唯一，含已删除账号 |
 | `display_name` | 去除首尾空格后为 1～100 字符；不能为空或 `null` |
 | `email` | 可省略或为 `null`；非空时去除首尾空格并验证邮箱格式，最长 254 字符；本版仅作为联系信息，不要求唯一 |
-| `roles` | 创建时可省略，默认 `["member"]`；显式传入时必须非空，元素仅为 `admin`、`member`；`null` 和未知角色返回 `422` |
+| `roles` | 创建时可省略，默认 `["member"]`；显式传入时必须非空，元素为已存在的角色编码（3～64 位小写字母、数字、下划线或连字符，字母开头）；`null` 和未知角色返回 `422` |
 | 新密码 | 必填的非空 Unicode 字符串；不限制长度、字符组合或弱密码，允许与当前密码相同；不裁剪空格、不静默截断 |
 | 登录密码、旧密码 | 必填的非空 Unicode 字符串，按原始输入核验，不限制长度 |
 | `status` | 只接受小写 `active`、`disabled` |
@@ -438,7 +450,7 @@ Authorization: Bearer <session_token>
 | `page_size` | integer | 否 | `20` | 1～100 |
 | `q` | string | 否 | 无 | 最长 100 字符；去除首尾空格，空字符串按未筛选处理 |
 | `status` | string | 否 | 无 | `active`、`disabled`；不传则包含两者 |
-| `role` | string | 否 | 无 | `admin`、`member`；用户拥有该角色即匹配 |
+| `role` | string | 否 | 无 | 任意已存在角色编码；用户拥有该角色即匹配 |
 | `sort_by` | string | 否 | `created_at` | `username`、`display_name`、`created_at`、`updated_at`、`last_login_at` |
 | `sort_order` | string | 否 | `desc` | `asc`、`desc` |
 
@@ -616,53 +628,11 @@ If-Match: "v3"
 - 触发最后管理员保护返回 `409 LAST_ADMIN_PROTECTED`；不存在或已删除返回 `404`。
 - 禁用用户也可预先设置角色，但不会因此恢复登录资格。
 
-### API-15 查询可分配角色
+### API-15～API-21 角色与权限管理
 
-```http
-GET /api/v1/roles
-Authorization: Bearer <session_token>
-```
+`GET /roles` 查询持久化角色定义，所需权限为 `role.read`。角色详情新增 `built_in/user_count/version/created_at/updated_at`，角色列表以内置角色优先、编码升序返回。管理员默认拥有全部 14 项权限。
 
-- 权限：`user.roles.assign`，完整会话。
-- 请求体和查询参数：无。
-- 成功：`200 OK`，`data` 为角色数组，按 `code` 升序返回。
-
-响应示例：
-
-```json
-{
-  "data": [
-    {
-      "code": "admin",
-      "display_name": "管理员",
-      "description": "管理系统内用户和角色分配",
-      "permissions": [
-        "user.create",
-        "user.delete",
-        "user.password.reset",
-        "user.read",
-        "user.roles.assign",
-        "user.self.password.change",
-        "user.self.read",
-        "user.self.update",
-        "user.status.update",
-        "user.update"
-      ]
-    },
-    {
-      "code": "member",
-      "display_name": "普通用户",
-      "description": "管理自己的基本资料和密码",
-      "permissions": [
-        "user.self.password.change",
-        "user.self.read",
-        "user.self.update"
-      ]
-    }
-  ],
-  "request_id": "req_roles"
-}
-```
+新增角色选项、权限目录、角色创建、详情、更新与删除接口。请求字段、响应示例、版本条件、授权范围、角色占用保护和数据库迁移见 [可配置 RBAC 接口说明](rbac.md)。
 
 ## 8. 认证、授权与事务规则
 
@@ -704,7 +674,7 @@ Authorization: Bearer <session_token>
 
 ### 8.4 审计与限流
 
-记录登录结果、退出、用户创建、资料更新、密码修改或重置、状态变化、角色变化和删除。事件包含操作者、目标用户、动作、结果、时间、请求标识和必要的变更摘要。
+记录登录结果、退出、用户创建、资料更新、密码修改或重置、状态变化、用户角色变化、角色定义和权限变更及删除。事件包含操作者、目标用户、动作、结果、时间、请求标识和必要的变更摘要。
 
 管理状态变化与对应审计事件原子记录；失败操作可单独记录结果。资料变更摘要按必要范围保存，密码操作仅记录发生过变更，不记录原文、哈希、会话令牌或完整请求体。
 

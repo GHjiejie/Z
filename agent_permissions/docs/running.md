@@ -1,6 +1,6 @@
 # 用户管理服务运行说明
 
-当前服务实现了[接口文档](user-management-api.md)中的 15 个接口，并提供 Console 用户管理页面。默认使用单机 SQLite 持久化用户、会话、审计与限流记录，无需外部数据库或模型服务。
+当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理页面。默认使用单机 SQLite 持久化用户、会话、审计与限流记录，无需外部数据库或模型服务。
 
 ## 1. 准备环境
 
@@ -107,7 +107,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 6. 验证
 
 ```bash
-uv run python -m unittest agent_permissions.test_api agent_permissions.test_console -v
+uv run python -m unittest agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console -v
 uv run ruff check agent_permissions
 uv run ruff format --check agent_permissions
 ```
@@ -132,8 +132,8 @@ npm run test:e2e
 
 - 当前持久化后端仅支持本机 SQLite 文件；多个进程可共享同一份本地文件，通过数据库写锁协调权限变化。
 - 写事务使用 `BEGIN IMMEDIATE`，将操作者权限复核、目标版本检查、更新、会话撤销及成功审计串行提交。适合当前单机用户管理服务，不提供跨主机部署或网络共享盘数据库的保证。
-- 生产升级数据库结构前需增加对应迁移。当前 schema 版本为 1，启动时只接受空库或相同版本，遇到未知版本停止启动。
-- 初始管理员创建属于本地维护入口；HTTP API 不提供公开注册、找回密码、删除恢复或角色定义编辑。
+- 生产升级数据库结构前需增加对应迁移。当前 schema 版本为 2，支持空库初始化及 schema 1 的原子迁移；保留账号、密码与会话，遇到未知版本停止启动。具体流程见 [RBAC 迁移说明](rbac.md#旧数据库升级)。
+- 初始管理员创建属于本地维护入口；HTTP API 不提供公开注册、找回密码、删除恢复。
 - 业务日志和接口错误不输出密码、密码哈希或会话令牌；排查时可通过 `request_id` 关联数据库中的审计事件。
 
 ## 8. 主要代码
@@ -145,7 +145,7 @@ npm run test:e2e
 | `service.py` | 用户业务、事务内鉴权、会话、审计与持久化限流 |
 | `database.py` | SQLite schema、连接及事务 |
 | `models.py` | 请求与响应字段、输入校验 |
-| `permissions.py` | 系统角色与动作权限映射 |
+| `permissions.py` | 权限目录和数据库授权查询 |
 | `security.py` | 密码哈希、令牌摘要 |
 | `config.py` | 默认值和环境变量配置 |
 | `__main__.py` | 默认密码或交互式自定义密码的管理员初始化 |

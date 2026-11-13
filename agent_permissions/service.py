@@ -20,14 +20,24 @@ from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
     PasswordChange,
     PasswordReset,
+    RoleCreate,
     RolesUpdate,
+    RoleUpdate,
     StatusUpdate,
     User,
     UserCreate,
     UserQuery,
     UserUpdate,
 )
-from agent_permissions.permissions import permissions_for, role_definitions
+from agent_permissions.permissions import permissions_for, roles_for
+from agent_permissions.rbac import (
+    assign_permissions,
+    assign_roles,
+    require_permissions,
+    require_roles,
+    role_permissions,
+    role_record,
+)
 from agent_permissions.security import Passwords, token_digest
 
 logger = logging.getLogger(__name__)
@@ -65,9 +75,11 @@ class RequestInfo:
     actor_user_id: str | None = None
 
 
-def public_user(row: Mapping[str, Any]) -> dict[str, Any]:
+def public_user(
+    connection: sqlite3.Connection, row: Mapping[str, Any]
+) -> dict[str, Any]:
     fields = {name: row[name] for name in User.model_fields if name != "roles"}
-    fields["roles"] = json.loads(row["roles"])
+    fields["roles"] = roles_for(connection, row["id"])
     return User.model_validate(fields).model_dump(mode="json")
 
 
@@ -154,7 +166,13 @@ class UserService:
         )
 
     def record_failure(
-        self, info: RequestInfo, action: str, target: str | None, code: str
+        self,
+        info: RequestInfo,
+        action: str,
+        target: str | None,
+        code: str,
+        *,
+        role_code: str | None = None,
     ) -> None:
         try:
             with self.database.transaction(write=True) as connection:
@@ -165,6 +183,7 @@ class UserService:
                     target,
                     outcome="failure",
                     reason=code,
+                    changes={"role_code": role_code} if role_code else None,
                 )
         except sqlite3.Error:
             # The failed request remains failed; never log its body or token.
@@ -192,7 +211,7 @@ class UserService:
         if not user or user["deleted_at"] or user["status"] != "active":
             raise ApiError(401, "UNAUTHENTICATED", "请重新登录")
         info.actor_user_id = user["id"]
-        if permission and permission not in permissions_for(json.loads(user["roles"])):
+        if permission and permission not in permissions_for(connection, user["id"]):
             raise ApiError(403, "PERMISSION_DENIED", "没有执行该操作的权限")
         return user
 
@@ -208,11 +227,11 @@ class UserService:
     @staticmethod
     def _version(user: sqlite3.Row, expected: str | None) -> None:
         if expected is None:
-            raise ApiError(428, "PRECONDITION_REQUIRED", "请提供用户版本 If-Match")
+            raise ApiError(428, "PRECONDITION_REQUIRED", "请提供记录版本 If-Match")
         if not re.fullmatch(r'"v[1-9][0-9]{0,18}"', expected):
             raise invalid_field("If-Match", '版本须为单个带引号的标签，例如 "v3"')
         if expected != f'"v{user["version"]}"':
-            raise ApiError(412, "VERSION_CONFLICT", "用户信息已变化，请重新读取后操作")
+            raise ApiError(412, "VERSION_CONFLICT", "记录已变化，请重新读取后操作")
 
     def _insert_user(
         self,
@@ -226,16 +245,15 @@ class UserService:
         try:
             connection.execute(
                 """INSERT INTO users
-                (id,username,display_name,email,password_hash,roles,status,
+                (id,username,display_name,email,password_hash,status,
                  must_change_password,version,created_at,updated_at)
-                VALUES(?,?,?,?,?,?,'active',0,1,?,?)""",
+                VALUES(?,?,?,?,?,'active',0,1,?,?)""",
                 (
                     user_id,
                     payload.username,
                     payload.display_name,
                     str(payload.email) if payload.email is not None else None,
                     self.passwords.hash(value),
-                    json.dumps(payload.roles),
                     now,
                     now,
                 ),
@@ -249,10 +267,11 @@ class UserService:
                 "用户名已存在",
                 details=[{"field": "username", "message": "请使用其他用户名"}],
             ) from None
+        assign_roles(connection, user_id, payload.roles)
         self._audit(
             connection, info, "user.create", user_id, changes={"roles": payload.roles}
         )
-        return public_user(self._target(connection, user_id))
+        return public_user(connection, self._target(connection, user_id))
 
     def bootstrap_admin(self, payload: UserCreate) -> dict:
         """One-time local initialization; never exposed as a public route."""
@@ -323,7 +342,7 @@ class UserService:
                 "token_type": "Bearer",
                 "expires_in": seconds,
                 "auth_scope": scope,
-                "user": public_user(self._target(connection, user["id"])),
+                "user": public_user(connection, self._target(connection, user["id"])),
             }
 
     def logout(self, authority: Authority, info: RequestInfo) -> None:
@@ -338,41 +357,65 @@ class UserService:
     def get_me(self, authority: Authority, info: RequestInfo) -> dict:
         with self.database.transaction() as connection:
             return public_user(
+                connection,
                 self._authorize(
                     connection,
                     authority,
                     info,
                     "user.self.read",
-                )
+                ),
             )
 
     def own_permissions(self, authority: Authority, info: RequestInfo) -> dict:
         with self.database.transaction() as connection:
             user = self._authorize(connection, authority, info, "user.self.read")
-            roles = json.loads(user["roles"])
+            roles = roles_for(connection, user["id"])
             return {
                 "user_id": user["id"],
                 "roles": roles,
-                "permissions": permissions_for(roles),
+                "permissions": permissions_for(connection, user["id"]),
+                "role_details": [
+                    dict(row)
+                    for row in connection.execute(
+                        """SELECT r.code,r.display_name,r.description FROM roles r
+                    JOIN user_roles ur ON ur.role_code=r.code WHERE ur.user_id=? ORDER BY r.code""",
+                        (user["id"],),
+                    )
+                ],
             }
 
     def roles(self, authority: Authority, info: RequestInfo) -> list[dict]:
         with self.database.transaction() as connection:
-            self._authorize(connection, authority, info, "user.roles.assign")
-            return role_definitions()
+            self._authorize(connection, authority, info, "role.read")
+            return [
+                role_record(connection, row[0])
+                for row in connection.execute(
+                    "SELECT code FROM roles ORDER BY built_in DESC,code"
+                )
+            ]
 
     def get_user(self, authority: Authority, user_id: str, info: RequestInfo) -> dict:
         with self.database.transaction() as connection:
             self._authorize(connection, authority, info, "user.read")
-            return public_user(self._target(connection, user_id))
+            return public_user(connection, self._target(connection, user_id))
 
     def create_user(
         self, authority: Authority, payload: UserCreate, info: RequestInfo
     ) -> dict:
         with self.database.transaction(write=True) as connection:
-            self._authorize(connection, authority, info, "user.create")
-            if "admin" in payload.roles:
+            actor = self._authorize(connection, authority, info, "user.create")
+            require_roles(connection, payload.roles)
+            if payload.roles != ["member"]:
                 self._authorize(connection, authority, info, "user.roles.assign")
+            self._check_grants(
+                connection,
+                actor,
+                [
+                    permission
+                    for code in payload.roles
+                    for permission in role_permissions(connection, code)
+                ],
+            )
             return self._insert_user(connection, payload, info)
 
     def list_users(
@@ -384,7 +427,9 @@ class UserService:
             conditions.append("u.status=?")
             params.append(query.status)
         if query.role:
-            conditions.append("EXISTS(SELECT 1 FROM json_each(u.roles) WHERE value=?)")
+            conditions.append(
+                "EXISTS(SELECT 1 FROM user_roles ur WHERE ur.user_id=u.id AND ur.role_code=?)"
+            )
             params.append(query.role)
         if query.q and query.q.strip():
             conditions.append(
@@ -404,6 +449,8 @@ class UserService:
         direction = {"asc": "ASC", "desc": "DESC"}[query.sort_order]
         with self.database.transaction() as connection:
             self._authorize(connection, authority, info, "user.read")
+            if query.role:
+                require_roles(connection, [query.role])
             total = connection.execute(
                 f"SELECT count(*) FROM users u WHERE {where}", params
             ).fetchone()[0]
@@ -414,7 +461,7 @@ class UserService:
                 [*params, query.page_size, (query.page - 1) * query.page_size],
             ).fetchall()
             return {
-                "items": [public_user(row) for row in rows],
+                "items": [public_user(connection, row) for row in rows],
                 "total": total,
                 "page": query.page,
                 "page_size": query.page_size,
@@ -450,9 +497,7 @@ class UserService:
         changes: dict,
         operation: Operation,
     ) -> None:
-        removes_admin = "roles" in changes and "admin" not in json.loads(
-            changes["roles"]
-        )
+        removes_admin = "roles" in changes and "admin" not in changes["roles"]
         disables = changes.get("status") == "disabled" or "deleted_at" in changes
         if actor["id"] == target["id"] and (
             removes_admin or disables or operation == "user.password.reset"
@@ -463,12 +508,12 @@ class UserService:
         if (
             (removes_admin or disables)
             and target["status"] == "active"
-            and "admin" in json.loads(target["roles"])
+            and "admin" in roles_for(connection, target["id"])
         ):
             remaining = connection.execute(
                 """SELECT count(*) FROM users WHERE id<>? AND status='active'
                 AND deleted_at IS NULL
-                AND EXISTS(SELECT 1 FROM json_each(users.roles) WHERE value='admin')""",
+                AND EXISTS(SELECT 1 FROM user_roles ur WHERE ur.user_id=users.id AND ur.role_code='admin')""",
                 (target["id"],),
             ).fetchone()[0]
             if not remaining:
@@ -516,6 +561,10 @@ class UserService:
             # Self operations can never be redirected to a caller-supplied ID.
             target_id = actor["id"] if operation.startswith("user.self.") else user_id
             target = self._target(connection, target_id)
+            if actor["id"] != target["id"]:
+                self._check_grants(
+                    connection, actor, permissions_for(connection, target["id"])
+                )
             self._version(target, expected)
             now = timestamp(self.clock())
             changes: dict[str, Any] = {}
@@ -531,7 +580,17 @@ class UserService:
             elif operation == "user.status.update":
                 changes = {"status": payload["status"]}
             elif operation == "user.roles.assign":
-                changes = {"roles": json.dumps(sorted(set(payload["roles"])))}
+                require_roles(connection, payload["roles"])
+                self._check_grants(
+                    connection,
+                    actor,
+                    [
+                        permission
+                        for code in payload["roles"]
+                        for permission in role_permissions(connection, code)
+                    ],
+                )
+                changes = {"roles": sorted(set(payload["roles"]))}
             elif operation == "user.delete":
                 changes = {"deleted_at": now, "status": "disabled"}
             elif password_operation:
@@ -554,7 +613,14 @@ class UserService:
                 raise invalid_field("operation", "未知用户操作")
             self._guard_admin(connection, actor, target, changes, operation)
             changes = {
-                key: value for key, value in changes.items() if target[key] != value
+                key: value
+                for key, value in changes.items()
+                if (
+                    roles_for(connection, target["id"])
+                    if key == "roles"
+                    else target[key]
+                )
+                != value
             }
             # Hashing may take time; also reject a session that expired meanwhile.
             self._authorize(
@@ -564,12 +630,21 @@ class UserService:
                 operation,
             )
             if changes:
-                assignments = ",".join(f"{key}=?" for key in changes)
+                if "roles" in changes:
+                    assign_roles(connection, target["id"], changes["roles"])
+                fields = {
+                    key: value for key, value in changes.items() if key != "roles"
+                }
+                assignments = "".join(f"{key}=?," for key in fields)
                 connection.execute(
-                    f"""UPDATE users SET {assignments},updated_at=?,version=version+1
+                    f"""UPDATE users SET {assignments}updated_at=?,version=version+1
                     WHERE id=? AND version=?""",
-                    [*changes.values(), now, target["id"], target["version"]],
+                    [*fields.values(), now, target["id"], target["version"]],
                 )
+                if operation == "user.delete":
+                    connection.execute(
+                        "DELETE FROM user_roles WHERE user_id=?", (target["id"],)
+                    )
                 if password_operation or changes.get("status") == "disabled":
                     connection.execute(
                         """UPDATE sessions SET revoked_at=?
@@ -583,4 +658,126 @@ class UserService:
             row = connection.execute(
                 "SELECT * FROM users WHERE id=?", (target["id"],)
             ).fetchone()
-            return public_user(row)
+            return public_user(connection, row)
+
+    @staticmethod
+    def _check_grants(
+        connection: sqlite3.Connection, actor: sqlite3.Row, permissions: list[str]
+    ) -> None:
+        if not set(permissions) <= set(permissions_for(connection, actor["id"])):
+            raise ApiError(
+                403, "PERMISSION_DENIED", "不能授予或管理超出自身权限范围的授权"
+            )
+
+    def role_options(self, authority: Authority, info: RequestInfo) -> list[dict]:
+        with self.database.transaction() as connection:
+            actor = self._authorize(connection, authority, info, None)
+            if not {"user.read", "user.create", "user.roles.assign", "role.read"} & set(
+                permissions_for(connection, actor["id"])
+            ):
+                raise ApiError(403, "PERMISSION_DENIED", "没有查看角色选项的权限")
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT code,display_name,description FROM roles ORDER BY built_in DESC,code"
+                )
+            ]
+
+    def permission_catalog(self, authority: Authority, info: RequestInfo) -> list[dict]:
+        with self.database.transaction() as connection:
+            self._authorize(connection, authority, info, "role.read")
+            return [
+                dict(row)
+                for row in connection.execute(
+                    "SELECT * FROM permissions ORDER BY resource,code"
+                )
+            ]
+
+    def get_role(self, authority: Authority, code: str, info: RequestInfo) -> dict:
+        with self.database.transaction() as connection:
+            self._authorize(connection, authority, info, "role.read")
+            return role_record(connection, code)
+
+    def mutate_role(
+        self,
+        authority: Authority,
+        operation: Literal["role.create", "role.update", "role.delete"],
+        code: str,
+        expected: str | None,
+        payload: dict,
+        info: RequestInfo,
+    ) -> dict | None:
+        if operation not in {"role.create", "role.update", "role.delete"}:
+            raise invalid_field("operation", "未知角色操作")
+        model = RoleCreate if operation == "role.create" else RoleUpdate
+        if operation == "role.delete":
+            if payload:
+                raise invalid_field("body", "删除角色不接受请求体")
+        else:
+            try:
+                payload = model.model_validate(payload).model_dump(exclude_unset=True)
+            except ValidationError:
+                raise invalid_field("body", "角色参数不符合接口字段规则") from None
+        with self.database.transaction(write=True) as connection:
+            actor = self._authorize(connection, authority, info, operation)
+            now = timestamp(self.clock())
+            if operation == "role.create":
+                code = payload["code"]
+                if connection.execute(
+                    "SELECT 1 FROM roles WHERE code=?", (code,)
+                ).fetchone():
+                    raise ApiError(409, "ROLE_CODE_TAKEN", "角色编码已存在")
+                old = None
+                selected = payload.get("permissions", [])
+            else:
+                old = role_record(connection, code)
+                if code == "admin" or (operation == "role.delete" and old["built_in"]):
+                    raise ApiError(
+                        409, "SYSTEM_ROLE_PROTECTED", "此内置角色受保护，不能执行该操作"
+                    )
+                self._version(old, expected)
+                self._check_grants(connection, actor, old["permissions"])
+                if operation == "role.delete":
+                    if old["user_count"]:
+                        raise ApiError(
+                            409, "ROLE_IN_USE", "角色仍分配给用户，请先调整用户角色"
+                        )
+                    connection.execute("DELETE FROM roles WHERE code=?", (code,))
+                    self._audit(
+                        connection, info, operation, None, changes={"role_code": code}
+                    )
+                    return None
+                selected = payload.get("permissions", old["permissions"])
+            require_permissions(connection, selected)
+            self._check_grants(connection, actor, selected)
+            if old is None:
+                connection.execute(
+                    """INSERT INTO roles(code,display_name,description,built_in,version,created_at,updated_at)
+                    VALUES(?,?,?,0,1,?,?)""",
+                    (
+                        code,
+                        payload["display_name"],
+                        payload.get("description", ""),
+                        now,
+                        now,
+                    ),
+                )
+            else:
+                connection.execute(
+                    "UPDATE roles SET display_name=?,description=?,updated_at=?,version=version+1 WHERE code=?",
+                    (
+                        payload.get("display_name", old["display_name"]),
+                        payload.get("description", old["description"]),
+                        now,
+                        code,
+                    ),
+                )
+            assign_permissions(connection, code, selected)
+            self._audit(
+                connection,
+                info,
+                operation,
+                None,
+                changes={"role_code": code, "permissions": selected},
+            )
+            return role_record(connection, code)

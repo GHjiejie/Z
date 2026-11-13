@@ -8,13 +8,15 @@ import {
   UsersRound,
 } from "lucide-react";
 import { ApiError } from "./api";
-import { LoginPage, ProfilePage, RolesPage } from "./AccountPages";
+import { LoginPage, ProfilePage } from "./AccountPages";
+import { RolesPage } from "./RolesPage";
 import {
   Avatar,
   Brand,
   ErrorBanner,
   Spinner,
   Toast,
+  roleLabel,
   type ToastValue,
 } from "./components";
 import { useSession } from "./useSession";
@@ -50,7 +52,7 @@ export function App() {
     return () => window.removeEventListener("hashchange", changed);
   }, []);
   const canManage = session.permissions.includes("user.read");
-  const canRoles = session.permissions.includes("user.roles.assign");
+  const canRoles = session.permissions.includes("role.read");
   useEffect(() => {
     if (session.record && !session.loading) {
       if ((page === "users" && !canManage) || (page === "roles" && !canRoles))
@@ -141,11 +143,9 @@ export function App() {
           <div className="sidebar-role">
             <ShieldCheck size={16} />
             <div>
-              <strong>
-                {user.roles.includes("admin") ? "管理员访问" : "普通用户访问"}
-              </strong>
+              <strong>{canManage || canRoles ? "管理访问" : "账号访问"}</strong>
               <small>
-                {user.roles.includes("admin")
+                {canManage || canRoles
                   ? "管理成员与系统访问权限"
                   : "管理个人资料与账号安全"}
               </small>
@@ -181,7 +181,13 @@ export function App() {
               <div>
                 <strong>{user.display_name}</strong>
                 <small>
-                  {user.roles.includes("admin") ? "管理员" : "普通用户"}
+                  {user.roles
+                    .map(
+                      (code) =>
+                        session.roles.find((value) => value.code === code)
+                          ?.display_name || roleLabel(code),
+                    )
+                    .join("、")}
                 </small>
               </div>
             </button>
@@ -214,11 +220,19 @@ export function App() {
               onProfile={() => navigate("profile")}
             />
           )}
-          {page === "roles" && canRoles && <RolesPage api={session.api} />}
+          {page === "roles" && canRoles && (
+            <RolesPage
+              api={session.api}
+              permissions={session.permissions}
+              notify={notify}
+              onPermissionsChanged={session.refresh}
+            />
+          )}
           {page === "profile" && (
             <ProfilePage
               api={session.api}
               record={session.record}
+              roles={session.roles}
               permissions={session.permissions}
               notify={notify}
               onChanged={session.setRecord}

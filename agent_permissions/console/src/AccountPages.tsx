@@ -6,13 +6,7 @@ import {
   ShieldCheck,
   UserRound,
 } from "lucide-react";
-import {
-  aborted,
-  ApiClient,
-  ApiError,
-  type RoleDefinition,
-  type UserRecord,
-} from "./api";
+import { ApiClient, ApiError, type RoleOption, type UserRecord } from "./api";
 import {
   Avatar,
   Brand,
@@ -265,87 +259,11 @@ export function PasswordForm({
   );
 }
 
-export function RolesPage({ api }: { api: ApiClient }) {
-  const [roles, setRoles] = useState<RoleDefinition[] | null>(null);
-  const [error, setError] = useState<unknown>(null);
-  const [revision, setRevision] = useState(0);
-  useEffect(() => {
-    const controller = new AbortController();
-    setError(null);
-    api
-      .roles(controller.signal)
-      .then((data) => {
-        if (!controller.signal.aborted) setRoles(data);
-      })
-      .catch((failure) => {
-        if (!aborted(failure) && !controller.signal.aborted) setError(failure);
-      });
-    return () => controller.abort();
-  }, [api, revision]);
-  return (
-    <>
-      <header className="page-heading">
-        <div>
-          <div className="eyebrow">访问控制</div>
-          <h1>角色与权限</h1>
-          <p>核对系统角色允许的操作，再为成员分配权限</p>
-        </div>
-        <span className="built-in-label">
-          <ShieldCheck size={16} />
-          系统内置角色
-        </span>
-      </header>
-      {Boolean(error) && (
-        <ErrorBanner
-          error={error}
-          onRetry={() => setRevision((value) => value + 1)}
-        />
-      )}
-      {!roles && !error && (
-        <section className="panel center-loading">
-          <Spinner label="正在加载角色权限" />
-        </section>
-      )}
-      <div className="roles-grid">
-        {roles?.map((role) => (
-          <section className="panel role-card" key={role.code}>
-            <div className="role-card-icon">
-              {role.code === "admin" ? (
-                <ShieldCheck size={18} />
-              ) : (
-                <UserRound size={18} />
-              )}
-            </div>
-            <div className="role-card-title">
-              <h2>{role.display_name}</h2>
-              <span className="count-badge">
-                {role.permissions.length} 项权限
-              </span>
-            </div>
-            <p>{role.description}</p>
-            <div className="role-card-divider" />
-            <h3>允许的操作</h3>
-            <PermissionList permissions={role.permissions} />
-          </section>
-        ))}
-      </div>
-      <div className="role-explanation">
-        <ShieldCheck size={18} />
-        <div>
-          <h3>权限随角色分配，操作在服务端校验</h3>
-          <p>
-            一个用户可以拥有多个角色，权限取各角色的并集。角色调整将应用于用户的后续请求；已禁用的账号无法继续访问系统。
-          </p>
-        </div>
-      </div>
-    </>
-  );
-}
-
 export function ProfilePage({
   api,
   record,
   permissions,
+  roles,
   notify,
   onChanged,
   onPasswordDone,
@@ -353,6 +271,7 @@ export function ProfilePage({
   api: ApiClient;
   record: UserRecord;
   permissions: string[];
+  roles: RoleOption[];
   notify: (message: string) => void;
   onChanged: (record: UserRecord) => void;
   onPasswordDone: () => void;
@@ -379,7 +298,7 @@ export function ProfilePage({
   }, [api, onChanged]);
   async function submit(event: FormEvent) {
     event.preventDefault();
-    if (busy) return;
+    if (busy || !permissions.includes("user.self.update")) return;
     if (!name.trim()) {
       setError(new ApiError("请输入展示名称", "VALIDATION_ERROR"));
       return;
@@ -415,7 +334,7 @@ export function ProfilePage({
           <Avatar user={record.user} large />
           <h2>{record.user.display_name}</h2>
           <p>{record.user.username}</p>
-          <RoleBadge admin={record.user.roles.includes("admin")} />
+          <RoleBadge roles={record.user.roles} definitions={roles} />
           <div className="summary-divider" />
           <dl>
             <div>
@@ -450,6 +369,7 @@ export function ProfilePage({
                   required
                   maxLength={100}
                   value={name}
+                  readOnly={!permissions.includes("user.self.update")}
                   onChange={(event) => setName(event.target.value)}
                 />
               </Field>
@@ -458,6 +378,7 @@ export function ProfilePage({
                   type="email"
                   maxLength={254}
                   value={email}
+                  readOnly={!permissions.includes("user.self.update")}
                   onChange={(event) => setEmail(event.target.value)}
                   placeholder="name@example.com"
                 />
@@ -470,29 +391,37 @@ export function ProfilePage({
                   }}
                 />
               )}
-              <div>
-                <button
-                  type="submit"
-                  className="button primary"
-                  disabled={busy}
-                >
-                  {busy ? <Spinner label="正在保存" /> : "保存资料"}
-                </button>
-              </div>
+              {permissions.includes("user.self.update") && (
+                <div>
+                  <button
+                    type="submit"
+                    className="button primary"
+                    disabled={busy}
+                  >
+                    {busy ? <Spinner label="正在保存" /> : "保存资料"}
+                  </button>
+                </div>
+              )}
             </form>
           </section>
-          <section className="panel settings-panel" id="account-security">
-            <div className="settings-heading">
-              <span>
-                <KeyRound size={18} />
-              </span>
-              <div>
-                <h2>账号安全</h2>
-                <p>设置仅你知道的安全口令</p>
+          {permissions.includes("user.self.password.change") && (
+            <section className="panel settings-panel" id="account-security">
+              <div className="settings-heading">
+                <span>
+                  <KeyRound size={18} />
+                </span>
+                <div>
+                  <h2>账号安全</h2>
+                  <p>设置仅你知道的安全口令</p>
+                </div>
               </div>
-            </div>
-            <PasswordForm api={api} initial={record} onDone={onPasswordDone} />
-          </section>
+              <PasswordForm
+                api={api}
+                initial={record}
+                onDone={onPasswordDone}
+              />
+            </section>
+          )}
         </div>
       </div>
     </>

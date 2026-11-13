@@ -11,7 +11,7 @@ import {
   aborted,
   ApiClient,
   type RoleCode,
-  type RoleDefinition,
+  type RoleOption,
   type UserDraft,
   type UserRecord,
   type UserStatus,
@@ -51,15 +51,18 @@ export function UserDialog({
   api,
   onClose,
   onSaved,
+  permissions,
 }: {
   state: UserDialogState;
   api: ApiClient;
   onClose: () => void;
   onSaved: (message: string, updated?: UserRecord) => void;
+  permissions: string[];
 }) {
   const [record, setRecord] = useState<UserRecord | null>(null);
   const [draft, setDraft] = useState<UserDraft>(initialDraft);
-  const [roleList, setRoleList] = useState<RoleDefinition[]>([]);
+  const [roleList, setRoleList] = useState<RoleOption[]>([]);
+  const canAssign = permissions.includes("user.roles.assign");
   const [confirmation, setConfirmation] = useState("");
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState<unknown>(null);
@@ -83,7 +86,7 @@ export function UserDialog({
         const [current, definitions] = await Promise.all([
           userId ? api.getUser(userId, next.signal) : Promise.resolve(null),
           kind === "create" || kind === "roles"
-            ? api.roles(next.signal)
+            ? api.roleOptions(next.signal)
             : Promise.resolve([]),
         ]);
         if (next.signal.aborted) return;
@@ -338,29 +341,42 @@ export function UserDialog({
           {(kind === "create" || kind === "roles") && (
             <fieldset className="role-options">
               <legend>访问角色</legend>
-              {roleList.map((definition) => (
-                <label
-                  className={`role-option${draft.roles.includes(definition.code) ? " selected" : ""}`}
-                  key={definition.code}
-                >
-                  <input
-                    type="checkbox"
-                    checked={draft.roles.includes(definition.code)}
-                    onChange={() => toggleRole(definition.code)}
-                  />
-                  <span className="role-option-icon">
-                    {definition.code === "admin" ? (
-                      <ShieldCheck size={18} />
-                    ) : (
-                      <UserRound size={18} />
-                    )}
-                  </span>
-                  <span>
-                    <strong>{definition.display_name}</strong>
-                    <small>{definition.description}</small>
-                  </span>
-                </label>
-              ))}
+              {roleList
+                .filter(
+                  (definition) =>
+                    kind !== "create" ||
+                    canAssign ||
+                    definition.code === "member",
+                )
+                .map((definition) => (
+                  <label
+                    className={`role-option${draft.roles.includes(definition.code) ? " selected" : ""}`}
+                    key={definition.code}
+                  >
+                    <input
+                      type="checkbox"
+                      checked={draft.roles.includes(definition.code)}
+                      disabled={kind === "create" && !canAssign}
+                      onChange={() => toggleRole(definition.code)}
+                    />
+                    <span className="role-option-icon">
+                      {definition.code === "admin" ? (
+                        <ShieldCheck size={18} />
+                      ) : (
+                        <UserRound size={18} />
+                      )}
+                    </span>
+                    <span>
+                      <strong>{definition.display_name}</strong>
+                      <small>
+                        {definition.code}
+                        {definition.description
+                          ? ` · ${definition.description}`
+                          : ""}
+                      </small>
+                    </span>
+                  </label>
+                ))}
             </fieldset>
           )}
           {kind === "reset" && (

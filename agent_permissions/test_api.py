@@ -817,7 +817,7 @@ class UserApiTests(unittest.TestCase):
         self.assertEqual(sorted(statuses), [200, 401])
         with self.database.transaction() as connection:
             remaining = connection.execute(
-                "SELECT count(*) FROM users WHERE status='active' AND roles LIKE '%admin%' AND deleted_at IS NULL"
+                "SELECT count(*) FROM users u JOIN user_roles ur ON ur.user_id=u.id WHERE u.status='active' AND ur.role_code='admin' AND u.deleted_at IS NULL"
             ).fetchone()[0]
         self.assertEqual(remaining, 1)
 
@@ -998,7 +998,7 @@ class UserApiTests(unittest.TestCase):
             )
         )
         self.assertEqual(operations, expected)
-        self.assertEqual(len(operations), 15)
+        self.assertEqual(len(operations), 21)
         login_schema = schema["components"]["schemas"]["LoginRequest"]
         self.assertTrue(login_schema["properties"]["password"]["writeOnly"])
 
@@ -1077,10 +1077,15 @@ class BootstrapCliTests(unittest.TestCase):
                 self.assertNotIn(password, output.getvalue())
                 with closing(sqlite3.connect(path)) as connection:
                     row = connection.execute(
-                        "SELECT roles,must_change_password FROM users"
+                        "SELECT must_change_password FROM users"
                     ).fetchone()
-                    self.assertEqual(json.loads(row[0]), ["admin"])
-                    self.assertEqual(row[1], 0)
+                    self.assertEqual(row[0], 0)
+                    self.assertEqual(
+                        connection.execute(
+                            "SELECT role_code FROM user_roles"
+                        ).fetchone()[0],
+                        "admin",
+                    )
                 with TestClient(create_app(Settings(database_path=path))) as client:
                     response = client.post(
                         "/api/v1/auth/login",

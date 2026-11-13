@@ -29,8 +29,12 @@ from agent_permissions.models import (
     OwnPermissions,
     PasswordChange,
     PasswordReset,
+    PermissionDefinition,
+    RoleCreate,
     RoleDefinition,
+    RoleOption,
     RolesUpdate,
+    RoleUpdate,
     StatusUpdate,
     User,
     UserCreate,
@@ -110,9 +114,12 @@ Identity = Annotated[Authority, Depends(current_authority)]
 Info = Annotated[RequestInfo, Depends(info_for)]
 Version = Annotated[
     str | None,
-    Header(alias="If-Match", description='修改已有用户时必填，例如 "v3"；缺失返回 428'),
+    Header(alias="If-Match", description='修改已有记录时必填，例如 "v3"；缺失返回 428'),
 ]
 UserId = Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[A-Za-z0-9_-]+$")]
+RoleCode = Annotated[
+    str, Path(min_length=3, max_length=64, pattern=r"^[a-z][a-z0-9_-]{2,63}$")
+]
 
 
 def result(info: RequestInfo, data: object) -> dict:
@@ -328,6 +335,90 @@ def list_roles(service: Service, identity: Identity, info: Info) -> dict:
     return result(info, service.roles(identity, info))
 
 
+@router.get(
+    "/role-options", response_model=Envelope[list[RoleOption]], name="role.options"
+)
+def role_options(service: Service, identity: Identity, info: Info) -> dict:
+    return result(info, service.role_options(identity, info))
+
+
+@router.get(
+    "/permissions",
+    response_model=Envelope[list[PermissionDefinition]],
+    name="permission.list",
+)
+def list_permissions(service: Service, identity: Identity, info: Info) -> dict:
+    return result(info, service.permission_catalog(identity, info))
+
+
+@router.post(
+    "/roles",
+    response_model=Envelope[RoleDefinition],
+    status_code=201,
+    name="role.create",
+)
+def create_role(
+    payload: RoleCreate,
+    response: Response,
+    service: Service,
+    identity: Identity,
+    info: Info,
+) -> dict:
+    data = service.mutate_role(
+        identity, "role.create", payload.code, None, payload.model_dump(), info
+    )
+    response.headers["Location"] = f"/api/v1/roles/{payload.code}"
+    return user_result(response, info, data)
+
+
+@router.get(
+    "/roles/{role_code}", response_model=Envelope[RoleDefinition], name="role.read"
+)
+def get_role(
+    role_code: RoleCode,
+    response: Response,
+    service: Service,
+    identity: Identity,
+    info: Info,
+) -> dict:
+    return user_result(response, info, service.get_role(identity, role_code, info))
+
+
+@router.patch(
+    "/roles/{role_code}", response_model=Envelope[RoleDefinition], name="role.update"
+)
+def update_role(
+    role_code: RoleCode,
+    payload: RoleUpdate,
+    response: Response,
+    service: Service,
+    identity: Identity,
+    info: Info,
+    version: Version = None,
+) -> dict:
+    data = service.mutate_role(
+        identity,
+        "role.update",
+        role_code,
+        version,
+        payload.model_dump(exclude_unset=True),
+        info,
+    )
+    return user_result(response, info, data)
+
+
+@router.delete("/roles/{role_code}", status_code=204, name="role.delete")
+def delete_role(
+    role_code: RoleCode,
+    service: Service,
+    identity: Identity,
+    info: Info,
+    version: Version = None,
+) -> Response:
+    service.mutate_role(identity, "role.delete", role_code, version, {}, info)
+    return Response(status_code=204)
+
+
 def error_response(request: Request, error: ApiError) -> JSONResponse:
     info = request.state.info
     route = request.scope.get("route")
@@ -337,6 +428,7 @@ def error_response(request: Request, error: ApiError) -> JSONResponse:
             route.name,
             request.path_params.get("user_id") or info.actor_user_id,
             error.code,
+            role_code=request.path_params.get("role_code"),
         )
     headers = {
         "Cache-Control": "no-store",
@@ -376,7 +468,7 @@ def create_app(
 
     app = FastAPI(
         title="Agent 用户管理服务",
-        version="1.0.0",
+        version="1.1.0",
         description="用户、会话与系统角色管理；接口契约见用户管理服务文档。",
         lifespan=lifespan,
     )
