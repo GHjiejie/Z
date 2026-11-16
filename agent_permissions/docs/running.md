@@ -2,6 +2,8 @@
 
 当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理页面。支持 Docker PostgreSQL 18 和本地 SQLite，持久化账号、RBAC、会话、审计与限流记录。当前 Docker 启动与数据迁移见 [数据库部署说明](docker-database.md)。无需模型服务。
 
+全部业务接口已生成对应 Agent 工具，新增 `GET /agent-tools` 与 `POST /agent-tools/call` 用于发现和执行。生成、发布绑定与 LangChain 接入见 [API Agent 工具说明](agent-tools.md)。
+
 ## 1. 准备环境
 
 在仓库根目录运行，Python 版本需为 3.13 或更高：
@@ -118,9 +120,9 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 6. 验证
 
 ```bash
-uv run python -m unittest agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
-uv run ruff check agent_permissions
-uv run ruff format --check agent_permissions
+uv run python -m unittest api_tools.test_tools agent_permissions.test_tools agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
+uv run ruff check api_tools agent_permissions
+uv run ruff format --check api_tools agent_permissions
 ```
 
 测试使用临时数据库和受控时钟，不需要真实账户，不修改默认数据目录，不调用模型或外部业务服务。
@@ -155,6 +157,8 @@ npm run test:e2e
 | --- | --- |
 | `main.py` | Uvicorn 应用入口 |
 | `api.py` | FastAPI 路由、请求约束、统一响应与错误处理 |
+| `operations.py`、`tooling.py`、`tools.py` | 共享操作元数据、工具发现执行入口、生成及校验 CLI |
+| `../../api_tools/` | 独立的契约编译、不可变注册表、统一执行器、LangChain 客户端 |
 | `service.py` | 用户业务、事务内鉴权、会话、审计与持久化限流 |
 | `database.py`、`postgres.py`、`storage.py` | 数据库选择、SQLite/PostgreSQL 连接、事务与 SQL 边界 |
 | `database_errors.py`、`test_connection_pool.py` | 连接可用性分类及连接池生命周期、过载和故障测试 |

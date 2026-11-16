@@ -62,4 +62,10 @@ class ConsoleHostingTests(unittest.TestCase):
 
     def test_console_routes_do_not_change_api_contract(self) -> None:
         schema = self.client.get("/openapi.json").json()
-        self.assertTrue(all(path.startswith("/api/v1/") for path in schema["paths"]))
+        self.assertTrue(
+            all(
+                path.startswith("/api/v1/")
+                or path in {"/agent-tools", "/agent-tools/call"}
+                for path in schema["paths"]
+            )
+        )

@@ -46,6 +46,7 @@ from agent_permissions.models import (
     UserQuery,
     UserUpdate,
 )
+from agent_permissions.operations import OPERATIONS
 from agent_permissions.security import token_digest
 from agent_permissions.service import (
     Authority,
@@ -60,6 +61,19 @@ logger = logging.getLogger(__name__)
 
 class ContractRoute(APIRoute):
     """Reject extra queries and bodies even for routes without model parameters."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        name = kwargs.get("name")
+        if name in OPERATIONS:
+            spec = OPERATIONS[name]
+            kwargs.setdefault("operation_id", name)
+            if not kwargs.get("operation_id"):
+                kwargs["operation_id"] = name
+            kwargs["description"] = kwargs.get("description") or spec.description
+            extra = dict(kwargs.get("openapi_extra") or {})
+            extra["x-agent"] = spec.metadata()
+            kwargs["openapi_extra"] = extra
+        super().__init__(*args, **kwargs)
 
     def get_route_handler(self) -> Callable[[Request], Awaitable[Response]]:
         handler = super().get_route_handler()
@@ -464,6 +478,7 @@ def create_app(
     *,
     clock: Clock = utc_now,
     console_directory: FilePath | None = None,
+    tools_manifest: FilePath | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     database = create_database(settings)
@@ -472,6 +487,9 @@ def create_app(
     @asynccontextmanager
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         try:
+            from agent_permissions.tooling import activate_tools
+
+            activate_tools(app, manifest_path=tools_manifest)
             await run_in_threadpool(database.open)
             await run_in_threadpool(database.initialize)
             yield
@@ -568,4 +586,7 @@ def create_app(
 
     app.include_router(router)
     mount_console(app, console_directory)
+    from agent_permissions.tooling import mount_agent_tools
+
+    mount_agent_tools(app)
     return app

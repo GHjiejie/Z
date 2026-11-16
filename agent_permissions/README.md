@@ -2,7 +2,7 @@
 
 本目录用于设计和实现 Agent 代表当前用户执行操作时的权限控制。
 
-当前已实现 Python + FastAPI 用户管理服务，包含 21 个接口，以及对应的 Console 后台 UI；后续章节中的 Agent 业务授权仍为架构规划。
+当前已实现 Python + FastAPI 用户管理服务，包含 21 个业务接口、对应的 Console 后台 UI，以及从接口契约生成的 21 个 Agent 工具。后续章节中的任务委托、租户和审批授权仍为架构规划。
 
 用户权限采用可配置 RBAC：用户绑定多个角色，角色绑定操作权限；内置 `admin`、`member` 并支持自定义角色。账号及授权关联支持 Docker PostgreSQL 18 和本地 SQLite 持久化。
 
@@ -10,6 +10,7 @@
 - [数据库连接池改造方案](docs/connection-pool-plan.md)：已实施的 PostgreSQL 池化设计、生命周期、容量与验收标准。
 - [连接池验证报告](docs/connection-pool-validation.md)：真实 PostgreSQL 测试、本地压测结果及过载边界。
 - [可配置 RBAC](docs/rbac.md)：数据模型、角色管理接口、授权边界和旧数据库迁移。
+- [API Agent 工具](docs/agent-tools.md)：工具生成、发现与调用、LangChain 适配、版本绑定和自动同步检查。
 - [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、登录、配置与测试。
 - [Console 页面说明](console/README.md)：登录、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。
 - [用户管理服务接口文档](docs/user-management-api.md)：当前阶段的登录、用户管理、改密、角色、错误响应和并发控制契约。

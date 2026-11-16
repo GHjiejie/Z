@@ -29,6 +29,7 @@ from agent_permissions.models import (
     UserQuery,
     UserUpdate,
 )
+from agent_permissions.operations import operation_spec
 from agent_permissions.permissions import permissions_for, roles_for
 from agent_permissions.rbac import (
     assign_permissions,
@@ -210,9 +211,22 @@ class UserService:
         if not user or user["deleted_at"] or user["status"] != "active":
             raise ApiError(401, "UNAUTHENTICATED", "请重新登录")
         info.actor_user_id = user["id"]
-        if permission and permission not in permissions_for(connection, user["id"]):
-            raise ApiError(403, "PERMISSION_DENIED", "没有执行该操作的权限")
+        if permission:
+            policy = operation_spec(permission)
+            granted = set(permissions_for(connection, user["id"]))
+            if not set(policy.all_permissions) <= granted or (
+                policy.any_permissions and not set(policy.any_permissions) & granted
+            ):
+                raise ApiError(403, "PERMISSION_DENIED", "没有执行该操作的权限")
         return user
+
+    def tool_permissions(
+        self, authority: Authority, info: RequestInfo
+    ) -> frozenset[str]:
+        """Authenticate independently of user.self.read, using current DB grants."""
+        with self.database.transaction() as connection:
+            user = self._authorize(connection, authority, info, None)
+            return frozenset(permissions_for(connection, user["id"]))
 
     @staticmethod
     def _target(connection: Connection, user_id: str) -> Mapping[str, Any]:
@@ -353,7 +367,7 @@ class UserService:
 
     def logout(self, authority: Authority, info: RequestInfo) -> None:
         with self.database.transaction(write=True) as connection:
-            user = self._authorize(connection, authority, info, None)
+            user = self._authorize(connection, authority, info, "auth.logout")
             connection.execute(
                 "UPDATE sessions SET revoked_at=? WHERE token_digest=?",
                 (timestamp(self.clock()), authority.token_digest),
@@ -374,7 +388,7 @@ class UserService:
 
     def own_permissions(self, authority: Authority, info: RequestInfo) -> dict:
         with self.database.transaction() as connection:
-            user = self._authorize(connection, authority, info, "user.self.read")
+            user = self._authorize(connection, authority, info, "user.self.permissions")
             roles = roles_for(connection, user["id"])
             return {
                 "user_id": user["id"],
@@ -392,7 +406,7 @@ class UserService:
 
     def roles(self, authority: Authority, info: RequestInfo) -> list[dict]:
         with self.database.transaction() as connection:
-            self._authorize(connection, authority, info, "role.read")
+            self._authorize(connection, authority, info, "role.list")
             return [
                 role_record(connection, row[0])
                 for row in connection.execute(
@@ -454,7 +468,7 @@ class UserService:
         }[query.sort_by]
         direction = {"asc": "ASC", "desc": "DESC"}[query.sort_order]
         with self.database.transaction() as connection:
-            self._authorize(connection, authority, info, "user.read")
+            self._authorize(connection, authority, info, "user.list")
             if query.role:
                 require_roles(connection, [query.role])
             total = connection.execute(
@@ -677,11 +691,7 @@ class UserService:
 
     def role_options(self, authority: Authority, info: RequestInfo) -> list[dict]:
         with self.database.transaction() as connection:
-            actor = self._authorize(connection, authority, info, None)
-            if not {"user.read", "user.create", "user.roles.assign", "role.read"} & set(
-                permissions_for(connection, actor["id"])
-            ):
-                raise ApiError(403, "PERMISSION_DENIED", "没有查看角色选项的权限")
+            self._authorize(connection, authority, info, "role.options")
             return [
                 dict(row)
                 for row in connection.execute(
@@ -691,7 +701,7 @@ class UserService:
 
     def permission_catalog(self, authority: Authority, info: RequestInfo) -> list[dict]:
         with self.database.transaction() as connection:
-            self._authorize(connection, authority, info, "role.read")
+            self._authorize(connection, authority, info, "permission.list")
             return [
                 dict(row)
                 for row in connection.execute(
