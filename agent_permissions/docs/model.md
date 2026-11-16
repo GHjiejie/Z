@@ -4,6 +4,8 @@
 
 对外使用 OpenAI SDK 调用时，参见 [OpenAI 兼容 Chat 接口](chat-api.md)。该入口默认运行能够调用业务工具的 Agent。
 
+Chat 的 Agent、模型和工具调用可接入 [LangSmith 追踪](langsmith.md)，其独立凭据也在本模块 `.env` 配置。
+
 配置样例见 [agent_permissions/.env.example](../.env.example)：
 
 ```dotenv

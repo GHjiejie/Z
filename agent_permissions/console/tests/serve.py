@@ -17,6 +17,7 @@ from agent_permissions.security import token_digest
 from agent_permissions.service import Authority, RequestInfo
 from agent_permissions.test_chat_api import BusinessModel
 from agent_permissions.tooling import execution_context
+from agent_permissions.tracing import ChatTracing, TracingSettings
 
 ADMIN_PASSWORD = "12345"
 MEMBER_PASSWORD = "Console member password 2026!"
@@ -31,7 +32,11 @@ def main() -> None:
             login_source_limit=1000,
             password_limit=1000,
         )
-        app = create_app(settings, chat_model_factory=lambda: BusinessModel())
+        app = create_app(
+            settings,
+            chat_model_factory=lambda: BusinessModel(),
+            chat_tracing=ChatTracing(TracingSettings()),
+        )
 
         @app.post(
             "/__test/chat-stream",

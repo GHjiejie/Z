@@ -205,12 +205,19 @@ async def _agent(request: Request, payload: ChatRequest, model: BaseChatModel):
                 call.override(model_settings={**call.model_settings, **settings})
             )
 
-        yield create_agent(
-            model=model,
-            tools=tools,
-            system_prompt=SYSTEM_PROMPT,
-            middleware=[model_options],
-        )
+        with request.app.state.chat_tracing.context(
+            request_id=request.state.info.request_id,
+            model=payload.model,
+            stream=payload.stream,
+            tools=[tool.name for tool in tools],
+        ):
+            yield create_agent(
+                model=model,
+                tools=tools,
+                system_prompt=SYSTEM_PROMPT,
+                middleware=[model_options],
+                name="agent_permissions.chat",
+            )
 
 
 def _usage(messages: list) -> dict | None:

@@ -6,6 +6,8 @@
 
 Chat 服务提供 `GET /v1/models` 和 `POST /v1/chat/completions`，可使用 OpenAI SDK 并自动调用当前用户有权执行的业务工具。模型配置和调用示例见 [Chat 接口说明](chat-api.md)。
 
+需要查看 Agent、模型和工具调用链时，在本模块 `.env` 配置 LangSmith 并重启，详见 [LangSmith 追踪说明](langsmith.md)。
+
 ## Makefile 快捷命令
 
 需要 `make`、`uv`、Python 3.13+、符合 Console `package.json` 要求的 Node.js 和 npm。使用 PostgreSQL 时还需要 Docker 与 Compose。在仓库根目录运行，或进入 `agent_permissions` 后省略 `-C agent_permissions`：
@@ -173,7 +175,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 6. 验证
 
 ```bash
-uv run python -m unittest api_tools.test_tools agent_permissions.test_tools agent_permissions.test_chat_model agent_permissions.test_chat_api agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
+uv run python -m unittest api_tools.test_tools agent_permissions.test_tools agent_permissions.test_chat_model agent_permissions.test_chat_api agent_permissions.test_tracing agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
 uv run ruff check api_tools agent_permissions
 uv run ruff format --check api_tools agent_permissions
 ```

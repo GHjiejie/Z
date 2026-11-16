@@ -56,6 +56,7 @@ from agent_permissions.service import (
     UserService,
     utc_now,
 )
+from agent_permissions.tracing import ChatTracing
 
 logger = logging.getLogger(__name__)
 
@@ -485,6 +486,7 @@ def create_app(
     console_directory: FilePath | None = None,
     tools_manifest: FilePath | None = None,
     chat_model_factory: Callable[[], BaseChatModel] | None = None,
+    chat_tracing: ChatTracing | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     database = create_database(settings)
@@ -503,9 +505,12 @@ def create_app(
             from agent_permissions.chat_api import close_chat_model
 
             try:
-                await close_chat_model(app)
+                await run_in_threadpool(app.state.chat_tracing.close)
             finally:
-                await run_in_threadpool(database.close)
+                try:
+                    await close_chat_model(app)
+                finally:
+                    await run_in_threadpool(database.close)
 
     app = FastAPI(
         title="Agent 用户管理服务",
@@ -516,6 +521,7 @@ def create_app(
     app.state.database = database
     app.state.service = service
     app.state.settings = settings
+    app.state.chat_tracing = chat_tracing or ChatTracing.from_env()
 
     @app.middleware("http")
     async def request_context(

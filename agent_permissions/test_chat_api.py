@@ -23,6 +23,7 @@ from agent_permissions.chat_api import ChatRequest, _stream
 from agent_permissions.config import Settings
 from agent_permissions.models import UserCreate
 from agent_permissions.service import RequestInfo
+from agent_permissions.tracing import ChatTracing, TracingSettings
 
 USAGE = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
 
@@ -98,6 +99,7 @@ class OpenAIChatTests(unittest.TestCase):
         self.app = create_app(
             Settings(database_path=Path(directory) / "chat.sqlite3"),
             chat_model_factory=factory,
+            chat_tracing=ChatTracing(TracingSettings()),
         )
         self.http = self.enterContext(TestClient(self.app))
         self.app.state.service.bootstrap_admin(

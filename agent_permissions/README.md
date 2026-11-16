@@ -13,6 +13,7 @@
 - [API Agent 工具](docs/agent-tools.md)：工具生成、发现与调用、LangChain 适配、版本绑定和自动同步检查。
 - [项目独立模型配置](docs/model.md)：本目录专用的 Responses API 客户端、供应商配置及 Agent 接入示例。
 - [OpenAI 兼容 Chat 接口](docs/chat-api.md)：OpenAI SDK 对话、流式响应、自动业务工具执行和会话鉴权。
+- [LangSmith 追踪](docs/langsmith.md)：Agent、模型与工具调用链、请求关联、项目独立配置和脱敏。
 - [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、登录、配置与测试。
 - [Console 页面说明](console/README.md)：登录、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。
 - [用户管理服务接口文档](docs/user-management-api.md)：当前阶段的登录、用户管理、改密、角色、错误响应和并发控制契约。

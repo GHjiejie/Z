@@ -31,6 +31,7 @@ dependencies = [
     "psycopg-pool>=3.2,<4",
     "httpx>=0.28,<1",
     "jsonschema>=4.26,<5",
+    "langsmith>=0.11.2,<1",
 ]
 
 [dependency-groups]

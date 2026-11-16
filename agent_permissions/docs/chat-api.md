@@ -6,6 +6,8 @@
 
 Console 已接入同一接口：完成[前端构建和服务启动](running.md#3-启动-http-服务)后，登录并打开 `/console/#chat` 即可使用 SSE 聊天。支持多会话、停止生成及草稿恢复，历史按账号保存在当前浏览器；交互和存储边界见 [Console 使用说明](../console/README.md#使用会话)。
 
+普通和 SSE 对话均可通过 [LangSmith](langsmith.md) 查看 Agent、模型及业务工具调用链。每条根调用链携带 `request_id` 与本次可用工具数量，可与响应中的 `X-Request-ID` 对应。
+
 ## 1. 服务入口与认证
 
 | 接口 | 用途 |
