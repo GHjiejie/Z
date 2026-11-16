@@ -1,8 +1,10 @@
 # 用户管理服务运行说明
 
-当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理页面。支持 Docker PostgreSQL 18 和本地 SQLite，持久化账号、RBAC、会话、审计与限流记录。当前 Docker 启动与数据迁移见 [数据库部署说明](docker-database.md)。无需模型服务。
+当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理和 Agent 会话页面。支持 Docker PostgreSQL 18 和本地 SQLite，持久化账号、RBAC、登录会话、审计与限流记录。当前 Docker 启动与数据迁移见 [数据库部署说明](docker-database.md)。用户管理无需模型服务；Agent 聊天需配置[本模块模型客户端](model.md)。
 
 全部业务接口已生成对应 Agent 工具，新增 `GET /agent-tools` 与 `POST /agent-tools/call` 用于发现和执行。生成、发布绑定与 LangChain 接入见 [API Agent 工具说明](agent-tools.md)。
+
+Chat 服务提供 `GET /v1/models` 和 `POST /v1/chat/completions`，可使用 OpenAI SDK 并自动调用当前用户有权执行的业务工具。模型配置和调用示例见 [Chat 接口说明](chat-api.md)。
 
 ## 1. 准备环境
 
@@ -62,6 +64,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 启动后可访问：
 
 - [Console 管理后台](http://127.0.0.1:8000/console/)
+- [Console Agent 会话](http://127.0.0.1:8000/console/#chat)
 - [Swagger 接口调试](http://127.0.0.1:8000/docs)
 - [ReDoc 接口说明](http://127.0.0.1:8000/redoc)
 - [OpenAPI JSON](http://127.0.0.1:8000/openapi.json)
@@ -76,8 +79,9 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 
 1. 打开 `/console/`，使用初始化时创建的管理员账号和初始密码登录。
 2. 管理员直接进入用户管理页面，可以新增、搜索、编辑用户，设置角色，重置密码，启用、禁用或删除用户。
-3. 普通用户直接进入个人设置页面，只能修改自己的资料与密码；无法看到管理导航，也无法调用管理接口。
+3. 普通用户直接进入个人设置页面，可修改自己的资料与密码，或通过“会话”与 Agent 对话；无法看到管理导航，也无法调用管理接口。
 4. 需要修改密码时，在个人设置中提交当前密码、新密码和新密码确认，成功后使用新密码重新登录。
+5. 点击“会话”进入 SSE 聊天。Agent 按当前账号权限自动调用业务工具。历史和草稿先保存在当前浏览器，按账号隔离；刷新后恢复，不支持跨设备查看。详细交互见 [Console 会话说明](../console/README.md#使用会话)。
 
 管理员创建用户或重置密码后，用户均可直接登录。页面自动管理登录令牌和版本头；版本冲突时保留输入，等待用户主动选择“载入最新信息”，不会自动覆盖其他人的修改。
 
@@ -120,7 +124,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 6. 验证
 
 ```bash
-uv run python -m unittest api_tools.test_tools agent_permissions.test_tools agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
+uv run python -m unittest api_tools.test_tools agent_permissions.test_tools agent_permissions.test_chat_model agent_permissions.test_chat_api agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
 uv run ruff check api_tools agent_permissions
 uv run ruff format --check api_tools agent_permissions
 ```

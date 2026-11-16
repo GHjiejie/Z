@@ -15,6 +15,7 @@ from fastapi import APIRouter, Depends, FastAPI, Header, Path, Query, Request, R
 from fastapi.exceptions import RequestValidationError
 from fastapi.routing import APIRoute
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
+from langchain_core.language_models import BaseChatModel
 from pydantic import BaseModel
 from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
@@ -443,6 +444,10 @@ def error_response(
     request: Request, error: ApiError, *, audit_failure: bool = True
 ) -> JSONResponse:
     info = request.state.info
+    if request.url.path.startswith("/v1/"):
+        from agent_permissions.chat_api import compatible_error
+
+        return compatible_error(error, info.request_id)
     route = request.scope.get("route")
     if audit_failure and route and getattr(route, "path", "").startswith("/api/v1/"):
         request.app.state.service.record_failure(
@@ -479,6 +484,7 @@ def create_app(
     clock: Clock = utc_now,
     console_directory: FilePath | None = None,
     tools_manifest: FilePath | None = None,
+    chat_model_factory: Callable[[], BaseChatModel] | None = None,
 ) -> FastAPI:
     settings = settings or Settings.from_env()
     database = create_database(settings)
@@ -494,7 +500,12 @@ def create_app(
             await run_in_threadpool(database.initialize)
             yield
         finally:
-            await run_in_threadpool(database.close)
+            from agent_permissions.chat_api import close_chat_model
+
+            try:
+                await close_chat_model(app)
+            finally:
+                await run_in_threadpool(database.close)
 
     app = FastAPI(
         title="Agent 用户管理服务",
@@ -589,4 +600,7 @@ def create_app(
     from agent_permissions.tooling import mount_agent_tools
 
     mount_agent_tools(app)
+    from agent_permissions.chat_api import mount_chat_api
+
+    mount_chat_api(app, chat_model_factory)
     return app

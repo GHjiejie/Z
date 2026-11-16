@@ -154,6 +154,8 @@ JSON 请求体区分缺省字段与显式 `null`。查询或请求头中的 `nul
 
 ## 6. LangChain 接入
 
+模型使用本项目的 `from agent_permissions.chat_model import create_chat_model`，独立配置及完整 Agent 示例见 [项目独立模型配置](model.md)。
+
 宿主先完成登录并安全保存会话令牌，再注入工具客户端的 `token_provider`。每轮 Agent 任务开始前调用 `langchain_tools()`，它会重新发现工具，生成的 callable 绑定本轮工具版本。
 
 ```python

@@ -51,6 +51,8 @@ jobs:
         run: >-
           uv run python -m unittest
           api_tools.test_tools agent_permissions.test_tools
+          agent_permissions.test_chat_model
+          agent_permissions.test_chat_api
           agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console
           agent_permissions.test_connection_pool.PoolConfigurationTests
           agent_permissions.test_connection_pool.DatabaseLifecycleTests -v

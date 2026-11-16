@@ -65,7 +65,13 @@ class ConsoleHostingTests(unittest.TestCase):
         self.assertTrue(
             all(
                 path.startswith("/api/v1/")
-                or path in {"/agent-tools", "/agent-tools/call"}
+                or path
+                in {
+                    "/agent-tools",
+                    "/agent-tools/call",
+                    "/v1/models",
+                    "/v1/chat/completions",
+                }
                 for path in schema["paths"]
             )
         )

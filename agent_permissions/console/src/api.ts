@@ -1,3 +1,12 @@
+import { ApiError, aborted } from "./errors";
+import {
+  chatFailure,
+  readChatStream,
+  type ChatMessageInput,
+  type ChatStreamResult,
+} from "./chatStream";
+export { ApiError, errorMessage, aborted } from "./errors";
+
 export type RoleCode = string;
 export type UserStatus = "active" | "disabled";
 export interface User {
@@ -156,32 +165,6 @@ function decodeUser(value: unknown): User {
   };
 }
 
-export class ApiError extends Error {
-  constructor(
-    message: string,
-    public readonly code: string,
-    public readonly status: number = 0,
-    public readonly details: { field: string; message: string }[] = [],
-    public readonly retryAfter: number = 0,
-  ) {
-    super(message);
-    this.name = "ApiError";
-  }
-}
-export function errorMessage(error: unknown): string {
-  if (error instanceof ApiError) {
-    if (error.code === "VERSION_CONFLICT")
-      return "该记录的信息已被其他操作更新，请载入最新信息后再保存";
-    if (error.code === "RATE_LIMITED")
-      return `操作过于频繁，请在 ${error.retryAfter || "稍后几"} 秒后重试。`;
-    return error.message;
-  }
-  return "暂时无法完成操作，请重试";
-}
-export function aborted(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
-}
-
 export class ApiClient {
   constructor(
     private readonly token: string | null,
@@ -196,17 +179,18 @@ export class ApiClient {
     }
   }
 
-  private async send(
+  private async request(
     path: string,
     options: RequestInit = {},
-  ): Promise<{ data: unknown; etag: string | null }> {
+    prefix = "/api/v1",
+  ): Promise<Response> {
     this.requireCurrentSession(path);
     const headers = new Headers(options.headers);
     if (this.token) headers.set("Authorization", `Bearer ${this.token}`);
     if (options.body) headers.set("Content-Type", "application/json");
     let response: Response;
     try {
-      response = await fetch(`/api/v1${path}`, {
+      response = await fetch(`${prefix}${path}`, {
         ...options,
         headers,
         credentials: "omit",
@@ -216,6 +200,14 @@ export class ApiClient {
       throw new ApiError("无法连接到服务，请检查连接后重试", "NETWORK_ERROR");
     }
     this.requireCurrentSession(path);
+    return response;
+  }
+
+  private async send(
+    path: string,
+    options: RequestInit = {},
+  ): Promise<{ data: unknown; etag: string | null }> {
+    const response = await this.request(path, options);
     if (response.status === 204) return { data: null, etag: null };
     let payload: unknown;
     try {
@@ -267,6 +259,76 @@ export class ApiClient {
       throw new ApiError("服务返回的数据不完整，请重试", "INVALID_RESPONSE");
     }
     return { data: payload.data, etag: response.headers.get("ETag") };
+  }
+
+  private chatError(error: unknown): never {
+    this.requireCurrentSession("/v1/chat/completions");
+    if (error instanceof ApiError) {
+      if (error.status === 401 || error.code === "UNAUTHENTICATED")
+        this.onExpired();
+      if (error.status === 403 || error.code === "PERMISSION_DENIED")
+        this.onPermissionsChanged();
+    }
+    throw error;
+  }
+
+  async chatModels(signal: AbortSignal): Promise<string[]> {
+    try {
+      const response = await this.request("/v1/models", { signal }, "");
+      const payload: unknown = await response.json();
+      this.requireCurrentSession("/v1/models");
+      if (!response.ok) throw chatFailure(payload, response.status);
+      return this.decode(payload, (value) => {
+        const data = object(value);
+        if (data.object !== "list" || !Array.isArray(data.data))
+          throw new Error("Invalid models");
+        return data.data.map((item: unknown) => text(object(item).id));
+      });
+    } catch (error) {
+      return this.chatError(error);
+    }
+  }
+
+  async streamChat(
+    model: string,
+    messages: ChatMessageInput[],
+    signal: AbortSignal,
+    onText: (text: string) => void,
+  ): Promise<ChatStreamResult> {
+    try {
+      const response = await this.request(
+        "/v1/chat/completions",
+        {
+          method: "POST",
+          signal,
+          body: JSON.stringify({
+            model,
+            messages,
+            stream: true,
+            stream_options: { include_usage: true },
+          }),
+        },
+        "",
+      );
+      if (!response.ok) {
+        const payload: unknown = await response.json();
+        this.requireCurrentSession("/v1/chat/completions");
+        throw chatFailure(payload, response.status);
+      }
+      if (
+        !response.body ||
+        !response.headers.get("Content-Type")?.includes("text/event-stream")
+      )
+        throw new ApiError("服务未返回流式回复", "INVALID_RESPONSE");
+      const result = await readChatStream(response.body, signal, (text) => {
+        this.requireCurrentSession("/v1/chat/completions");
+        onText(text);
+      });
+      this.requireCurrentSession("/v1/chat/completions");
+      return result;
+    } catch (error) {
+      return this.chatError(error);
+    }
   }
 
   private decode<T>(data: unknown, decoder: (value: unknown) => T): T {

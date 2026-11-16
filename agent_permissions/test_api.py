@@ -1003,9 +1003,20 @@ class UserApiTests(unittest.TestCase):
         self.assertEqual(len(expected), 21)
         self.assertEqual(
             operations,
-            expected | {("GET", "/agent-tools"), ("POST", "/agent-tools/call")},
+            expected
+            | {
+                ("GET", "/agent-tools"),
+                ("POST", "/agent-tools/call"),
+                ("GET", "/v1/models"),
+                ("POST", "/v1/chat/completions"),
+            },
         )
-        for path, method in [("/agent-tools", "get"), ("/agent-tools/call", "post")]:
+        for path, method in [
+            ("/agent-tools", "get"),
+            ("/agent-tools/call", "post"),
+            ("/v1/models", "get"),
+            ("/v1/chat/completions", "post"),
+        ]:
             self.assertFalse(schema["paths"][path][method]["x-agent"]["expose"])
         login_schema = schema["components"]["schemas"]["LoginRequest"]
         self.assertTrue(login_schema["properties"]["password"]["writeOnly"])

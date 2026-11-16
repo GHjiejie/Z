@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   ChevronRight,
   LogOut,
+  MessageSquare,
   ShieldCheck,
   UserRound,
   UsersRound,
@@ -10,6 +11,7 @@ import {
 import { ApiError } from "./api";
 import { LoginPage, ProfilePage } from "./AccountPages";
 import { RolesPage } from "./RolesPage";
+import { ChatPage } from "./ChatPage";
 import {
   Avatar,
   Brand,
@@ -22,13 +24,15 @@ import {
 import { useSession } from "./useSession";
 import { UsersPage } from "./UsersPage";
 
-type Page = "users" | "roles" | "profile";
+type Page = "users" | "roles" | "profile" | "chat";
 function route(): Page {
-  return location.hash === "#roles"
-    ? "roles"
-    : location.hash === "#profile"
-      ? "profile"
-      : "users";
+  return location.hash === "#chat"
+    ? "chat"
+    : location.hash === "#roles"
+      ? "roles"
+      : location.hash === "#profile"
+        ? "profile"
+        : "users";
 }
 
 export function App() {
@@ -104,15 +108,21 @@ export function App() {
   const title =
     page === "users"
       ? "用户管理"
-      : page === "roles"
-        ? "角色与权限"
-        : "个人设置";
+      : page === "chat"
+        ? "会话"
+        : page === "roles"
+          ? "角色与权限"
+          : "个人设置";
   return (
     <div className="console-shell">
       <aside className="sidebar">
         <Brand />
-        <div className="sidebar-section-label">系统管理</div>
+        <div className="sidebar-section-label">工作台</div>
         <nav aria-label="主导航">
+          <a href="#chat" aria-current={page === "chat" ? "page" : undefined}>
+            <MessageSquare size={18} />
+            <span>会话</span>
+          </a>
           {canManage && (
             <a
               href="#users"
@@ -218,6 +228,15 @@ export function App() {
               notify={notify}
               onSelfChanged={session.setRecord}
               onProfile={() => navigate("profile")}
+            />
+          )}
+          {page === "chat" && (
+            <ChatPage
+              key={user.id}
+              api={session.api}
+              user={user}
+              notify={notify}
+              onSettled={session.refresh}
             />
           )}
           {page === "roles" && canRoles && (
