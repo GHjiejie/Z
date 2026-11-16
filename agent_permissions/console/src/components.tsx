@@ -212,6 +212,7 @@ export function Modal({
   children,
   footer,
   destructive = false,
+  className = "",
 }: {
   title: string;
   description?: string;
@@ -220,6 +221,7 @@ export function Modal({
   children: ReactNode;
   footer: ReactNode;
   destructive?: boolean;
+  className?: string;
 }) {
   const ref = useRef<HTMLDialogElement>(null);
   const titleId = useId();
@@ -243,7 +245,7 @@ export function Modal({
   return (
     <dialog
       ref={ref}
-      className={`modal${destructive ? " modal-danger" : ""}`}
+      className={`modal${destructive ? " modal-danger" : ""} ${className}`}
       aria-labelledby={titleId}
       aria-describedby={description ? descriptionId : undefined}
       aria-busy={busy}
@@ -296,13 +298,14 @@ export function ActionMenu({
   const [position, setPosition] = useState({ left: 0, top: 0 });
   const root = useRef<HTMLDivElement>(null);
   const trigger = useRef<HTMLButtonElement>(null);
+  const anchor = useRef({ left: 0, top: 0 });
   const menu = useRef<HTMLDivElement>(null);
   const menuId = useId();
   useEffect(() => {
     if (!open) return;
     menu.current
       ?.querySelector<HTMLButtonElement>("button:not(:disabled)")
-      ?.focus();
+      ?.focus({ preventScroll: true });
     function outside(event: PointerEvent) {
       if (
         event.target instanceof Node &&
@@ -313,12 +316,23 @@ export function ActionMenu({
     }
     document.addEventListener("pointerdown", outside);
     const close = () => setOpen(false);
+    const scrolled = () => {
+      const rect = trigger.current?.getBoundingClientRect();
+      // A click may scroll its table before opening, with the event delivered later.
+      // Only dismiss when the anchor has actually moved since the menu opened.
+      if (
+        !rect ||
+        Math.abs(rect.left - anchor.current.left) > 0.5 ||
+        Math.abs(rect.top - anchor.current.top) > 0.5
+      )
+        close();
+    };
     window.addEventListener("resize", close);
-    window.addEventListener("scroll", close, true);
+    window.addEventListener("scroll", scrolled, true);
     return () => {
       document.removeEventListener("pointerdown", outside);
       window.removeEventListener("resize", close);
-      window.removeEventListener("scroll", close, true);
+      window.removeEventListener("scroll", scrolled, true);
     };
   }, [open]);
   return (
@@ -343,6 +357,7 @@ export function ActionMenu({
         onClick={() => {
           const rect = trigger.current?.getBoundingClientRect();
           if (rect) {
+            anchor.current = { left: rect.left, top: rect.top };
             const height = actions.length * 38 + 14;
             setPosition({
               left: Math.max(
@@ -371,7 +386,7 @@ export function ActionMenu({
             onKeyDown={(event) => {
               if (event.key === "Escape") {
                 setOpen(false);
-                trigger.current?.focus();
+                trigger.current?.focus({ preventScroll: true });
               }
               if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                 event.preventDefault();
@@ -388,7 +403,7 @@ export function ActionMenu({
                     (event.key === "ArrowDown" ? 1 : -1) +
                     items.length) %
                     items.length
-                ]?.focus();
+                ]?.focus({ preventScroll: true });
               }
             }}
           >
@@ -402,7 +417,7 @@ export function ActionMenu({
                 title={action.reason}
                 onClick={() => {
                   setOpen(false);
-                  trigger.current?.focus();
+                  trigger.current?.focus({ preventScroll: true });
                   action.onClick();
                 }}
               >

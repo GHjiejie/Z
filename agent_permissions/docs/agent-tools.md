@@ -95,9 +95,9 @@ AGENT_USERS_TOOLS_MANIFEST=agent_permissions/build/tools.manifest.json uv run uv
 }
 ```
 
-上例的 Schema 仅为示意，实际返回包含完整字段与约束。匿名调用者仅看到登录工具；管理员看到全部 21 个工具；普通用户按其当前权限获取个人工具。工具控制接口不会再次生成工具。
+上例的 Schema 仅为示意，实际返回包含完整字段与约束。匿名调用者仅看到登录工具；登录用户在登录工具之外，只看到自己已允许且当前 RBAC 允许的工具。管理员也需要显式开启工具，新用户和升级后的用户默认未授权。页面入口与接口见[用户级 Agent 工具授权](user-agent-tool-grants.md)。工具控制接口和用户授权配置接口不会再次生成工具。
 
-请求可使用 `Authorization: Bearer ...`。已失效的会话返回 `401`。权限从数据库读取，角色授权变更不需要重新生成工具包。目录一次返回全部可见定义，因此不涉及跨页快照。
+请求可使用 `Authorization: Bearer ...`。已失效的会话返回 `401`。权限与工具开关从数据库读取，角色变更保留用户开关，不需要重新生成工具包。目录一次返回全部可见定义，设置 `Cache-Control: private, no-store`，不涉及跨页快照。
 
 ## 5. 工具调用与结果
 
@@ -143,6 +143,7 @@ AGENT_USERS_TOOLS_MANIFEST=agent_permissions/build/tools.manifest.json uv run uv
 | `TOOL_VERSION_MISMATCH` | 409 | 工具版本变化，结束当前工具选择并重新发现 |
 | `TOOL_INPUT_INVALID` | 422 | 根据当前 Schema 修正参数 |
 | `PERMISSION_DENIED` | 403 | 当前用户没有执行权限 |
+| `TOOL_NOT_GRANTED` | 403 | 当前用户未允许 Agent 调用此工具 |
 | `UNAUTHENTICATED` | 401 | 会话无效，重新认证 |
 | `TOOL_OUTPUT_INVALID` | 502 | 响应契约不匹配，先确认业务操作结果 |
 | `TOOL_RESULT_UNKNOWN` | 504 | 调用超时，先查询结果，避免重复写入 |
@@ -179,7 +180,7 @@ async def load_tools(session_token: str):
         return result
 ```
 
-真实 Agent 应在 HTTP client 生命周期内执行。令牌不进入工具参数或工具定义，工具 SDK 不保存角色快照；执行端逐次检查当前会话和权限。登录工具也已生成，通常由宿主认证流程调用，避免把认证结果交给模型管理。
+真实 Agent 应在 HTTP client 生命周期内执行。令牌不进入工具参数或工具定义，工具 SDK 不保存角色快照；执行端逐次检查当前会话、用户工具授权和权限。运行示例前先在用户页面开启对应工具。登录工具也已生成，通常由宿主认证流程调用，避免把认证结果交给模型管理。
 
 工具版本变化后，已创建的 callable 返回 `TOOL_VERSION_MISMATCH`，不会悄悄用新 Schema 继续执行。宿主应重新发现并让 Agent 重新决定参数，写操作不会自动回放。新一轮任务可以使用更新后的工具集合。
 

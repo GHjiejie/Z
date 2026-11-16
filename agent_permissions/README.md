@@ -2,7 +2,7 @@
 
 本目录用于设计和实现 Agent 代表当前用户执行操作时的权限控制。
 
-当前已实现 Python + FastAPI 用户管理服务，包含 21 个业务接口、对应的 Console 后台 UI，以及从接口契约生成的 21 个 Agent 工具。后续章节中的任务委托、租户和审批授权仍为架构规划。
+当前已实现 Python + FastAPI 用户管理服务，包含 21 个可生成工具的业务接口、2 个用户工具授权管理接口、对应的 Console 后台 UI，以及从接口契约生成的 21 个 Agent 工具。后续章节中的任务委托、租户和审批授权仍为架构规划。
 
 用户权限采用可配置 RBAC：用户绑定多个角色，角色绑定操作权限；内置 `admin`、`member` 并支持自定义角色。账号及授权关联支持 Docker PostgreSQL 18 和本地 SQLite 持久化。
 
@@ -11,6 +11,7 @@
 - [连接池验证报告](docs/connection-pool-validation.md)：真实 PostgreSQL 测试、本地压测结果及过载边界。
 - [可配置 RBAC](docs/rbac.md)：数据模型、角色管理接口、授权边界和旧数据库迁移。
 - [API Agent 工具](docs/agent-tools.md)：工具生成、发现与调用、LangChain 适配、版本绑定和自动同步检查。
+- [用户级 Agent 工具授权](docs/user-agent-tool-grants.md)：用户页面配置、独立授权存储、角色变更保留设置和执行时 RBAC 校验；附[改造方案与架构图](docs/user-agent-tool-grants-plan.md)。
 - [项目独立模型配置](docs/model.md)：本目录专用的 Responses API 客户端、供应商配置及 Agent 接入示例。
 - [OpenAI 兼容 Chat 接口](docs/chat-api.md)：OpenAI SDK 对话、流式响应、自动业务工具执行和会话鉴权。
 - [LangSmith 追踪](docs/langsmith.md)：Agent、模型与工具调用链、请求关联、项目独立配置和脱敏。

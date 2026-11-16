@@ -23,6 +23,7 @@ from agent_permissions.chat_api import ChatRequest, _stream
 from agent_permissions.config import Settings
 from agent_permissions.models import UserCreate
 from agent_permissions.service import RequestInfo
+from agent_permissions.test_support import grant_tools
 from agent_permissions.tracing import ChatTracing, TracingSettings
 
 USAGE = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
@@ -108,6 +109,11 @@ class OpenAIChatTests(unittest.TestCase):
             )
         )
         self.token = self.login("admin")
+        admin_headers = {"Authorization": "Bearer " + self.token}
+        user_id = self.http.get("/api/v1/users/me", headers=admin_headers).json()[
+            "data"
+        ]["id"]
+        grant_tools(self.http, admin_headers, user_id)
         self.sdk = self.sdk_for(self.token)
 
     def login(self, username):
@@ -137,6 +143,11 @@ class OpenAIChatTests(unittest.TestCase):
             },
         )
         self.assertEqual(response.status_code, 201)
+        grant_tools(
+            self.http,
+            {"Authorization": "Bearer " + self.token},
+            response.json()["data"]["id"],
+        )
         return self.login("member")
 
     def test_sync_sdk_runs_real_tool_and_decodes_standard_completion(self) -> None:
@@ -270,6 +281,10 @@ class OpenAIChatTests(unittest.TestCase):
             },
         )
         viewer = self.login("viewer")
+        viewer_id = self.http.get(
+            "/api/v1/users", headers=headers, params={"q": "viewer"}
+        ).json()["data"]["items"][0]["id"]
+        grant_tools(self.http, headers, viewer_id, ["user.list"])
         self.model.mode = "list"
 
         def revoke():
@@ -284,6 +299,66 @@ class OpenAIChatTests(unittest.TestCase):
         )
         self.assertEqual(result.choices[0].message.content, "PERMISSION_DENIED")
         self.assertIn("agent_users_user_list", self.model.tool_names[0])
+
+    def test_no_delegated_tools_still_supports_normal_and_streaming_chat(self):
+        headers = {"Authorization": "Bearer " + self.token}
+        user_id = self.http.get("/api/v1/users/me", headers=headers).json()["data"][
+            "id"
+        ]
+        endpoint = f"/api/v1/users/{user_id}/agent-tools"
+        view = self.http.get(endpoint, headers=headers).json()["data"]
+        self.http.patch(
+            endpoint,
+            headers=headers,
+            json={
+                "expected_version": view["version"],
+                "catalog_revision": view["catalog_revision"],
+                "changes": [
+                    {"operation_id": item["operation_id"], "enabled": False}
+                    for item in view["items"]
+                ],
+            },
+        ).raise_for_status()
+        self.model.mode = "echo"
+        result = self.sdk.chat.completions.create(
+            model="fixture-model", messages=[{"role": "user", "content": "你好"}]
+        )
+        self.assertEqual(result.choices[0].message.content, "你好")
+        chunks = list(
+            self.sdk.chat.completions.create(
+                model="fixture-model",
+                messages=[{"role": "user", "content": "你好"}],
+                stream=True,
+            )
+        )
+        self.assertEqual(
+            "".join(
+                chunk.choices[0].delta.content or ""
+                for chunk in chunks
+                if chunk.choices
+            ),
+            "你好",
+        )
+        self.assertTrue(all(not names for names in self.model.tool_names))
+
+    def test_delegation_revocation_during_agent_run_blocks_cached_tool(self):
+        headers = {"Authorization": "Bearer " + self.token}
+        user_id = self.http.get("/api/v1/users/me", headers=headers).json()["data"][
+            "id"
+        ]
+
+        def revoke():
+            with self.app.state.database.transaction(write=True) as connection:
+                connection.execute(
+                    "UPDATE user_agent_tool_grants SET enabled=0 WHERE user_id=? AND operation_id='user.self.read'",
+                    (user_id,),
+                )
+
+        self.model.on_first_call = revoke
+        result = self.sdk.chat.completions.create(
+            model="fixture-model", messages=[{"role": "user", "content": "查看资料"}]
+        )
+        self.assertEqual(result.choices[0].message.content, "TOOL_NOT_GRANTED")
 
     def test_sdk_authentication_validation_and_unknown_model_errors(self) -> None:
         with self.assertRaises(openai.AuthenticationError) as caught:

@@ -28,7 +28,8 @@ CREATE TABLE IF NOT EXISTS users (
     last_login_at TEXT,
     created_at TEXT NOT NULL,
     updated_at TEXT NOT NULL,
-    deleted_at TEXT
+    deleted_at TEXT,
+    agent_tools_version INTEGER NOT NULL DEFAULT 1 CHECK(agent_tools_version>=1)
 );
 CREATE TABLE IF NOT EXISTS sessions (
     token_digest TEXT PRIMARY KEY,
@@ -89,6 +90,17 @@ CREATE TABLE IF NOT EXISTS role_permissions (
 CREATE INDEX IF NOT EXISTS role_permissions_permission ON role_permissions(permission_code);
 """
 
+AGENT_GRANTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS user_agent_tool_grants (
+    user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+    operation_id TEXT NOT NULL,
+    enabled INTEGER NOT NULL DEFAULT 0 CHECK(enabled IN (0,1)),
+    updated_by TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    PRIMARY KEY(user_id,operation_id)
+);
+"""
+
 
 class Database:
     def __init__(self, path: Path) -> None:
@@ -111,7 +123,7 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2):
+                if version not in (0, 1, 2, 3):
                     raise RuntimeError("Unsupported user database schema version")
                 if version == 0:
                     self._execute_schema(connection, SCHEMA)
@@ -131,7 +143,12 @@ class Database:
                             ],
                         )
                     connection.execute("ALTER TABLE users DROP COLUMN roles")
-                connection.execute("PRAGMA user_version=2")
+                if version in (1, 2):
+                    connection.execute(
+                        "ALTER TABLE users ADD COLUMN agent_tools_version INTEGER NOT NULL DEFAULT 1 CHECK(agent_tools_version>=1)"
+                    )
+                self._execute_schema(connection, AGENT_GRANTS_SCHEMA)
+                connection.execute("PRAGMA user_version=3")
                 connection.commit()
             except BaseException:
                 connection.rollback()

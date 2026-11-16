@@ -42,6 +42,7 @@
 | `user.status.update` | 启用、禁用用户 | 无 | 有 |
 | `user.password.reset` | 重置其他用户的密码 | 无 | 有 |
 | `user.roles.assign` | 设置用户角色 | 无 | 有 |
+| `user.agent_tools.manage` | 管理用户的 Agent 工具授权 | 无 | 有 |
 | `role.read` | 查看角色定义与权限目录 | 无 | 有 |
 | `role.create` | 新增角色 | 无 | 有 |
 | `role.update` | 编辑角色及权限 | 无 | 有 |
@@ -179,6 +180,8 @@ If-Match: "v3"
 | API-19 | `GET` | `/api/v1/roles/{role_code}` | 查询角色详情与版本 | `role.read` | `200` |
 | API-20 | `PATCH` | `/api/v1/roles/{role_code}` | 编辑角色及权限 | `role.update` | `200` |
 | API-21 | `DELETE` | `/api/v1/roles/{role_code}` | 删除未使用的自定义角色 | `role.delete` | `204` |
+| API-22 | `GET` | `/api/v1/users/{user_id}/agent-tools` | 查询用户工具授权与当前业务权限 | `user.read` | `200` |
+| API-23 | `PATCH` | `/api/v1/users/{user_id}/agent-tools` | 批量保存用户工具授权 | `user.read` 和 `user.agent_tools.manage` | `200` |
 
 除登录外均需有效会话，并逐次校验当前角色权限。首次登录及管理员重置密码后可直接访问有权限的接口。静态路径 `/users/me` 及其子路径应与动态用户 ID 路由明确区分。
 
@@ -631,7 +634,9 @@ If-Match: "v3"
 
 ### API-15～API-21 角色与权限管理
 
-`GET /roles` 查询持久化角色定义，所需权限为 `role.read`。角色详情新增 `built_in/user_count/version/created_at/updated_at`，角色列表以内置角色优先、编码升序返回。管理员默认拥有全部 14 项权限。
+`GET /roles` 查询持久化角色定义，所需权限为 `role.read`。角色详情新增 `built_in/user_count/version/created_at/updated_at`，角色列表以内置角色优先、编码升序返回。管理员默认拥有全部 15 项权限。
+
+用户级 Agent 工具配置新增 `GET /users/{user_id}/agent-tools` 与 `PATCH /users/{user_id}/agent-tools`：查询需要 `user.read`，保存还需要 `user.agent_tools.manage` 和目标管理范围。使用独立配置版本、批量变更、目录摘要检查，角色变化不清除配置；请求响应及错误码见[工具授权接口](user-agent-tool-grants.md#配置接口)。两个接口不生成 Agent 工具。
 
 新增角色选项、权限目录、角色创建、详情、更新与删除接口。请求字段、响应示例、版本条件、授权范围、角色占用保护和数据库迁移见 [可配置 RBAC 接口说明](rbac.md)。
 

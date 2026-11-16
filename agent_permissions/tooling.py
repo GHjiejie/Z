@@ -54,15 +54,18 @@ def activate_tools(app: FastAPI, *, manifest_path: Path | None = None) -> None:
     app.state.tool_executor = ToolExecutor(registry)
 
 
-async def execution_context(request: Request) -> ExecutionContext:
+async def _execution_access(
+    request: Request,
+) -> tuple[ExecutionContext, frozenset[str]]:
     authorization = request.headers.get("Authorization")
     granted = frozenset()
+    operations = frozenset()
     if authorization is not None:
         scheme, _, token = authorization.partition(" ")
         if scheme.lower() != "bearer" or not token or len(token) > 1024:
             raise ApiError(401, "UNAUTHENTICATED", "请重新登录")
-        granted = await run_in_threadpool(
-            request.app.state.service.tool_permissions,
+        granted, operations = await run_in_threadpool(
+            request.app.state.service.tool_access,
             Authority(token_digest(token)),
             request.state.info,
         )
@@ -71,18 +74,27 @@ async def execution_context(request: Request) -> ExecutionContext:
         authenticated=authorization is not None,
         authorization=authorization,
         request_id=request.state.info.request_id,
-    )
+    ), operations
+
+
+async def execution_context(request: Request) -> ExecutionContext:
+    context, _ = await _execution_access(request)
+    return context
 
 
 def mount_agent_tools(app: FastAPI) -> None:
     @app.get("/agent-tools", name="tools.list", openapi_extra=CONTROL_METADATA)
     async def list_tools(request: Request) -> dict:
-        context = await execution_context(request)
+        context, operations = await _execution_access(request)
         snapshot = app.state.tool_registry.snapshot()
         definitions = [
             item["definition"]
             for item in snapshot["tools"]
-            if permitted(
+            if (
+                item["binding"]["policy"]["authentication"] == "none"
+                or item["binding"]["operationId"] in operations
+            )
+            and permitted(
                 item["binding"]["policy"],
                 set(context.permissions),
                 authenticated=context.authenticated,
@@ -97,7 +109,7 @@ def mount_agent_tools(app: FastAPI) -> None:
 
     @app.post("/agent-tools/call", name="tools.call", openapi_extra=CONTROL_METADATA)
     async def call_tool(payload: ToolCall, request: Request) -> dict:
-        context = await execution_context(request)
+        context, operations = await _execution_access(request)
         address = request.client
         transport = httpx.ASGITransport(
             app=app, client=(address.host, address.port) if address else ("unknown", 0)
@@ -107,6 +119,32 @@ def mount_agent_tools(app: FastAPI) -> None:
             transport=transport, base_url="http://agent-tools.internal", trust_env=False
         ) as client:
             try:
+                snapshot = app.state.tool_registry.snapshot()
+                tool = next(
+                    (
+                        item
+                        for item in snapshot["tools"]
+                        if item["definition"]["name"] == payload.name
+                    ),
+                    None,
+                )
+                if tool is None:
+                    raise ToolError(
+                        "TOOL_UNAVAILABLE", "工具不存在或已下线，请刷新工具目录", 404
+                    )
+                if payload.revision != snapshot["bundleDigest"]:
+                    raise ToolError(
+                        "TOOL_VERSION_MISMATCH", "工具版本已变化，请刷新工具目录"
+                    )
+                binding = tool["binding"]
+                if (
+                    binding["policy"]["authentication"] == "session"
+                    and context.authenticated
+                    and binding["operationId"] not in operations
+                ):
+                    raise ToolError(
+                        "TOOL_NOT_GRANTED", "当前用户未允许 Agent 调用此工具", 403
+                    )
                 return await app.state.tool_executor.call(
                     payload.name,
                     payload.arguments,
@@ -115,6 +153,14 @@ def mount_agent_tools(app: FastAPI) -> None:
                     client=client,
                 )
             except ToolError as error:
+                await run_in_threadpool(
+                    request.app.state.service.record_failure,
+                    request.state.info,
+                    "agent.tool.call",
+                    request.state.info.actor_user_id,
+                    error.code,
+                    operation_id=tool["binding"]["operationId"] if tool else None,
+                )
                 logger.warning(
                     "Tool rejected name=%s revision=%s request_id=%s reason=%s",
                     payload.name,

@@ -1,6 +1,8 @@
 # OpenAI 兼容的 Agent Chat 接口
 
-服务通过 `POST /v1/chat/completions` 对外提供 Agent 对话，可直接使用 Python OpenAI SDK 的 `client.chat.completions.create()`。Agent 默认发现并自动调用当前登录用户有权使用的业务工具，完成账号查询、用户管理和角色权限操作。
+服务通过 `POST /v1/chat/completions` 对外提供 Agent 对话，可直接使用 Python OpenAI SDK 的 `client.chat.completions.create()`。Agent 自动发现当前用户已允许且实时 RBAC 允许的业务工具，完成账号查询、用户管理和角色权限操作。
+
+首次使用或从旧版升级后，先在用户管理页的“Agent 工具授权”中为目标账号开启所需工具，具体规则见[用户级授权说明](user-agent-tool-grants.md)。角色变化保留设置；没有可用业务工具时仍可普通聊天。每次实际调用重新检查授权，旧对话缓存的工具不能绕过撤权。
 
 对外协议为 Chat Completions；内部仍使用 [本项目独立模型客户端](model.md)和供应商的 Responses API。客户端提供业务会话令牌，供应商密钥保存在服务端 `agent_permissions/.env`。
 

@@ -14,6 +14,7 @@ from uuid import uuid4
 import psycopg
 
 from agent_permissions.config import Settings
+from agent_permissions.database import Database
 from agent_permissions.postgres import PostgresDatabase
 
 TABLE_COLUMNS = {
@@ -40,9 +41,17 @@ TABLE_COLUMNS = {
         "created_at",
         "updated_at",
         "deleted_at",
+        "agent_tools_version",
     ),
     "role_permissions": ("role_code", "permission_code"),
     "user_roles": ("user_id", "role_code"),
+    "user_agent_tool_grants": (
+        "user_id",
+        "operation_id",
+        "enabled",
+        "updated_by",
+        "updated_at",
+    ),
     "sessions": (
         "token_digest",
         "user_id",
@@ -101,19 +110,26 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
     with closing(sqlite3.connect(backup.as_uri() + "?mode=ro", uri=True)) as source:
         source.row_factory = sqlite3.Row
         source.execute("BEGIN")
-        if source.execute("PRAGMA user_version").fetchone()[0] != 2:
-            raise ValueError("源数据库必须先升级为 RBAC schema 2，原文件与备份均已保留")
+        version = source.execute("PRAGMA user_version").fetchone()[0]
+        if version not in (2, 3):
+            raise ValueError("源数据库必须先升级为 schema 2 或 3，原文件与备份均已保留")
+        source_columns = dict(TABLE_COLUMNS)
+        if version == 2:
+            source_columns["users"] = source_columns["users"][:-1]
+            del source_columns["user_agent_tool_grants"]
         if (
             source.execute("PRAGMA integrity_check").fetchone()[0] != "ok"
             or source.execute("PRAGMA foreign_key_check").fetchall()
         ):
             raise ValueError("源数据库完整性检查失败，未导入数据")
-        for table, columns in TABLE_COLUMNS.items():
+        for table, columns in source_columns.items():
             actual = tuple(
                 row["name"] for row in source.execute(f"PRAGMA table_info({table})")
             )
             if actual != columns:
-                raise ValueError(f"源数据库 {table} 字段与 schema 2 不一致，未导入数据")
+                raise ValueError(
+                    f"源数据库 {table} 字段与 schema {version} 不一致，未导入数据"
+                )
         target.initialize(seed=False)
         report = {
             "source": str(source_path),
@@ -127,7 +143,7 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
                 for table in TABLE_COLUMNS
             ):
                 raise ValueError("目标数据库已有数据，拒绝覆盖；请使用空数据库迁移")
-            for table, columns in TABLE_COLUMNS.items():
+            for table, columns in source_columns.items():
                 names = ",".join(columns)
                 rows = source.execute(f"SELECT {names} FROM {table}").fetchall()
                 if rows:
@@ -143,6 +159,10 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
                 if len(imported) != len(rows) or fingerprint(imported) != expected:
                     raise ValueError(f"{table} 迁移校验失败，已回滚全部导入")
                 report["tables"][table] = {"rows": len(rows), "sha256": expected}
+            # Preserve the imported records, then add permissions introduced by this release.
+            Database._seed_catalog(destination)
+            report["source_schema"] = version
+            report["target_schema"] = 3
         return report
 
 

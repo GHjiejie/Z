@@ -374,7 +374,7 @@ class RbacTests(unittest.TestCase):
             catalog = client.get("/api/v1/permissions", headers=self.admin).json()[
                 "data"
             ]
-            self.assertEqual(len(catalog), 14)
+            self.assertEqual(len(catalog), 15)
 
 
 class RbacMigrationTests(unittest.TestCase):
@@ -409,7 +409,7 @@ class RbacMigrationTests(unittest.TestCase):
             database.initialize()
             with database.transaction() as connection:
                 self.assertEqual(
-                    connection.execute("PRAGMA user_version").fetchone()[0], 2
+                    connection.execute("PRAGMA user_version").fetchone()[0], 3
                 )
                 row = connection.execute("SELECT * FROM users").fetchone()
                 self.assertEqual(row["password_hash"], encoded)

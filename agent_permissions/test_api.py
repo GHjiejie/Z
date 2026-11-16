@@ -1000,7 +1000,7 @@ class UserApiTests(unittest.TestCase):
                 re.MULTILINE,
             )
         )
-        self.assertEqual(len(expected), 21)
+        self.assertEqual(len(expected), 23)
         self.assertEqual(
             operations,
             expected
@@ -1016,6 +1016,8 @@ class UserApiTests(unittest.TestCase):
             ("/agent-tools/call", "post"),
             ("/v1/models", "get"),
             ("/v1/chat/completions", "post"),
+            ("/api/v1/users/{user_id}/agent-tools", "get"),
+            ("/api/v1/users/{user_id}/agent-tools", "patch"),
         ]:
             self.assertFalse(schema["paths"][path][method]["x-agent"]["expose"])
         login_schema = schema["components"]["schemas"]["LoginRequest"]

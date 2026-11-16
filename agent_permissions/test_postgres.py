@@ -14,7 +14,7 @@ import psycopg
 from fastapi.testclient import TestClient
 from psycopg import sql
 
-from agent_permissions import test_api, test_rbac
+from agent_permissions import test_agent_grants, test_api, test_rbac
 from agent_permissions.__main__ import main as cli_main
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
@@ -22,6 +22,7 @@ from agent_permissions.migrate_postgres import TABLE_COLUMNS, fingerprint, migra
 from agent_permissions.migrate_postgres import main as migrate_main
 from agent_permissions.models import UserCreate
 from agent_permissions.postgres import PostgresDatabase
+from agent_permissions.test_support import grant_tools
 
 TEST_URL = os.getenv("AGENT_USERS_TEST_DATABASE_URL")
 
@@ -74,6 +75,13 @@ class PostgresRbacTests(PostgresFixture, test_rbac.RbacTests):
 @unittest.skipUnless(
     TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
 )
+class PostgresAgentGrantTests(PostgresFixture, test_agent_grants.UserAgentGrantTests):
+    pass
+
+
+@unittest.skipUnless(
+    TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
+)
 class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
     def setUp(self) -> None:
         directory = self.enterContext(tempfile.TemporaryDirectory())
@@ -115,6 +123,12 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                 },
             )
             self.assertEqual(response.status_code, 201)
+            grant_tools(
+                client,
+                self.headers,
+                response.json()["data"]["id"],
+                ["user.list", "user.self.read"],
+            )
 
     def test_full_migration_preserves_hashes_sessions_relations_and_search(
         self,
@@ -123,6 +137,7 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
         report = migrate(self.path, self.target)
         self.assertTrue(Path(report["backup"]).is_file())
         self.assertEqual(report["tables"]["users"]["rows"], 2)
+        self.assertEqual(report["tables"]["user_agent_tool_grants"]["rows"], 2)
         with self.target.transaction() as target:
             for table in TABLE_COLUMNS:
                 self.assertEqual(
@@ -156,6 +171,83 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
             )
         with self.assertRaisesRegex(ValueError, "目标数据库已有数据"):
             migrate(self.path, self.target)
+
+    def test_schema_two_source_import_uses_default_grants_and_new_management_permission(
+        self,
+    ):
+        self.source()
+        import sqlite3
+
+        with closing(sqlite3.connect(self.path)) as source, source:
+            source.execute("DROP TABLE user_agent_tool_grants")
+            source.execute("ALTER TABLE users DROP COLUMN agent_tools_version")
+            source.execute(
+                "DELETE FROM role_permissions WHERE permission_code='user.agent_tools.manage'"
+            )
+            source.execute(
+                "DELETE FROM permissions WHERE code='user.agent_tools.manage'"
+            )
+            source.execute("PRAGMA user_version=2")
+        report = migrate(self.path, self.target)
+        self.assertEqual(report["source_schema"], 2)
+        with self.target.transaction() as target:
+            self.assertEqual(
+                target.execute(
+                    "SELECT count(*) FROM user_agent_tool_grants"
+                ).fetchone()[0],
+                0,
+            )
+            self.assertEqual(
+                target.execute("SELECT min(agent_tools_version) FROM users").fetchone()[
+                    0
+                ],
+                1,
+            )
+            self.assertIsNotNone(
+                target.execute(
+                    "SELECT 1 FROM role_permissions WHERE role_code='admin' AND permission_code='user.agent_tools.manage'"
+                ).fetchone()
+            )
+
+    def test_postgres_schema_two_upgrade_is_atomic_and_idempotent(self):
+        self.source()
+        migrate(self.path, self.target)
+        with self.target.transaction(write=True) as target:
+            target.execute("DROP TABLE user_agent_tool_grants")
+            target.execute("ALTER TABLE users DROP COLUMN agent_tools_version")
+            target.execute("UPDATE schema_metadata SET version=2")
+        with (
+            patch(
+                "agent_permissions.database.Database._seed_catalog",
+                side_effect=RuntimeError("migration failure"),
+            ),
+            self.assertRaisesRegex(RuntimeError, "migration failure"),
+        ):
+            self.target.initialize()
+        with self.target.transaction() as target:
+            self.assertEqual(
+                target.execute(
+                    "SELECT version FROM schema_metadata WHERE key='schema_version'"
+                ).fetchone()[0],
+                2,
+            )
+            self.assertIsNone(
+                target.execute(
+                    "SELECT column_name FROM information_schema.columns WHERE table_schema=current_schema() AND table_name='users' AND column_name='agent_tools_version'"
+                ).fetchone()
+            )
+        self.target.initialize()
+        self.target.initialize()
+        with self.target.transaction() as target:
+            self.assertEqual(
+                target.execute(
+                    "SELECT version FROM schema_metadata WHERE key='schema_version'"
+                ).fetchone()[0],
+                3,
+            )
+            self.assertEqual(
+                target.execute("SELECT count(*) FROM users").fetchone()[0], 2
+            )
 
     def test_copy_error_rolls_back_all_imported_tables(self) -> None:
         self.source()

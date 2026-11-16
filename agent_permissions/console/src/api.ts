@@ -70,6 +70,31 @@ export interface OwnPermissions {
   permissions: string[];
   role_details: RoleOption[];
 }
+export type AgentToolState =
+  | "not_granted"
+  | "missing_business_permission"
+  | "ready"
+  | "unavailable"
+  | "account_disabled";
+export interface AgentToolGrant {
+  operation_id: string;
+  tool_name: string | null;
+  display_name: string;
+  resource: string;
+  effect: string;
+  enabled: boolean;
+  rbac_allowed: boolean;
+  available: boolean;
+  state: AgentToolState;
+  required_permissions: { all: string[]; any: string[] };
+}
+export interface UserAgentToolGrants {
+  user_id: string;
+  version: number;
+  catalog_revision: string;
+  can_manage: boolean;
+  items: AgentToolGrant[];
+}
 export interface UserQuery {
   page: number;
   page_size: number;
@@ -102,6 +127,48 @@ function number(value: unknown): number {
   if (typeof value !== "number" || !Number.isFinite(value))
     throw new Error("Invalid number");
   return value;
+}
+function boolean(value: unknown): boolean {
+  if (typeof value !== "boolean") throw new Error("Invalid boolean");
+  return value;
+}
+function decodeAgentToolGrants(value: unknown): UserAgentToolGrants {
+  const data = object(value);
+  if (!Array.isArray(data.items)) throw new Error("Invalid tool list");
+  const states: AgentToolState[] = [
+    "not_granted",
+    "missing_business_permission",
+    "ready",
+    "unavailable",
+    "account_disabled",
+  ];
+  return {
+    user_id: text(data.user_id),
+    version: number(data.version),
+    catalog_revision: text(data.catalog_revision),
+    can_manage: boolean(data.can_manage),
+    items: data.items.map((value: unknown) => {
+      const item = object(value);
+      const required = object(item.required_permissions);
+      const state = states.find((state) => state === item.state);
+      if (!state) throw new Error("Invalid tool state");
+      return {
+        operation_id: text(item.operation_id),
+        tool_name: nullableText(item.tool_name),
+        display_name: text(item.display_name),
+        resource: text(item.resource),
+        effect: text(item.effect),
+        enabled: boolean(item.enabled),
+        rbac_allowed: boolean(item.rbac_allowed),
+        available: boolean(item.available),
+        state,
+        required_permissions: {
+          all: strings(required.all),
+          any: strings(required.any),
+        },
+      };
+    }),
+  };
 }
 function strings(value: unknown): string[] {
   if (!Array.isArray(value)) throw new Error("Invalid array");
@@ -475,6 +542,36 @@ export class ApiClient {
     return this.record(
       await this.send(`/users/${encodeURIComponent(id)}`, { signal }),
     );
+  }
+  async userAgentTools(
+    id: string,
+    signal?: AbortSignal,
+  ): Promise<UserAgentToolGrants> {
+    const result = await this.send(
+      `/users/${encodeURIComponent(id)}/agent-tools`,
+      { signal },
+    );
+    return this.decode(result.data, decodeAgentToolGrants);
+  }
+  async updateUserAgentTools(
+    id: string,
+    current: UserAgentToolGrants,
+    changes: { operation_id: string; enabled: boolean }[],
+    signal?: AbortSignal,
+  ): Promise<UserAgentToolGrants> {
+    const result = await this.send(
+      `/users/${encodeURIComponent(id)}/agent-tools`,
+      {
+        method: "PATCH",
+        signal,
+        body: JSON.stringify({
+          expected_version: current.version,
+          catalog_revision: current.catalog_revision,
+          changes,
+        }),
+      },
+    );
+    return this.decode(result.data, decodeAgentToolGrants);
   }
   async createUser(draft: UserDraft): Promise<UserRecord> {
     return this.record(

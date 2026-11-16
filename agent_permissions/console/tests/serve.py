@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 import uvicorn
 from fastapi import Request
+from fastapi.testclient import TestClient
 from starlette.responses import StreamingResponse
 
 from agent_permissions.api import create_app
@@ -16,6 +17,7 @@ from agent_permissions.models import UserCreate
 from agent_permissions.security import token_digest
 from agent_permissions.service import Authority, RequestInfo
 from agent_permissions.test_chat_api import BusinessModel
+from agent_permissions.test_support import grant_tools
 from agent_permissions.tooling import execution_context
 from agent_permissions.tracing import ChatTracing, TracingSettings
 
@@ -166,6 +168,16 @@ def main() -> None:
                 ),
                 RequestInfo("browser-test-fixture", "local-test"),
             )
+        # Browser Chat fixtures explicitly opt in; newly created users remain ungranted.
+        from agent_permissions.tooling import activate_tools
+
+        activate_tools(app)
+        with TestClient(app) as client:
+            headers = {"Authorization": "Bearer " + login["session_token"]}
+            for user in client.get("/api/v1/users", headers=headers).json()["data"][
+                "items"
+            ]:
+                grant_tools(client, headers, user["id"])
         uvicorn.run(
             app, host="127.0.0.1", port=18765, proxy_headers=False, access_log=False
         )

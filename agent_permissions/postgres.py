@@ -12,7 +12,12 @@ import psycopg
 from psycopg_pool import ConnectionPool, PoolClosed
 
 from agent_permissions.config import Settings
-from agent_permissions.database import RBAC_SCHEMA, SCHEMA, Database
+from agent_permissions.database import (
+    AGENT_GRANTS_SCHEMA,
+    RBAC_SCHEMA,
+    SCHEMA,
+    Database,
+)
 
 # Fixed application namespace, shared across processes and schema revisions.
 WRITE_LOCK = (0x41555052, 2)
@@ -311,15 +316,19 @@ class PostgresDatabase:
             version = connection.execute(
                 "SELECT version FROM schema_metadata WHERE key='schema_version'"
             ).fetchone()
-            if version is not None and version[0] != 2:
+            if version is not None and version[0] not in (2, 3):
                 raise RuntimeError("Unsupported user database schema version")
             # BIGINT and DOUBLE PRECISION retain SQLite's integer/float range.
             schema = (
-                (SCHEMA + RBAC_SCHEMA)
+                (SCHEMA + RBAC_SCHEMA + AGENT_GRANTS_SCHEMA)
                 .replace(" INTEGER", " BIGINT")
                 .replace(" REAL", " DOUBLE PRECISION")
             )
             Database._execute_schema(connection, schema)
+            if version is not None and version[0] == 2:
+                connection.execute(
+                    "ALTER TABLE users ADD COLUMN agent_tools_version BIGINT NOT NULL DEFAULT 1 CHECK(agent_tools_version>=1)"
+                )
             connection.execute("""CREATE OR REPLACE FUNCTION app_contains(value TEXT,needle TEXT)
                 RETURNS INTEGER LANGUAGE SQL IMMUTABLE PARALLEL SAFE AS $$
                 SELECT pg_catalog.strpos(
@@ -329,5 +338,5 @@ class PostgresDatabase:
             if seed:
                 Database._seed_catalog(connection)
             connection.execute(
-                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',2) ON CONFLICT(key) DO NOTHING"
+                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',3) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
             )

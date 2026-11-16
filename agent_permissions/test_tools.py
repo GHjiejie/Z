@@ -17,6 +17,7 @@ from agent_permissions.api import create_app
 from agent_permissions.config import Settings
 from agent_permissions.models import UserCreate
 from agent_permissions.operations import OPERATIONS
+from agent_permissions.test_support import grant_tools
 from agent_permissions.tooling import compile_tools
 from agent_permissions.tools import main as tools_main
 from api_tools.client import AgentToolClient
@@ -39,6 +40,7 @@ class UserToolTests(unittest.TestCase):
         self.headers = {
             "Authorization": "Bearer " + login.json()["data"]["session_token"]
         }
+        grant_tools(self.client, self.headers, login.json()["data"]["user"]["id"])
         self.catalog = self.client.get("/agent-tools", headers=self.headers).json()
         self.called = set()
 
@@ -185,7 +187,9 @@ class UserToolTests(unittest.TestCase):
             "Authorization": "Bearer " + login["body"]["data"]["session_token"]
         }
         self.call("auth.logout", status=204)
-        self.assertEqual(self.called, set(OPERATIONS))
+        self.assertEqual(
+            self.called, {key for key, spec in OPERATIONS.items() if spec.expose}
+        )
         self.assertEqual(
             self.client.get("/agent-tools", headers=self.headers).status_code, 401
         )
@@ -246,6 +250,7 @@ class UserToolTests(unittest.TestCase):
             "/api/v1/auth/login", json={"username": "viewer", "password": PASSWORD}
         ).json()
         viewer = {"Authorization": "Bearer " + login["data"]["session_token"]}
+        grant_tools(self.client, self.headers, login["data"]["user"]["id"])
         visible = self.client.get("/agent-tools", headers=viewer).json()
         self.assertIn(
             "agent_users_user_list", [item["name"] for item in visible["tools"]]

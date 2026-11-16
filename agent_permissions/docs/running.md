@@ -1,6 +1,6 @@
 # 用户管理服务运行说明
 
-当前服务实现了[接口文档](user-management-api.md)中的 21 个接口，并提供 Console 用户管理和 Agent 会话页面。支持 Docker PostgreSQL 18 和本地 SQLite，持久化账号、RBAC、登录会话、审计与限流记录。当前 Docker 启动与数据迁移见 [数据库部署说明](docker-database.md)。用户管理无需模型服务；Agent 聊天需配置[本模块模型客户端](model.md)。
+当前服务实现了[接口文档](user-management-api.md)中的 21 个业务接口与 2 个用户工具授权管理接口，并提供 Console 用户管理和 Agent 会话页面。支持 Docker PostgreSQL 18 和本地 SQLite，持久化账号、RBAC、工具授权、登录会话、审计与限流记录。当前 Docker 启动与数据迁移见 [数据库部署说明](docker-database.md)。用户管理无需模型服务；Agent 聊天需配置[本模块模型客户端](model.md)，业务工具还需在[用户页面显式授权](user-agent-tool-grants.md)。
 
 全部业务接口已生成对应 Agent 工具，新增 `GET /agent-tools` 与 `POST /agent-tools/call` 用于发现和执行。生成、发布绑定与 LangChain 接入见 [API Agent 工具说明](agent-tools.md)。
 
@@ -202,7 +202,7 @@ npm run test:e2e
 
 - 支持 PostgreSQL 18+ 和本机 SQLite。PostgreSQL 可供多个服务进程连接；SQLite 文件仅支持同机共享，不使用网络共享盘。
 - SQLite 写事务使用 `BEGIN IMMEDIATE`；PostgreSQL 写事务使用统一的事务级 advisory lock。权限复核、目标版本检查、业务修改、会话撤销及成功审计均在持锁事务中串行提交；PostgreSQL 查询采用只读 `REPEATABLE READ`。
-- 生产升级数据库结构前需增加对应迁移。当前 schema 版本为 2，支持空库初始化及 schema 1 的原子迁移；保留账号、密码与会话，遇到未知版本停止启动。具体流程见 [RBAC 迁移说明](rbac.md#旧数据库升级)。
+- 当前 schema 版本为 3，支持空库初始化及旧版原子迁移，保留账号、密码与会话。升级前保存一致性备份，升级后用户工具默认未授权，需在页面开启；遇到未知版本停止启动。具体流程见 [RBAC 迁移说明](rbac.md#旧数据库升级)。
 - 初始管理员创建属于本地维护入口；HTTP API 不提供公开注册、找回密码、删除恢复。
 - 业务日志和接口错误不输出密码、密码哈希或会话令牌；排查时可通过 `request_id` 关联数据库中的审计事件。
 

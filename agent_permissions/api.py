@@ -27,6 +27,7 @@ from agent_permissions.database import create_database
 from agent_permissions.database_errors import connection_failure_reason
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
+    AgentToolGrantsUpdate,
     Envelope,
     ErrorResponse,
     LoginRequest,
@@ -42,6 +43,7 @@ from agent_permissions.models import (
     RoleUpdate,
     StatusUpdate,
     User,
+    UserAgentToolGrants,
     UserCreate,
     UserPage,
     UserQuery,
@@ -441,6 +443,43 @@ def delete_role(
     return Response(status_code=204)
 
 
+@router.get(
+    "/users/{user_id}/agent-tools",
+    response_model=Envelope[UserAgentToolGrants],
+    name="user.agent_tools.read",
+)
+def user_agent_tools(
+    user_id: str, request: Request, service: Service, identity: Identity, info: Info
+) -> dict:
+    return result(
+        info,
+        service.user_agent_tools(
+            identity, user_id, info, request.app.state.tool_registry.snapshot()
+        ),
+    )
+
+
+@router.patch(
+    "/users/{user_id}/agent-tools",
+    response_model=Envelope[UserAgentToolGrants],
+    name="user.agent_tools.update",
+)
+def update_user_agent_tools(
+    user_id: str,
+    payload: AgentToolGrantsUpdate,
+    request: Request,
+    service: Service,
+    identity: Identity,
+    info: Info,
+) -> dict:
+    return result(
+        info,
+        service.user_agent_tools(
+            identity, user_id, info, request.app.state.tool_registry.snapshot(), payload
+        ),
+    )
+
+
 def error_response(
     request: Request, error: ApiError, *, audit_failure: bool = True
 ) -> JSONResponse:
@@ -539,7 +578,11 @@ def create_app(
                 request,
                 ApiError(500, "INTERNAL_ERROR", "服务内部错误，请凭请求标识排查"),
             )
-        response.headers["Cache-Control"] = "no-store"
+        response.headers["Cache-Control"] = (
+            "private, no-store"
+            if request.url.path.startswith("/agent-tools")
+            else "no-store"
+        )
         response.headers["X-Request-ID"] = request.state.info.request_id
         return response
 

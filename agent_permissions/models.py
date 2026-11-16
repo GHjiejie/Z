@@ -11,6 +11,7 @@ from pydantic import (
     EmailStr,
     Field,
     SecretStr,
+    StrictBool,
     StrictStr,
     field_validator,
     model_validator,
@@ -205,6 +206,58 @@ class OwnPermissions(StrictModel):
     roles: list[Role]
     permissions: list[str]
     role_details: list["RoleOption"]
+
+
+class AgentToolGrantChange(StrictModel):
+    operation_id: Annotated[StrictStr, Field(min_length=1, max_length=128)]
+    enabled: StrictBool
+
+
+class AgentToolGrantsUpdate(StrictModel):
+    expected_version: int = Field(strict=True, ge=1, le=9_223_372_036_854_775_807)
+    catalog_revision: str = Field(pattern=r"^[0-9a-f]{64}$")
+    changes: list[AgentToolGrantChange] = Field(min_length=1, max_length=1024)
+
+    @field_validator("changes")
+    @classmethod
+    def unique_operations(
+        cls, changes: list[AgentToolGrantChange]
+    ) -> list[AgentToolGrantChange]:
+        if len({change.operation_id for change in changes}) != len(changes):
+            raise ValueError("不能重复提交同一工具")
+        return changes
+
+
+class ToolRequiredPermissions(StrictModel):
+    all: list[str]
+    any: list[str]
+
+
+class AgentToolGrantItem(StrictModel):
+    operation_id: str
+    tool_name: str | None
+    display_name: str
+    resource: str
+    effect: str
+    enabled: bool
+    rbac_allowed: bool
+    available: bool
+    state: Literal[
+        "not_granted",
+        "missing_business_permission",
+        "ready",
+        "unavailable",
+        "account_disabled",
+    ]
+    required_permissions: ToolRequiredPermissions
+
+
+class UserAgentToolGrants(StrictModel):
+    user_id: str
+    version: int
+    catalog_revision: str
+    can_manage: bool
+    items: list[AgentToolGrantItem]
 
 
 class RoleDefinition(StrictModel):

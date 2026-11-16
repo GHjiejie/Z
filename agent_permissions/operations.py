@@ -11,8 +11,14 @@ class OperationSpec:
     effect: str = "read"
     idempotent: bool = True
     authentication: str = "session"
+    expose: bool = True
 
     def metadata(self) -> dict:
+        if not self.expose:
+            return {
+                "expose": False,
+                "reason": "User Agent delegation management is not an Agent tool",
+            }
         return {
             "expose": True,
             "authentication": self.authentication,
@@ -123,6 +129,18 @@ OPERATIONS = {
         ("role.delete",),
         effect="destructive",
         idempotent=False,
+    ),
+    "user.agent_tools.read": OperationSpec(
+        "查看指定用户的 Agent 工具授权及当前业务权限。",
+        ("user.read",),
+        expose=False,
+    ),
+    "user.agent_tools.update": OperationSpec(
+        "批量更新指定用户的 Agent 工具授权，不改变其 RBAC 权限。",
+        ("user.read", "user.agent_tools.manage"),
+        effect="write",
+        idempotent=False,
+        expose=False,
     ),
 }
 

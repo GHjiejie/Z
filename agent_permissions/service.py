@@ -15,9 +15,11 @@ from uuid import uuid4
 import psycopg
 from pydantic import ValidationError
 
+from agent_permissions.agent_grants import config_view, grants_for, save_changes
 from agent_permissions.config import Settings
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
+    AgentToolGrantsUpdate,
     PasswordChange,
     PasswordReset,
     RoleCreate,
@@ -173,6 +175,7 @@ class UserService:
         code: str,
         *,
         role_code: str | None = None,
+        operation_id: str | None = None,
     ) -> None:
         try:
             with self.database.transaction(write=True) as connection:
@@ -183,7 +186,10 @@ class UserService:
                     target,
                     outcome="failure",
                     reason=code,
-                    changes={"role_code": role_code} if role_code else None,
+                    changes={
+                        **({"role_code": role_code} if role_code else {}),
+                        **({"operation_id": operation_id} if operation_id else {}),
+                    },
                 )
         except (sqlite3.Error, psycopg.Error):
             # The failed request remains failed; never log its body or token.
@@ -227,6 +233,56 @@ class UserService:
         with self.database.transaction() as connection:
             user = self._authorize(connection, authority, info, None)
             return frozenset(permissions_for(connection, user["id"]))
+
+    def tool_access(
+        self, authority: Authority, info: RequestInfo
+    ) -> tuple[frozenset[str], frozenset[str]]:
+        """Read current RBAC and delegation for one authenticated subject."""
+        with self.database.transaction() as connection:
+            user = self._authorize(connection, authority, info, None)
+            return (
+                frozenset(permissions_for(connection, user["id"])),
+                frozenset(
+                    operation
+                    for operation, enabled in grants_for(connection, user["id"]).items()
+                    if enabled
+                ),
+            )
+
+    def user_agent_tools(
+        self,
+        authority: Authority,
+        user_id: str,
+        info: RequestInfo,
+        snapshot: dict,
+        payload: AgentToolGrantsUpdate | None = None,
+    ) -> dict:
+        operation = (
+            "user.agent_tools.read" if payload is None else "user.agent_tools.update"
+        )
+        with self.database.transaction(write=payload is not None) as connection:
+            actor = self._authorize(connection, authority, info, operation)
+            target = self._target(connection, user_id)
+            actor_permissions = set(permissions_for(connection, actor["id"]))
+            target_permissions = set(permissions_for(connection, target["id"]))
+            in_scope = target_permissions <= actor_permissions
+            can_manage = "user.agent_tools.manage" in actor_permissions and in_scope
+            if payload is not None:
+                self._check_grants(connection, actor, target_permissions)
+                changes = save_changes(
+                    connection,
+                    target,
+                    payload,
+                    snapshot,
+                    actor_id=actor["id"],
+                    now=timestamp(self.clock()),
+                )
+                if changes:
+                    self._audit(
+                        connection, info, operation, user_id, changes={"tools": changes}
+                    )
+                target = self._target(connection, user_id)
+            return config_view(connection, target, snapshot, can_manage=can_manage)
 
     @staticmethod
     def _target(connection: Connection, user_id: str) -> Mapping[str, Any]:

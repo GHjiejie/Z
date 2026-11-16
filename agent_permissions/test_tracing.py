@@ -28,6 +28,7 @@ from agent_permissions.config import Settings
 from agent_permissions.models import UserCreate
 from agent_permissions.service import RequestInfo
 from agent_permissions.test_chat_api import BusinessModel
+from agent_permissions.test_support import grant_tools
 from agent_permissions.tracing import ChatTracing, TracingSettings, redact_trace
 
 
@@ -209,6 +210,11 @@ class ChatTracingTests(unittest.TestCase):
             json={"username": "admin", "password": "offline-password"},
         )
         self.token = login.json()["data"]["session_token"]
+        grant_tools(
+            self.http,
+            {"Authorization": "Bearer " + self.token},
+            login.json()["data"]["user"]["id"],
+        )
 
     def chat(self, stream=False, **options):
         return self.http.post(

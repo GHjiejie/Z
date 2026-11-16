@@ -31,6 +31,7 @@ import {
   type MenuAction,
 } from "./components";
 import { UserDialog, type UserDialogState } from "./UserDialog";
+import { AgentToolsDialog } from "./AgentToolsDialog";
 
 const defaults: UserQuery = {
   page: 1,
@@ -70,6 +71,7 @@ export function UsersPage({
   } | null>(null);
   const [statsError, setStatsError] = useState(false);
   const [dialog, setDialog] = useState<UserDialogState | null>(null);
+  const [agentUser, setAgentUser] = useState<User | null>(null);
   const [roleOptions, setRoleOptions] = useState<RoleOption[]>([]);
   const [rolesError, setRolesError] = useState<unknown>(null);
   const refresh = () => setRevision((value) => value + 1);
@@ -162,6 +164,7 @@ export function UsersPage({
   function actions(user: User): MenuAction[] {
     const self = user.id === currentUser.id;
     const items: MenuAction[] = [];
+    items.push({ label: "Agent 工具授权", onClick: () => setAgentUser(user) });
     if (can("user.roles.assign"))
       items.push({
         label: "设置角色",
@@ -549,6 +552,19 @@ export function UsersPage({
           permissions={permissions}
           onClose={() => setDialog(null)}
           onSaved={saved}
+        />
+      )}
+      {agentUser && (
+        <AgentToolsDialog
+          key={agentUser.id}
+          user={agentUser}
+          api={api}
+          permissions={permissions}
+          onClose={() => setAgentUser(null)}
+          onSaved={() => {
+            setAgentUser(null);
+            notify("Agent 工具授权已保存");
+          }}
         />
       )}
     </>
