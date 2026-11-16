@@ -18,6 +18,21 @@
 - [用户管理服务接口文档](docs/user-management-api.md)：当前阶段的登录、用户管理、改密、角色、错误响应和并发控制契约。
 - 本说明后续章节：Agent 业务操作授权的架构规划，其中的租户、项目与文档角色为后续业务示例，与用户管理服务的系统角色区分。
 
+## 使用 Makefile 运行
+
+本目录提供 [Makefile](Makefile)，复用仓库根目录的 Python 环境。在仓库根目录执行：
+
+```bash
+make -C agent_permissions setup       # 首次安装依赖，保留已有模型配置
+make -C agent_permissions db-up       # 使用 Docker PostgreSQL 时执行
+make -C agent_permissions init-admin  # 仅首次空数据库需要；默认 admin / 12345
+make -C agent_permissions run         # 构建 Console 和工具包，前台启动服务
+```
+
+填写 `agent_permissions/.env` 中的模型密钥后，可在 [会话页](http://127.0.0.1:8000/console/#chat) 使用 Agent。已有账号无需重新初始化。后续启动使用 `make -C agent_permissions run`，已构建时可用 `make -C agent_permissions serve`，Ctrl+C 停止服务。
+
+启动和初始化默认使用已存在的 `deploy/.env`，保持数据库一致。没有该文件时沿用 SQLite；显式 `ENV_FILE=` 可取消载入文件，进程环境变量仍然生效。全部目标、开发模式和自定义端口见[运行说明](docs/running.md#makefile-快捷命令)，或执行 `make -C agent_permissions help`。
+
 ## 1. 使用场景与核心原则
 
 第一版假设：用户登录业务系统后，通过 Agent 读取或修改项目中的资源。Agent 以该用户的身份受托执行，不能因为运行服务持有更高权限的凭据就获得额外业务权限。

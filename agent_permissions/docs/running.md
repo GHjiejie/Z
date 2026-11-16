@@ -6,6 +6,55 @@
 
 Chat 服务提供 `GET /v1/models` 和 `POST /v1/chat/completions`，可使用 OpenAI SDK 并自动调用当前用户有权执行的业务工具。模型配置和调用示例见 [Chat 接口说明](chat-api.md)。
 
+## Makefile 快捷命令
+
+需要 `make`、`uv`、Python 3.13+、符合 Console `package.json` 要求的 Node.js 和 npm。使用 PostgreSQL 时还需要 Docker 与 Compose。在仓库根目录运行，或进入 `agent_permissions` 后省略 `-C agent_permissions`：
+
+```bash
+make -C agent_permissions setup
+# 使用 Docker PostgreSQL 时执行；等待数据库健康后返回
+make -C agent_permissions db-up
+# 仅首次空数据库执行，已有账号或已迁移的数据库跳过此步
+make -C agent_permissions init-admin
+make -C agent_permissions run
+```
+
+`setup` 使用根目录 `uv sync --locked` 和 Console 的 `npm ci` 安装依赖。模型 `.env` 不存在时，按 `0600` 权限从 `.env.example` 创建；存在时保留原内容。使用 Chat 前需填写本模块模型密钥。
+
+`run` 按顺序构建 Console、生成并核对工具包，再在前台启动 FastAPI，Console 和 SSE Chat 使用同一服务端口。`serve` 使用已有构建直接启动，`start` 是 `run` 的别名。默认监听 `127.0.0.1:8000`，按 Ctrl+C 停止 HTTP 服务。
+
+| 命令 | 用途 |
+| --- | --- |
+| `make -C agent_permissions help` | 查看全部目标与变量 |
+| `make -C agent_permissions run PORT=8080` | 构建后使用 8080 端口启动 |
+| `make -C agent_permissions serve` | 使用已有构建启动 |
+| `make -C agent_permissions build` | 只构建 Console 和工具包 |
+| `make -C agent_permissions init-admin ADMIN_USERNAME=owner PROMPT_PASSWORD=1` | 空数据库中交互设置初始管理员密码 |
+| `make -C agent_permissions db-status` | 查看 Docker 数据库状态 |
+| `make -C agent_permissions db-down` | 停止 Docker 数据库，保留 named volume |
+| `make -C agent_permissions check` | Python、TypeScript 和格式检查 |
+| `make -C agent_permissions test` | 后端离线测试和前端浏览器测试 |
+
+数据库配置默认选用本模块已存在的 `deploy/.env`，初始化与启动使用同一文件。可通过 `ENV_FILE=/absolute/path/to/config.env` 指定其他配置；`ENV_FILE=` 表示不载入配置文件，数据库 URL 等进程环境变量仍然生效。相对文件路径按调用 `make` 时的工作目录解析。未配置数据库 URL 时使用 SQLite。
+
+如需单独使用 SQLite，跳过 `db-up`，并为初始化与启动同时指定 `ENV_FILE=`：
+
+```bash
+make -C agent_permissions init-admin ENV_FILE=
+make -C agent_permissions run ENV_FILE=
+```
+
+开发模式在两个终端分别运行：
+
+```bash
+# 终端 1：后端自动重载，默认 8000 端口
+make -C agent_permissions dev
+# 终端 2：Vite，默认 5173 端口，API 与 SSE 代理连接本机 8000 端口
+make -C agent_permissions ui-dev
+```
+
+开发页面为 `http://127.0.0.1:5173/console/#chat`；Vite 端口可通过 `UI_PORT` 调整。执行 `test-ui` 或 `test` 前，在 Console 目录运行一次 `npx playwright install chromium`。Makefile 使用现有 CLI，保留直接运行命令的方式，详见以下各节。
+
 ## 1. 准备环境
 
 在仓库根目录运行，Python 版本需为 3.13 或更高：
