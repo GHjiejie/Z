@@ -1,5 +1,10 @@
 import { ApiError } from "./errors";
 import type { ChatUsage } from "./chatStream";
+import {
+  decodeWorkflow,
+  decodeWorkflowEntry,
+  type WorkflowEntry,
+} from "./workflow";
 
 export type FieldValue = string | number | boolean | string[] | null;
 export interface ToolField {
@@ -43,6 +48,7 @@ export type RunStatus =
   | "interrupted"
   | "needs_reconciliation";
 export interface ChatRun {
+  workflow?: WorkflowEntry[];
   id: string;
   conversation_id: string;
   client_request_id: string;
@@ -71,6 +77,7 @@ export interface ToolSubmission {
   omit: string[];
 }
 export interface RunEvent {
+  entry?: WorkflowEntry;
   type: string;
   run_id: string;
   stream_id: string;
@@ -194,6 +201,7 @@ export function decodeRun(value: unknown): ChatRun {
     finish: choice(item.finish, ["stop", "length"]),
     expires_at: number(item.expires_at),
     purged: boolean(item.purged),
+    workflow: item.workflow === undefined ? [] : decodeWorkflow(item.workflow),
     usage: usage
       ? {
           prompt_tokens: number(usage.prompt_tokens),
@@ -280,6 +288,8 @@ export async function readRunStream(
         finalStatus = event.run.status;
     }
     if (type === "text.delta") event.text = text(item.text);
+    if (type === "workflow.updated")
+      event.entry = decodeWorkflowEntry(item.entry);
     if (type === "stream.closed") {
       if (!finalStatus || finalStatus !== item.status)
         throw new ApiError(

@@ -78,4 +78,11 @@ CREATE TABLE IF NOT EXISTS agent_checkpoint_writes (
     value TEXT NOT NULL,
     PRIMARY KEY(thread_id,namespace,checkpoint_id,task_id,idx)
 );
+CREATE TABLE IF NOT EXISTS agent_workflow_entries (
+    run_id TEXT NOT NULL REFERENCES agent_chat_runs(id) ON DELETE CASCADE,
+    entry_id TEXT NOT NULL,
+    position INTEGER NOT NULL,
+    document TEXT NOT NULL,
+    PRIMARY KEY(run_id,entry_id)
+);
 """

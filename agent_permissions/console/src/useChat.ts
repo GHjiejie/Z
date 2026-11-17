@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
+import { PROTOCOL_VERSION, type RunAgentInput } from "@ag-ui/core";
 import { aborted, errorMessage, type ApiClient } from "./api";
 import type { ChatRun, RunEvent, ToolSubmission } from "./chatRuns";
+import type { WorkflowEntry } from "./workflow";
 import {
   chatId,
   completedContext,
@@ -19,6 +21,20 @@ interface Job {
   text: string;
   frame: number | null;
   runId?: string;
+}
+
+function interruptedWorkflow(
+  entries: WorkflowEntry[] | undefined,
+): WorkflowEntry[] | undefined {
+  return entries?.map((entry) =>
+    ["pending", "running", "waiting"].includes(entry.status)
+      ? {
+          ...entry,
+          status: "interrupted",
+          detail: "连接已中断，请读取最新任务状态",
+        }
+      : entry,
+  );
 }
 
 export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
@@ -82,6 +98,7 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
               usage: run.usage ?? undefined,
               finish: run.finish,
               error: run.error?.message,
+              workflow: run.workflow ?? message.workflow,
             }
           : message,
       ),
@@ -154,6 +171,7 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
         ...previousRun,
         status: "interrupted" as const,
         content: current.text,
+        workflow: interruptedWorkflow(previousRun.workflow),
       };
       currentRuns.current = { ...currentRuns.current, [paused.id]: paused };
       if (mounted.current) setRuns(currentRuns.current);
@@ -180,6 +198,18 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
     }
   }
 
+  function interruptProgress(current: Job) {
+    const run = current.runId ? currentRuns.current[current.runId] : undefined;
+    if (!run || run.status !== "running") return;
+    const workflow = interruptedWorkflow(run.workflow);
+    currentRuns.current = {
+      ...currentRuns.current,
+      [run.id]: { ...run, workflow },
+    };
+    setRuns(currentRuns.current);
+    updateAnswer(current, { workflow });
+  }
+
   function receive(current: Job, event: RunEvent) {
     if (job.current !== current || !mounted.current) return;
     current.runId = event.run_id;
@@ -197,6 +227,20 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
       current.frame = null;
       current.text = event.run.content;
       applyRun(event.run);
+    }
+    if (event.entry) {
+      const existing = currentRuns.current[event.run_id];
+      if (existing) {
+        const entry = event.entry;
+        const workflow = [...(existing.workflow ?? [])];
+        const index = workflow.findIndex((item) => item.id === entry.id);
+        if (index < 0) workflow.push(entry);
+        else workflow[index] = entry;
+        const run = { ...existing, workflow, content: current.text };
+        currentRuns.current = { ...currentRuns.current, [run.id]: run };
+        setRuns(currentRuns.current);
+        updateAnswer(current, { runId: run.id, workflow });
+      }
     }
   }
 
@@ -297,32 +341,40 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
       messages: [...value.messages, user, assistant],
     }));
     try {
-      await api.streamRun(
-        "/chat/runs",
+      await api.streamAgui(
         {
-          model,
+          protocolVersion: PROTOCOL_VERSION,
+          threadId: active.id,
+          runId: assistant.id,
+          state: {},
+          tools: [],
+          context: [],
+          forwardedProps: { model },
           messages: [
             ...completedContext(active.messages),
-            { role: "user", content: text },
-          ],
-          conversation_id: active.id,
-          client_request_id: assistant.id,
+            { role: "user" as const, content: text },
+          ].map((message, index) => ({
+            ...message,
+            id: `${assistant.id}:input:${index}`,
+          })),
         },
         current.controller.signal,
         (event) => receive(current, event),
       );
     } catch (error) {
-      if (job.current === current && mounted.current)
+      if (job.current === current && mounted.current) {
+        interruptProgress(current);
         updateAnswer(current, {
           status: aborted(error) ? "stopped" : "failed",
           error: aborted(error) ? undefined : errorMessage(error),
         });
+      }
     } finally {
       settled(current);
     }
   }
 
-  async function continueRun(run: ChatRun, path: string, payload: object) {
+  async function continueRun(run: ChatRun, payload: RunAgentInput) {
     if (job.current) return;
     const conversation = latest.current.conversations.find(
       (item) => item.id === run.conversation_id,
@@ -342,14 +394,25 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
     job.current = current;
     setGeneratingId(run.conversation_id);
     try {
-      await api.streamRun(path, payload, current.controller.signal, (event) =>
-        receive(current, event),
+      await api.streamAgui(
+        {
+          ...payload,
+          state: { run },
+          messages: (conversation?.messages ?? []).map((item) => ({
+            id: item.id,
+            role: item.role,
+            content: item.content,
+          })),
+        },
+        current.controller.signal,
+        (event) => receive(current, event),
       );
     } catch (error) {
       if (
         job.current === current &&
         currentRuns.current[run.id]?.status === "running"
       ) {
+        interruptProgress(current);
         updateAnswer(current, {
           status: "stopped",
           error: errorMessage(error),
@@ -371,20 +434,33 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
     runs,
     resume: (run: ChatRun, payload: ToolSubmission) =>
       run.interaction
-        ? continueRun(
-            run,
-            `/chat/runs/${encodeURIComponent(run.id)}/interactions/${encodeURIComponent(run.interaction.id)}/resume`,
-            payload,
-          )
+        ? continueRun(run, {
+            protocolVersion: PROTOCOL_VERSION,
+            threadId: run.conversation_id,
+            runId: payload.submission_id,
+            messages: [],
+            state: {},
+            tools: [],
+            context: [],
+            forwardedProps: { action: "resume", businessRunId: run.id },
+            resume: [
+              { interruptId: run.interaction.id, status: "resolved", payload },
+            ],
+          })
         : Promise.resolve(),
     continue: async (run: ChatRun) => {
       setRecoveryError(null);
       try {
-        await continueRun(
-          run,
-          `/chat/runs/${encodeURIComponent(run.id)}/recover`,
-          {},
-        );
+        await continueRun(run, {
+          protocolVersion: PROTOCOL_VERSION,
+          threadId: run.conversation_id,
+          runId: chatId(),
+          messages: [],
+          state: {},
+          tools: [],
+          context: [],
+          forwardedProps: { action: "recover", businessRunId: run.id },
+        });
       } catch (error) {
         if (!aborted(error)) setRecoveryError(error);
       }

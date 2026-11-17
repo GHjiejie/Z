@@ -454,7 +454,7 @@ class HitlTests(unittest.TestCase):
             )
         database.initialize()
         with database.transaction() as connection:
-            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 4)
+            self.assertEqual(connection.execute("PRAGMA user_version").fetchone()[0], 5)
             self.assertEqual(
                 connection.execute(
                     "SELECT enabled FROM user_agent_tool_grants WHERE user_id=? AND operation_id='role.create'",

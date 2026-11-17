@@ -58,11 +58,22 @@ test("写工具暂停，刷新恢复并编辑参数，重复提交只写入一�
       path: "test-results/hitl-confirm-desktop.png",
       fullPage: true,
     });
-    const submitted = page.waitForRequest((req) =>
-      req.url().endsWith("/resume"),
+    const submitted = page.waitForRequest(
+      (req) =>
+        req.url().endsWith("/ag-ui") &&
+        req.postDataJSON().forwardedProps?.action === "resume",
     );
     await card.getByRole("button", { name: "确认执行" }).click();
     const submission = await submitted;
+    expect(
+      submission
+        .postDataJSON()
+        .messages.some(
+          (item: { role: string; content: string }) =>
+            item.role === "user" && item.content.includes("HITL 创建角色"),
+        ),
+    ).toBe(true);
+    expect(submission.postDataJSON().state.run.status).toBe("waiting");
     await expect(
       page.getByRole("article", { name: "Agent 回复" }),
     ).toContainText("操作已完成");
@@ -73,7 +84,7 @@ test("写工具暂停，刷新恢复并编辑参数，重复提交只写入一�
       data: submission.postDataJSON(),
     });
     expect(retry.ok()).toBe(true);
-    expect(await retry.text()).toContain("run.snapshot");
+    expect(await retry.text()).toContain("STATE_SNAPSHOT");
     expect(
       (await (await request.get(`/api/v1/roles/${code}`, { headers })).json())
         .data.version,
@@ -147,11 +158,13 @@ test("补齐创建用户参数，密码不进入记录，移动端表单可操�
       path: "test-results/hitl-form-mobile.png",
       fullPage: true,
     });
-    const submitted = page.waitForRequest((req) =>
-      req.url().endsWith("/resume"),
+    const submitted = page.waitForRequest(
+      (req) =>
+        req.url().endsWith("/ag-ui") &&
+        req.postDataJSON().forwardedProps?.action === "resume",
     );
     await card.getByRole("button", { name: "确认执行" }).click();
-    const payload = (await submitted).postDataJSON();
+    const payload = (await submitted).postDataJSON().resume[0].payload;
     expect(payload.values["/body/roles"]).toEqual(["member"]);
     expect(payload.values).not.toHaveProperty("/body/email");
     expect(payload.omit).toContain("/body/email");
@@ -204,24 +217,21 @@ test("折叠中的可选字段校验失败会展开并定位，草稿可以继�
   await email.fill("invalid-email");
   await optional.locator("summary").click();
   let submissions = 0;
-  await page.route(
-    "**/api/v1/chat/runs/*/interactions/*/resume",
-    async (route) => {
-      submissions += 1;
-      await route.fulfill({
-        status: 422,
-        json: {
-          error: {
-            code: "VALIDATION_ERROR",
-            message: "请检查工具参数",
-            details: [
-              { field: "/body/email", message: "此邮箱不可用，请更换邮箱" },
-            ],
-          },
+  await page.route("**/api/v1/ag-ui", async (route) => {
+    submissions += 1;
+    await route.fulfill({
+      status: 422,
+      json: {
+        error: {
+          code: "VALIDATION_ERROR",
+          message: "请检查工具参数",
+          details: [
+            { field: "/body/email", message: "此邮箱不可用，请更换邮箱" },
+          ],
         },
-      });
-    },
-  );
+      },
+    });
+  });
   await card.getByRole("button", { name: "确认执行", exact: true }).click();
   await expect(optional).toHaveAttribute("open");
   await expect(email).toBeFocused();

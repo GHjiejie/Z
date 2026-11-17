@@ -14,7 +14,13 @@ import psycopg
 from fastapi.testclient import TestClient
 from psycopg import sql
 
-from agent_permissions import test_agent_grants, test_api, test_hitl, test_rbac
+from agent_permissions import (
+    test_agent_grants,
+    test_agui,
+    test_api,
+    test_hitl,
+    test_rbac,
+)
 from agent_permissions.__main__ import main as cli_main
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
@@ -83,6 +89,13 @@ class PostgresAgentGrantTests(PostgresFixture, test_agent_grants.UserAgentGrantT
     TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
 )
 class PostgresHitlTests(PostgresFixture, test_hitl.HitlTests):
+    pass
+
+
+@unittest.skipUnless(
+    TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
+)
+class PostgresAguiTests(PostgresFixture, test_agui.AguiTests):
     pass
 
 
@@ -250,7 +263,7 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                 target.execute(
                     "SELECT version FROM schema_metadata WHERE key='schema_version'"
                 ).fetchone()[0],
-                4,
+                5,
             )
             self.assertEqual(
                 target.execute("SELECT count(*) FROM users").fetchone()[0], 2

@@ -117,6 +117,9 @@ class RunStore:
             for row in rows:
                 run_id = row[0]
                 connection.execute(
+                    "DELETE FROM agent_workflow_entries WHERE run_id=?", (run_id,)
+                )
+                connection.execute(
                     "DELETE FROM agent_checkpoint_writes WHERE thread_id=?", (run_id,)
                 )
                 connection.execute(
@@ -221,6 +224,7 @@ class RunStore:
             "error": json.loads(run["error"]) if run["error"] else None,
             "expires_at": run["expires_at"],
             "purged": bool(run["purged"]),
+            "workflow": self.workflow(run),
             "interaction": self.public_interaction(pending)
             if pending
             and not run["purged"]
@@ -236,6 +240,63 @@ class RunStore:
                 for e in executions
             ],
         }
+
+    def workflow(self, run: dict) -> list[dict]:
+        with self.database.transaction() as connection:
+            rows = connection.execute(
+                "SELECT document FROM agent_workflow_entries WHERE run_id=? ORDER BY position,entry_id",
+                (run["id"],),
+            ).fetchall()
+        entries = [json.loads(row[0]) for row in rows]
+        for entry in entries:
+            if entry["status"] in {"running", "pending", "waiting"} and run[
+                "status"
+            ] in {
+                "cancelled",
+                "expired",
+                "failed",
+                "interrupted",
+                "needs_reconciliation",
+            }:
+                entry["status"] = (
+                    "interrupted"
+                    if run["status"] in {"interrupted", "needs_reconciliation"}
+                    else "cancelled"
+                    if run["status"] in {"cancelled", "expired"}
+                    or entry["status"] == "pending"
+                    else "failed"
+                )
+        return entries
+
+    def record_workflow(self, run: dict, entry: dict) -> dict:
+        """Upsert a bounded, sanitized display entry; checkpoint replay keeps its identity."""
+        with self.database.transaction(write=True) as connection:
+            current = self._owned(connection, run["id"], run["user_id"])
+            if current["purged"] or current["cancel_requested"]:
+                raise ApiError(409, "RUN_CANCELLED", "任务已停止")
+            if run.get("lease_token") and current["lease_token"] != run["lease_token"]:
+                raise ApiError(409, "RUN_CANCELLED", "任务执行上下文已变化")
+            previous = connection.execute(
+                "SELECT position,document FROM agent_workflow_entries WHERE run_id=? AND entry_id=?",
+                (run["id"], entry["id"]),
+            ).fetchone()
+            if previous:
+                document = {**json.loads(previous["document"]), **entry}
+                position = previous["position"]
+            else:
+                position = connection.execute(
+                    "SELECT COALESCE(MAX(position),0)+1 FROM agent_workflow_entries WHERE run_id=?",
+                    (run["id"],),
+                ).fetchone()[0]
+                if position > 256:
+                    raise ApiError(409, "agent_step_limit", "工作流步骤达到上限")
+                document = {"started_at": self.now(), **entry}
+            document["updated_at"] = self.now()
+            connection.execute(
+                "INSERT INTO agent_workflow_entries(run_id,entry_id,position,document) VALUES(?,?,?,?) ON CONFLICT(run_id,entry_id) DO UPDATE SET document=excluded.document",
+                (run["id"], entry["id"], position, canonical(document)),
+            )
+            return document
 
     def list_runs(self, user_id: str, conversation: str) -> list[str]:
         self.cleanup()
@@ -466,6 +527,7 @@ class RunStore:
                 raise ApiError(
                     409, "RUN_ALREADY_ACTIVE", "请先处理当前会话中的另一个任务"
                 )
+            self.close_workflow(connection, run_id, "interrupted")
             pending = connection.execute(
                 "SELECT * FROM agent_interactions WHERE run_id=? AND status IN ('pending','submitted') ORDER BY created_at DESC,id DESC LIMIT 1",
                 (run_id,),
@@ -507,6 +569,23 @@ class RunStore:
                         "UPDATE agent_chat_runs SET status='waiting',lease_token=NULL,version=version+1,error=NULL,updated_at=? WHERE id=?",
                         (now, run_id),
                     )
+                    entry_id = "tool:" + pending["call_key"]
+                    workflow = connection.execute(
+                        "SELECT document FROM agent_workflow_entries WHERE run_id=? AND entry_id=?",
+                        (run_id, entry_id),
+                    ).fetchone()
+                    if workflow:
+                        entry = json.loads(workflow["document"])
+                        entry.update(
+                            status="waiting",
+                            phase="waiting",
+                            detail="等待填写参数或确认执行",
+                            updated_at=now,
+                        )
+                        connection.execute(
+                            "UPDATE agent_workflow_entries SET document=? WHERE run_id=? AND entry_id=?",
+                            (canonical(entry), run_id, entry_id),
+                        )
                     self.audit(connection, run, "agent.run.recovered", status="waiting")
                     return self._owned(connection, run_id, user_id), False
             connection.execute(
@@ -541,11 +620,49 @@ class RunStore:
                 values["finish_reason"] = finish
             if error is not None:
                 values["error"] = canonical(error)
-            connection.execute(
+            changed = connection.execute(
                 "UPDATE agent_chat_runs SET "
                 + ",".join(f"{key}=?" for key in values)
                 + ",version=version+1 WHERE id=? AND lease_token=?",
                 (*values.values(), run["id"], run["lease_token"]),
+            ).rowcount
+            if changed and status in {
+                "completed",
+                "failed",
+                "cancelled",
+                "interrupted",
+                "needs_reconciliation",
+            }:
+                self.close_workflow(connection, run["id"], status)
+
+    def close_workflow(self, connection: Connection, run_id: str, status: str) -> None:
+        rows = connection.execute(
+            "SELECT entry_id,document FROM agent_workflow_entries WHERE run_id=?",
+            (run_id,),
+        ).fetchall()
+        for row in rows:
+            entry = json.loads(row["document"])
+            if entry["status"] not in {"running", "waiting", "pending"}:
+                continue
+            entry["status"] = (
+                "interrupted"
+                if status in {"interrupted", "needs_reconciliation"}
+                else "cancelled"
+                if status in {"cancelled", "completed"} or entry["status"] == "pending"
+                else "failed"
+            )
+            entry["updated_at"] = self.now()
+            if entry["status"] == "interrupted":
+                entry["detail"] = "执行中断，读取状态后可继续"
+            elif entry["status"] == "failed":
+                entry["detail"] = "本步骤未完成，请查看任务错误"
+            elif status == "completed":
+                entry["detail"] = "任务已结束，此步骤未执行"
+            else:
+                entry["detail"] = "本次步骤已取消"
+            connection.execute(
+                "UPDATE agent_workflow_entries SET document=? WHERE run_id=? AND entry_id=?",
+                (canonical(entry), run_id, row["entry_id"]),
             )
 
     def assert_running(self, run: dict) -> None:
@@ -572,6 +689,7 @@ class RunStore:
                     "UPDATE agent_chat_runs SET status='cancelled',cancel_requested=1,version=version+1,updated_at=? WHERE id=?",
                     (self.now(), run_id),
                 )
+                self.close_workflow(connection, run_id, "cancelled")
             if (
                 run["status"] in {"waiting", "interrupted", "running", "failed"}
                 and not run["cancel_requested"]

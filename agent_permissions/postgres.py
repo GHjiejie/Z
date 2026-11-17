@@ -317,7 +317,7 @@ class PostgresDatabase:
             version = connection.execute(
                 "SELECT version FROM schema_metadata WHERE key='schema_version'"
             ).fetchone()
-            if version is not None and version[0] not in (2, 3, 4):
+            if version is not None and version[0] not in (2, 3, 4, 5):
                 raise RuntimeError("Unsupported user database schema version")
             # BIGINT and DOUBLE PRECISION retain SQLite's integer/float range.
             schema = (
@@ -339,5 +339,5 @@ class PostgresDatabase:
             if seed:
                 Database._seed_catalog(connection)
             connection.execute(
-                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',4) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
+                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',5) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
             )

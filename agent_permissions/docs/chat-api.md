@@ -6,7 +6,7 @@
 
 对外协议为 Chat Completions；内部仍使用 [本项目独立模型客户端](model.md)和供应商的 Responses API。客户端提供业务会话令牌，供应商密钥保存在服务端 `agent_permissions/.env`。
 
-Console 通过扩展运行接口接入同一执行引擎：完成[前端构建和服务启动](running.md#3-启动-http-服务)后，登录并打开 `/console/#chat` 即可使用 SSE 聊天。支持多会话、停止生成及草稿恢复，历史按账号保存在当前浏览器；交互和存储边界见 [Console 使用说明](../console/README.md#使用会话)。
+Console 通过 [AG-UI 1.0 接口](ag-ui.md)接入同一执行引擎：完成[前端构建和服务启动](running.md#3-启动-http-服务)后，登录并打开 `/console/#chat` 即可使用 SSE 聊天，实时查看步骤、模型提供的思考摘要与工具执行结果。支持多会话、停止生成及草稿恢复，历史按账号保存在当前浏览器；交互和存储边界见 [Console 使用说明](../console/README.md#使用会话)。OpenAI SDK 继续使用本页的标准 Chat Completions 接口。
 
 普通和 SSE 对话均可通过 [LangSmith](langsmith.md) 查看 Agent、模型及业务工具调用链。每条根调用链携带 `request_id`、持久化任务的 `run_id` 与本次可用工具数量，可与响应中的 `X-Request-ID` 对应。
 

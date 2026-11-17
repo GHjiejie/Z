@@ -117,7 +117,7 @@ HTTP `422` 字段错误在图恢复前返回，保持卡片可编辑。授权或
 
 ## 持久化、配置和升级
 
-schema 从 3 升级为 4，新增 `agent_chat_runs`、`agent_interactions`、`agent_tool_executions`、`agent_checkpoints`、`agent_checkpoint_writes` 五张表。SQLite 和 PostgreSQL 使用同一数据库边界的 checkpoint 适配器；启动时原子升级，保留账号、角色、用户工具授权与会话。
+schema 从 3 升级为 4 时新增 `agent_chat_runs`、`agent_interactions`、`agent_tool_executions`、`agent_checkpoints`、`agent_checkpoint_writes` 五张表；当前 schema 5 另增 `agent_workflow_entries` 保存公开执行步骤。SQLite 和 PostgreSQL 使用同一数据库边界的 checkpoint 适配器；启动时原子升级，保留账号、角色、用户工具授权与会话，已有等待任务可以继续处理。Console 现在通过 [AG-UI 原生中断与恢复](ag-ui.md)接入，本文的命名 SSE 接口继续兼容。
 
 SQLite 事务在进程内串行使用短连接，跨进程写入仍由 `BEGIN IMMEDIATE` 保护，以避免当前 SQLite 构建并发开关 WAL 连接时的内部锁竞争。PostgreSQL 继续使用原连接池和事务级写锁，等待用户时不占连接。
 
@@ -133,7 +133,7 @@ SQLite 事务在进程内串行使用短连接，跨进程写入仍由 `BEGIN IM
 
 活跃计算段最长 120 秒，数据库租约 150 秒；等待用户不计入计算超时。整个任务最多 24 次模型规划。清理在运行读写时按需执行，过期并非依赖常驻定时器。清理会删 checkpoint、上下文和执行结果正文，保留最小请求/提交标识，避免旧重试变成新写入；该最小墓碑记录目前不自动删除。
 
-升级前保存一致性备份。SQLite 到 PostgreSQL 迁移支持 schema 2、3、4；schema 4 的等待任务、checkpoint 和去重记录一起迁移，并保留同一摘要密钥。旧代码不能直接回退连接 schema 4，回滚需配套数据库备份。
+升级前保存一致性备份。SQLite 到 PostgreSQL 迁移支持 schema 2、3、4、5；等待任务、checkpoint、去重记录与已有工作流一起迁移，并保留同一摘要密钥。旧代码不能直接回退连接 schema 5，回滚需配套数据库备份。
 
 LangSmith 每段执行以相同 `run_id` 关联，工具 span 只接收脱敏参数。应用审计记录准备、提交、恢复、取消及工具完成的操作 ID 和关联标识，不记录密码。表单秘密不进入模型消息、checkpoint、SSE、浏览器存储或审计正文。
 

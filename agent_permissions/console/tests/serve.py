@@ -1,7 +1,9 @@
 """Isolated, temporary real API used only by the Console browser tests."""
 
 import asyncio
+import codecs
 import json
+import time
 from collections.abc import AsyncIterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -10,8 +12,11 @@ from uuid import uuid4
 import uvicorn
 from fastapi import Request
 from fastapi.testclient import TestClient
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
 from starlette.responses import StreamingResponse
 
+from agent_permissions.agui import AguiContext, encode_agui
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
 from agent_permissions.models import UserCreate
@@ -29,6 +34,30 @@ INITIAL_PASSWORD = "12345"
 
 
 class ConsoleModel(BusinessModel):
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        prompt = next(
+            (str(item.content) for item in reversed(messages) if item.type == "human"),
+            "",
+        )
+        if prompt.startswith("AGUI "):
+            for summary in ("先核对当前账号权限。", "再查询当前账号资料。"):
+                yield ChatGenerationChunk(
+                    message=AIMessageChunk(
+                        content=[{"type": "reasoning", "reasoning": summary}]
+                    )
+                )
+                time.sleep(0.6)
+        message = (
+            self._generate(messages, stop, run_manager, **kwargs).generations[0].message
+        )
+        yield ChatGenerationChunk(
+            message=AIMessageChunk(
+                content=message.content,
+                tool_calls=message.tool_calls,
+                usage_metadata=message.usage_metadata,
+            )
+        )
+
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         prompt = next(
             (str(item.content) for item in reversed(messages) if item.type == "human"),
@@ -90,6 +119,17 @@ def main() -> None:
         async def chat_stream(request: Request) -> StreamingResponse:
             await execution_context(request)
             payload = await request.json()
+            agui = (
+                AguiContext(payload["threadId"], payload["runId"])
+                if "threadId" in payload
+                else None
+            )
+            if agui:
+                payload = {
+                    "messages": payload["messages"],
+                    "conversation_id": agui.thread_id,
+                    "client_request_id": agui.run_id,
+                }
             prompt = payload["messages"][-1]["content"]
 
             async def events() -> AsyncIterator[str | bytes]:
@@ -218,7 +258,35 @@ def main() -> None:
                 yield frame("run.completed", run=run)
                 yield frame("stream.closed", status="completed")
 
-            return StreamingResponse(events(), media_type="text/event-stream")
+            async def protocol_events():
+                decoder = codecs.getincrementaldecoder("utf-8")()
+                buffer = ""
+                async for part in events():
+                    buffer += decoder.decode(part) if isinstance(part, bytes) else part
+                    buffer = buffer.replace("\r\n", "\n")
+                    while "\n\n" in buffer:
+                        frame, buffer = buffer.split("\n\n", 1)
+                        data = [
+                            line[6:]
+                            for line in frame.splitlines()
+                            if line.startswith("data: ")
+                        ]
+                        if data:
+                            yield json.loads("\n".join(data))
+
+            async def agui_frames():
+                async for frame in encode_agui(protocol_events(), agui):
+                    if "TEXT_MESSAGE_CONTENT" in frame:
+                        raw = frame.encode()
+                        for start in range(0, len(raw), 19):
+                            yield raw[start : start + 19]
+                            await asyncio.sleep(0.002)
+                    else:
+                        yield frame
+
+            return StreamingResponse(
+                agui_frames() if agui else events(), media_type="text/event-stream"
+            )
 
         app.state.database.initialize()
         service = app.state.service

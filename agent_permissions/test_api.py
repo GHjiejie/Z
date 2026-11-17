@@ -1009,6 +1009,7 @@ class UserApiTests(unittest.TestCase):
                 ("POST", "/agent-tools/call"),
                 ("GET", "/v1/models"),
                 ("POST", "/v1/chat/completions"),
+                ("POST", "/api/v1/ag-ui"),
                 ("POST", "/api/v1/chat/runs"),
                 ("GET", "/api/v1/chat/runs"),
                 ("GET", "/api/v1/chat/runs/{run_id}"),

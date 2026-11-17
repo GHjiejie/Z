@@ -130,7 +130,7 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4):
+                if version not in (0, 1, 2, 3, 4, 5):
                     raise RuntimeError("Unsupported user database schema version")
                 if version == 0:
                     self._execute_schema(connection, SCHEMA)
@@ -156,7 +156,7 @@ class Database:
                     )
                 self._execute_schema(connection, AGENT_GRANTS_SCHEMA)
                 self._execute_schema(connection, HITL_SCHEMA)
-                connection.execute("PRAGMA user_version=4")
+                connection.execute("PRAGMA user_version=5")
                 connection.commit()
             except BaseException:
                 connection.rollback()

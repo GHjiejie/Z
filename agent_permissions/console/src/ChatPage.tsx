@@ -18,6 +18,7 @@ import { ErrorBanner, Modal, Spinner } from "./components";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ToolInteractionCard } from "./ToolInteractionCard";
 import { ChatToolStatus } from "./ChatToolStatus";
+import { AgentWorkflow } from "./AgentWorkflow";
 import { useChat } from "./useChat";
 
 function timeLabel(value: string) {
@@ -445,6 +446,17 @@ export function ChatPage({
                           {timeLabel(message.createdAt)}
                         </time>
                       </div>
+                      {message.role === "assistant" && (
+                        <AgentWorkflow
+                          entries={
+                            (message.runId
+                              ? chat.runs[message.runId]?.workflow
+                              : undefined) ??
+                            message.workflow ??
+                            []
+                          }
+                        />
+                      )}
                       <div className="chat-message-text">
                         {message.content ? (
                           message.role === "assistant" ? (

@@ -10,6 +10,7 @@ from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import StreamingResponse
 
+from agent_permissions.agui import encode_agui, mount_agui_api
 from agent_permissions.chat_api import (
     CHAT_METADATA,
     ChatRequest,
@@ -95,6 +96,24 @@ async def event_response(
     model = await _cached_model(request.app)
 
     async def body():
+        if getattr(request.state, "agui", None) is not None:
+            async with (
+                aclosing(
+                    run_events(
+                        request,
+                        run,
+                        model,
+                        fresh=fresh,
+                        resume=resume,
+                        sensitive=sensitive,
+                        recovering=recovering,
+                    )
+                ) as events,
+                aclosing(encode_agui(events, request.state.agui)) as encoded,
+            ):
+                async for frame in encoded:
+                    yield frame
+            return
         async with aclosing(
             run_events(
                 request,
@@ -379,3 +398,5 @@ def mount_hitl_api(app: FastAPI) -> None:
             resume={"interaction_id": interaction_id},
             sensitive=payload.sensitive_values,
         )
+
+    mount_agui_api(app, start=create_run, resume=resume, recover=recover_run)

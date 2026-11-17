@@ -1,6 +1,8 @@
 import type { ChatMessageInput, ChatUsage } from "./chatStream";
+import { isWorkflow, type WorkflowEntry } from "./workflow";
 
 export interface ChatMessage {
+  workflow?: WorkflowEntry[];
   id: string;
   role: "user" | "assistant";
   content: string;
@@ -76,6 +78,7 @@ function message(value: unknown): value is ChatMessage {
     Number.isFinite(Date.parse(value.createdAt)) &&
     (value.error === undefined || typeof value.error === "string") &&
     (value.runId === undefined || typeof value.runId === "string") &&
+    (value.workflow === undefined || isWorkflow(value.workflow)) &&
     (value.finish === undefined ||
       value.finish === "stop" ||
       value.finish === "length") &&

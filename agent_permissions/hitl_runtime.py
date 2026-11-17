@@ -3,12 +3,14 @@
 import asyncio
 import json
 from collections.abc import AsyncIterator
+from contextlib import suppress
 from typing import Annotated, TypedDict
 
 import httpx
 from fastapi import Request
 from langchain_core.messages import AIMessage, AnyMessage, SystemMessage, ToolMessage
 from langchain_core.runnables import RunnableConfig
+from langchain_core.runnables.config import merge_configs
 from langchain_core.tools import StructuredTool
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
@@ -16,6 +18,7 @@ from langgraph.types import Command, interrupt
 from langsmith import traceable
 from starlette.concurrency import run_in_threadpool
 
+from agent_permissions.agent_grants import _label
 from agent_permissions.errors import ApiError
 from agent_permissions.hitl_checkpoint import DatabaseCheckpointer
 from agent_permissions.hitl_execution import (
@@ -33,6 +36,12 @@ from agent_permissions.hitl_forms import (
 )
 from agent_permissions.hitl_store import GRAPH_VERSION, RunStore, identity
 from agent_permissions.tooling import _execution_access
+from agent_permissions.workflow import (
+    Progress,
+    ReasoningProgress,
+    display_value,
+    reasoning_text,
+)
 from api_tools.registry import permitted
 
 PREPARE_NAME = "request_tool_input"
@@ -201,6 +210,7 @@ async def build_graph(
     http: httpx.AsyncClient,
     sensitive: dict,
     sensitive_interaction: str | None,
+    progress: Progress,
 ):
     from agent_permissions.chat_api import SYSTEM_PROMPT
 
@@ -236,12 +246,24 @@ async def build_graph(
             raise ApiError(
                 409, "agent_step_limit", "任务步骤达到上限，请核对已执行结果"
             )
+        entry_id = f"model:{state['turns'] + 1}:{identity('attempt')}"
+        await progress(
+            {
+                "id": entry_id,
+                "kind": "model",
+                "title": f"分析请求 · 第 {state['turns'] + 1} 轮",
+                "status": "running",
+                "reasoning": "",
+                "detail": "正在等待模型响应",
+            }
+        )
+        reasoning = ReasoningProgress(entry_id, progress)
         response = await bound.ainvoke(
             [
                 SystemMessage(content=SYSTEM_PROMPT + "\n" + tool_prompt),
                 *state["messages"],
             ],
-            config=config,
+            config=merge_configs(config, {"callbacks": [reasoning]}),
             **options,
         )
         calls = []
@@ -268,6 +290,51 @@ async def build_graph(
                 else:
                     arguments = safe_arguments(selected, arguments)
             calls.append({**call, "args": arguments})
+        await progress(
+            {
+                "id": entry_id,
+                "status": "succeeded",
+                "reasoning": reasoning.text or reasoning_text(response)[:64000],
+                "detail": f"已选择 {len(calls)} 个工具" if calls else "已生成回复",
+            }
+        )
+        for index, call in enumerate(calls):
+            selected = next(
+                (
+                    item
+                    for item in tools
+                    if item["definition"]["name"] == call["name"]
+                    or (
+                        call["name"] == PREPARE_NAME
+                        and item["binding"]["operationId"]
+                        == call["args"].get("operation_id")
+                    )
+                ),
+                None,
+            )
+            operation = selected["binding"]["operationId"] if selected else ""
+            await progress(
+                {
+                    "id": f"tool:{state['turns'] + 1}:{index}:{call['id']}",
+                    "kind": "tool",
+                    "title": _label(operation, selected)[0]
+                    if selected
+                    else call["name"],
+                    "tool_name": selected["definition"]["name"]
+                    if selected
+                    else call["name"],
+                    "tool_call_id": call["id"],
+                    "operation_id": operation,
+                    "status": "pending",
+                    "phase": "selected",
+                    "detail": "已选择工具，等待检查参数",
+                    "arguments": display_value(
+                        call["args"].get("arguments", {})
+                        if call["name"] == PREPARE_NAME
+                        else call["args"]
+                    ),
+                }
+            )
         response = response.model_copy(
             update={
                 "tool_calls": calls,
@@ -290,6 +357,38 @@ async def build_graph(
         await run_in_threadpool(store.assert_running, run)
         call = state["pending"][state["index"]]
         call_key = f"{state['turns']}:{state['index']}:{call['id']}"
+        entry_id = "tool:" + call_key
+        selected = next(
+            (
+                item
+                for item in tools
+                if item["definition"]["name"] == call["name"]
+                or (
+                    call["name"] == PREPARE_NAME
+                    and item["binding"]["operationId"]
+                    == call["args"].get("operation_id")
+                )
+            ),
+            None,
+        )
+        operation_hint = selected["binding"]["operationId"] if selected else ""
+        await progress(
+            {
+                "id": entry_id,
+                "kind": "tool",
+                "title": _label(operation_hint, selected)[0]
+                if selected
+                else call["name"],
+                "tool_name": selected["definition"]["name"]
+                if selected
+                else call["name"],
+                "tool_call_id": call["id"],
+                "operation_id": operation_hint,
+                "status": "running",
+                "phase": "validating",
+                "detail": "正在校验权限与参数",
+            }
+        )
         try:
             snapshot = request.app.state.tool_registry.snapshot()
             committed = await run_in_threadpool(store.execution, run["id"], call_key)
@@ -319,6 +418,24 @@ async def build_graph(
                         "ok": True,
                         "recovered": True,
                         "body": {"data": json.loads(committed["service_result"])},
+                    }
+                )
+                await progress(
+                    {
+                        "id": entry_id,
+                        "status": "succeeded",
+                        "phase": "returned",
+                        "detail": "已恢复执行结果",
+                        "result": display_value(result),
+                        **(
+                            {
+                                "arguments": display_value(
+                                    json.loads(previous["document"])["arguments"]
+                                )
+                            }
+                            if previous
+                            else {}
+                        ),
                     }
                 )
                 return {
@@ -370,6 +487,14 @@ async def build_graph(
                 )
             if interaction:
                 # Always revisit this interrupt, including replay after the write committed.
+                await progress(
+                    {
+                        "id": entry_id,
+                        "status": "waiting",
+                        "phase": "waiting",
+                        "detail": "等待填写参数或确认执行",
+                    }
+                )
                 decision = interrupt({"interaction_id": interaction["id"]})
                 interaction = await run_in_threadpool(
                     store.for_call, run["id"], call_key
@@ -389,6 +514,15 @@ async def build_graph(
                 arguments = document["arguments"]
                 if interaction["id"] == sensitive_interaction:
                     arguments = apply_values(document, {}, sensitive)
+            await progress(
+                {
+                    "id": entry_id,
+                    "status": "running",
+                    "phase": "executing",
+                    "detail": "正在执行工具",
+                    "arguments": display_value(safe_arguments(tool, arguments)),
+                }
+            )
             fingerprint = store.digest(arguments)
             existing = await run_in_threadpool(store.execution, run["id"], call_key)
             result = (
@@ -461,6 +595,17 @@ async def build_graph(
                 finally:
                     confirmed_execution.reset(token)
                 await run_in_threadpool(store.finish_execution, execution["id"], result)
+            await progress(
+                {
+                    "id": entry_id,
+                    "status": "succeeded"
+                    if result.get("ok") is not False and not result.get("error")
+                    else "failed",
+                    "detail": "工具已返回结果",
+                    "phase": "returned",
+                    "result": display_value(result),
+                }
+            )
             return {
                 "messages": [
                     ToolMessage(
@@ -472,6 +617,15 @@ async def build_graph(
                 "index": state["index"] + 1,
             }
         except ApiError as error:
+            await progress(
+                {
+                    "id": entry_id,
+                    "status": "failed",
+                    "phase": "returned",
+                    "detail": error.message,
+                    "result": {"error": {"code": error.code, "message": error.message}},
+                }
+            )
             return {
                 "messages": [
                     ToolMessage(
@@ -504,7 +658,7 @@ async def build_graph(
     ), tools
 
 
-async def run_events(
+async def _run_events(
     request: Request,
     run: dict,
     model,
@@ -514,6 +668,7 @@ async def run_events(
     fresh: bool = True,
     recovering: bool = False,
     streaming: bool = True,
+    progress: Progress,
 ) -> AsyncIterator[dict]:
     store: RunStore = request.app.state.run_store
     stream_id, sequence = identity("stream"), 0
@@ -543,6 +698,20 @@ async def run_events(
         if run["graph_version"] != GRAPH_VERSION:
             raise ApiError(409, "RUN_VERSION_MISMATCH", "任务版本已变化，请重新发起")
         async with asyncio.timeout(120), http_client(request) as http:
+            yield event(
+                "run.resumed" if resume or recovering else "run.started",
+                run=await snapshot(),
+            )
+            access_id = identity("access")
+            await progress(
+                {
+                    "id": access_id,
+                    "kind": "step",
+                    "title": "检查可用工具",
+                    "status": "running",
+                    "detail": "正在读取当前账号的工具授权和业务权限",
+                }
+            )
             graph, tools = await build_graph(
                 request,
                 run,
@@ -550,6 +719,14 @@ async def run_events(
                 http,
                 sensitive or {},
                 resume.get("interaction_id") if resume else None,
+                progress,
+            )
+            await progress(
+                {
+                    "id": access_id,
+                    "status": "succeeded",
+                    "detail": f"当前可用业务工具：{len(tools)} 个",
+                }
             )
             payload = json.loads(run["payload"])
             initial = (
@@ -582,10 +759,8 @@ async def run_events(
                             ).fetchone()
                         if accepted:
                             initial = Command(resume={"interaction_id": accepted[0]})
-            yield event(
-                "run.resumed" if resume or recovering else "run.started",
-                run=await snapshot(),
-            )
+            if recovering:
+                yield event("run.snapshot", run=await snapshot())
             with request.app.state.chat_tracing.context(
                 request_id=request.state.info.request_id,
                 model=payload["model"],
@@ -667,3 +842,49 @@ async def run_events(
         yield event("run." + status, run=await snapshot())
     current = await snapshot()
     yield event("stream.closed", status=current["status"])
+
+
+async def run_events(
+    request: Request, run: dict, model, **options
+) -> AsyncIterator[dict]:
+    """Multiplex live graph text and node progress without waiting for a tool to finish."""
+    queue: asyncio.Queue = asyncio.Queue(maxsize=64)
+    store: RunStore = request.app.state.run_store
+    stream_id, sequence = identity("stream"), 0
+
+    async def progress(entry: dict) -> None:
+        document = await run_in_threadpool(store.record_workflow, run, entry)
+        await queue.put({"type": "workflow.updated", "entry": document})
+
+    async def produce() -> None:
+        try:
+            async for item in _run_events(
+                request, run, model, progress=progress, **options
+            ):
+                await queue.put(item)
+        except asyncio.CancelledError:
+            raise
+        except Exception as error:  # noqa: BLE001 -- forward producer failures to the stream consumer
+            await queue.put(error)
+        else:
+            await queue.put(None)
+
+    task = asyncio.create_task(produce())
+    try:
+        while (item := await queue.get()) is not None:
+            if isinstance(item, Exception):
+                raise item
+            sequence += 1
+            yield {
+                **item,
+                "protocol_version": 1,
+                "run_id": run["id"],
+                "stream_id": stream_id,
+                "sequence": sequence,
+            }
+        await task
+    finally:
+        if not task.done():
+            task.cancel()
+        with suppress(asyncio.CancelledError):
+            await task

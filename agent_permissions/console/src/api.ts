@@ -1,4 +1,7 @@
 import { ApiError, aborted } from "./errors";
+import type { RunAgentInput } from "@ag-ui/core";
+import { RunAgentInputSchema } from "@ag-ui/core/schemas";
+import { readAguiStream } from "./aguiStream";
 import {
   decodeRun,
   decodeRuns,
@@ -522,10 +525,18 @@ export class ApiClient {
         !response.headers.get("Content-Type")?.includes("text/event-stream")
       )
         throw new ApiError("服务未返回任务流", "INVALID_RESPONSE");
-      await readRunStream(response.body, signal, (event) => {
+      const receive = (event: RunEvent) => {
         this.requireCurrentSession(path);
         onEvent(event);
-      });
+      };
+      if (path === "/ag-ui")
+        await readAguiStream(
+          response.body,
+          signal,
+          RunAgentInputSchema.parse(payload),
+          receive,
+        );
+      else await readRunStream(response.body, signal, receive);
     } catch (error) {
       return this.chatError(error);
     }
@@ -540,6 +551,14 @@ export class ApiClient {
         "INVALID_RESPONSE",
       );
     }
+  }
+
+  async streamAgui(
+    payload: RunAgentInput,
+    signal: AbortSignal,
+    onEvent: (event: RunEvent) => void,
+  ): Promise<void> {
+    return this.streamRun("/ag-ui", payload, signal, onEvent);
   }
   private record(result: { data: unknown; etag: string | null }): UserRecord {
     const user = this.decode(result.data, decodeUser);
