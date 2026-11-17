@@ -149,7 +149,13 @@ class UserAgentGrantTests(unittest.TestCase):
             self.assertEqual(response.status_code, 200)
             self.assertEqual(self.call("user.list", auth).status_code, status)
             self.assertEqual(self.view(user["id"])["version"], saved["version"])
-        self.assertEqual(self.call("auth.logout", auth).json()["httpStatus"], 204)
+        self.assertEqual(
+            self.call("auth.logout", auth).json()["error"]["code"],
+            "INTERACTION_REQUIRED",
+        )
+        self.assertEqual(
+            self.client.post("/api/v1/auth/logout", headers=auth).status_code, 204
+        )
         self.assertEqual(self.call("user.list", auth).status_code, 401)
 
     def test_revoke_blocks_old_catalog_and_noop_does_not_bump_versions(self):

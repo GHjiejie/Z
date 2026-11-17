@@ -6,9 +6,9 @@
 
 对外协议为 Chat Completions；内部仍使用 [本项目独立模型客户端](model.md)和供应商的 Responses API。客户端提供业务会话令牌，供应商密钥保存在服务端 `agent_permissions/.env`。
 
-Console 已接入同一接口：完成[前端构建和服务启动](running.md#3-启动-http-服务)后，登录并打开 `/console/#chat` 即可使用 SSE 聊天。支持多会话、停止生成及草稿恢复，历史按账号保存在当前浏览器；交互和存储边界见 [Console 使用说明](../console/README.md#使用会话)。
+Console 通过扩展运行接口接入同一执行引擎：完成[前端构建和服务启动](running.md#3-启动-http-服务)后，登录并打开 `/console/#chat` 即可使用 SSE 聊天。支持多会话、停止生成及草稿恢复，历史按账号保存在当前浏览器；交互和存储边界见 [Console 使用说明](../console/README.md#使用会话)。
 
-普通和 SSE 对话均可通过 [LangSmith](langsmith.md) 查看 Agent、模型及业务工具调用链。每条根调用链携带 `request_id` 与本次可用工具数量，可与响应中的 `X-Request-ID` 对应。
+普通和 SSE 对话均可通过 [LangSmith](langsmith.md) 查看 Agent、模型及业务工具调用链。每条根调用链携带 `request_id`、持久化任务的 `run_id` 与本次可用工具数量，可与响应中的 `X-Request-ID` 对应。
 
 ## 1. 服务入口与认证
 
@@ -65,7 +65,7 @@ with OpenAI(
 
 `max_retries=0` 避免客户端自动重放可能包含写操作的完整 Agent 任务。请求中断或超时后，应先查询结果再决定后续操作。
 
-普通响应包含标准的 `id`、`object="chat.completion"`、`created`、`model`、`choices` 和有上游依据时的 `usage`。业务工具调用由服务端完成，返回给 SDK 的是最终助手回复。
+普通响应包含标准的 `id`、`object="chat.completion"`、`created`、`model`、`choices` 和有上游依据时的 `usage`。业务工具调用由服务端完成。需要补参或确认时返回待处理说明与 `run_...` 标识；可在同账号 Console“会话记录 → 打开已有任务”继续，或接入[交互运行 API](agent-hitl.md#运行-api)。写操作在确认前不会执行，不能通过标准 SDK 绕过确认。
 
 ## 3. 流式对话
 
@@ -126,9 +126,9 @@ async def chat(session_token: str):
 | `n` | 当前支持 `1` |
 | `tool_choice` | 默认 `auto`，自动使用业务工具；`none` 只进行模型对话 |
 
-每个 Chat 请求独立执行，客户端通过 `messages` 维护多轮历史。工具集合在每个请求开始时重新发现，执行时再检查当前会话与权限。服务不提供登录工具给已认证的 Agent；其余业务工具按用户权限选择。
+每个 Chat 请求创建独立的持久化运行，客户端通过 `messages` 维护多轮历史；等待确认的任务通过扩展接口恢复同一图。工具集合在每个请求开始时重新发现，执行时再检查当前会话与权限。服务不提供登录工具给已认证的 Agent；其余业务工具按用户权限选择。
 
-`usage` 累计当前请求内所有模型调用，包括工具规划及最终回复。缺少上游用量时不虚构 token 数。单个任务最多运行 24 个图步骤，整体超时为 120 秒，单次模型调用超时为 60 秒。
+`usage` 累计当前请求内所有模型调用，包括工具规划及最终回复。缺少上游用量时不虚构 token 数。单个任务最多执行 24 次模型规划，每个活跃执行段超时为 120 秒，等待用户填参不计入计算时间，单次模型调用超时为 60 秒。
 
 模型客户端在首次访问模型目录或发起对话时加载，并复用至服务退出；修改模型配置后需重启服务。
 
@@ -150,7 +150,7 @@ async def chat(session_token: str):
 
 模型错误、密码和供应商响应详情不会直接进入错误返回。工具权限拒绝会作为工具结果交给 Agent，Agent 可据此解释当前用户无法完成的操作，不能扩大权限执行。
 
-离线验证使用真实 OpenAI SDK、真实 LangChain Agent 和临时 SQLite，模型由受控假实现替代：
+离线验证使用真实 OpenAI SDK、真实 LangGraph Agent 和临时 SQLite，模型由受控假实现替代：
 
 ```bash
 uv run python -m unittest agent_permissions.test_chat_api agent_permissions.test_chat_model -v

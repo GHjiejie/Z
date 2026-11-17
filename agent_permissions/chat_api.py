@@ -4,15 +4,13 @@ import asyncio
 import json
 import logging
 from collections.abc import AsyncIterator, Callable
-from contextlib import asynccontextmanager
+from contextlib import aclosing
 from typing import Literal
 from uuid import uuid4
 
 import httpx
 import openai
 from fastapi import FastAPI, Request
-from langchain.agents import create_agent
-from langchain.agents.middleware import wrap_model_call
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage
 from langgraph.errors import GraphRecursionError
@@ -24,7 +22,6 @@ from agent_permissions.chat_model import create_chat_model
 from agent_permissions.errors import ApiError
 from agent_permissions.models import StrictModel
 from agent_permissions.tooling import execution_context
-from api_tools.client import AgentToolClient
 
 logger = logging.getLogger(__name__)
 CHAT_METADATA = {
@@ -174,67 +171,6 @@ async def _authenticated(request: Request):
     return context
 
 
-@asynccontextmanager
-async def _agent(request: Request, payload: ChatRequest, model: BaseChatModel):
-    context = await _authenticated(request)
-    address = request.client
-    transport = httpx.ASGITransport(
-        app=request.app,
-        client=(address.host, address.port) if address else ("unknown", 0),
-    )
-    async with httpx.AsyncClient(
-        transport=transport, base_url="http://agent-chat.internal", trust_env=False
-    ) as http:
-        token = context.authorization.partition(" ")[2]
-        adapter = AgentToolClient(http, token_provider=lambda: token)
-        tools = await adapter.langchain_tools() if payload.tool_choice == "auto" else []
-        tools = [tool for tool in tools if tool.name != "agent_users_auth_login"]
-        settings = {
-            key: value
-            for key, value in {
-                "temperature": payload.temperature,
-                "top_p": payload.top_p,
-                "max_tokens": payload.max_completion_tokens or payload.max_tokens,
-            }.items()
-            if value is not None
-        }
-
-        @wrap_model_call
-        async def model_options(call, handler):
-            return await handler(
-                call.override(model_settings={**call.model_settings, **settings})
-            )
-
-        with request.app.state.chat_tracing.context(
-            request_id=request.state.info.request_id,
-            model=payload.model,
-            stream=payload.stream,
-            tools=[tool.name for tool in tools],
-        ):
-            yield create_agent(
-                model=model,
-                tools=tools,
-                system_prompt=SYSTEM_PROMPT,
-                middleware=[model_options],
-                name="agent_permissions.chat",
-            )
-
-
-def _usage(messages: list) -> dict | None:
-    evidence = [
-        message.usage_metadata
-        for message in messages
-        if isinstance(message, AIMessage) and message.usage_metadata is not None
-    ]
-    if not evidence:
-        return None
-    return {
-        "prompt_tokens": sum(item["input_tokens"] for item in evidence),
-        "completion_tokens": sum(item["output_tokens"] for item in evidence),
-        "total_tokens": sum(item["total_tokens"] for item in evidence),
-    }
-
-
 def _finish(message: AIMessage) -> str:
     if (
         message.response_metadata.get("finish_reason") == "length"
@@ -261,39 +197,35 @@ async def _stream(
         }
 
     try:
-        async with asyncio.timeout(120), _agent(request, payload, model) as agent:  # noqa: SIM117 -- stream depends on the initialized Agent context
-            async with await agent.astream_events(
-                {"messages": payload.agent_messages()},
-                config={"recursion_limit": 24},
-                version="v3",
-            ) as run:
-                yield _sse(chunk({"role": "assistant", "content": ""}))
-                async for message in run.messages:
-                    async for text in message.text:
-                        if text:
-                            yield _sse(chunk({"content": text}))
-                result = await run.output()
-                messages = result["messages"]
-                final = messages[-1]
-                if not isinstance(final, AIMessage) or final.tool_calls:
-                    raise ApiError(
-                        502, "agent_incomplete", "任务未正常结束，请先核对操作结果"
-                    )
-                yield _sse(chunk({}, _finish(final)))
-                usage = _usage(messages)
-                if (
-                    payload.stream_options
-                    and payload.stream_options.include_usage
-                    and usage is not None
-                ):
-                    yield _sse(
-                        {
-                            **identity,
-                            "object": "chat.completion.chunk",
-                            "choices": [],
-                            "usage": usage,
-                        }
-                    )
+        from agent_permissions.hitl_api import new_run
+        from agent_permissions.hitl_runtime import run_events
+
+        yield _sse(chunk({"role": "assistant", "content": ""}))
+        run, fresh = await new_run(request, payload)
+        final = None
+        async with aclosing(run_events(request, run, model, fresh=fresh)) as events:
+            async for event in events:
+                if event["type"] == "text.delta":
+                    yield _sse(chunk({"content": event["text"]}))
+                if "run" in event:
+                    final = event["run"]
+                if event["type"] == "run.waiting":
+                    yield _sse(chunk({"content": _waiting_text(final)}))
+        _check_run_result(final)
+        yield _sse(chunk({}, final.get("finish", "stop")))
+        if (
+            payload.stream_options
+            and payload.stream_options.include_usage
+            and final.get("usage")
+        ):
+            yield _sse(
+                {
+                    **identity,
+                    "object": "chat.completion.chunk",
+                    "choices": [],
+                    "usage": final["usage"],
+                }
+            )
         yield "data: [DONE]\n\n"
     except Exception as error:  # noqa: BLE001 -- redact all errors after SSE headers have been sent
         safe = _model_error(error)
@@ -304,6 +236,23 @@ async def _stream(
         )
         response = compatible_error(safe, request.state.info.request_id)
         yield "data: " + response.body.decode() + "\n\n"
+
+
+def _waiting_text(run: dict) -> str:
+    title = (run.get("interaction") or {}).get("title", "业务操作")
+    return f"\n{title}需要补充参数或确认，尚未执行。请在 Console 会话页面处理待办，任务标识：{run['id']}。"
+
+
+def _check_run_result(run: dict | None) -> None:
+    if run is None:
+        raise ApiError(502, "agent_incomplete", "任务未正常结束，请核对结果")
+    if run["status"] not in {"completed", "waiting"}:
+        error = run.get("error") or {}
+        raise ApiError(
+            error.get("http_status", 500),
+            error.get("code", "agent_incomplete"),
+            error.get("message", "任务未正常结束，请核对结果"),
+        )
 
 
 def mount_chat_api(
@@ -357,17 +306,17 @@ def mount_chat_api(
                 headers={"X-Accel-Buffering": "no", "Cache-Control": "no-store"},
             )
         try:
-            async with asyncio.timeout(120), _agent(request, payload, model) as agent:
-                result = await agent.ainvoke(
-                    {"messages": payload.agent_messages()},
-                    config={"recursion_limit": 24},
-                )
-            messages = result["messages"]
-            final = messages[-1]
-            if not isinstance(final, AIMessage) or final.tool_calls:
-                raise ApiError(
-                    502, "agent_incomplete", "任务未正常结束，请先核对操作结果"
-                )
+            from agent_permissions.hitl_api import new_run
+            from agent_permissions.hitl_runtime import run_events
+
+            run, fresh = await new_run(request, payload)
+            final = None
+            async for event in run_events(
+                request, run, model, fresh=fresh, streaming=False
+            ):
+                if "run" in event:
+                    final = event["run"]
+            _check_run_result(final)
             return {
                 **identity,
                 "object": "chat.completion",
@@ -376,14 +325,19 @@ def mount_chat_api(
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": final.text,
+                            "content": final["content"]
+                            + (
+                                _waiting_text(final)
+                                if final["status"] == "waiting"
+                                else ""
+                            ),
                             "refusal": None,
                         },
-                        "finish_reason": _finish(final),
+                        "finish_reason": final.get("finish", "stop"),
                         "logprobs": None,
                     }
                 ],
-                **({"usage": _usage(messages)} if _usage(messages) is not None else {}),
+                **({"usage": final["usage"]} if final.get("usage") else {}),
             }
         except Exception as error:  # noqa: BLE001 -- provider exceptions can contain credentials and raw requests
             safe = _model_error(error)

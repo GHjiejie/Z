@@ -1009,6 +1009,23 @@ class UserApiTests(unittest.TestCase):
                 ("POST", "/agent-tools/call"),
                 ("GET", "/v1/models"),
                 ("POST", "/v1/chat/completions"),
+                ("POST", "/api/v1/chat/runs"),
+                ("GET", "/api/v1/chat/runs"),
+                ("GET", "/api/v1/chat/runs/{run_id}"),
+                ("POST", "/api/v1/chat/runs/{run_id}/cancel"),
+                ("POST", "/api/v1/chat/runs/{run_id}/recover"),
+                (
+                    "POST",
+                    "/api/v1/chat/runs/{run_id}/interactions/{interaction_id}/resume",
+                ),
+                (
+                    "POST",
+                    "/api/v1/chat/runs/{run_id}/interactions/{interaction_id}/refresh",
+                ),
+                (
+                    "GET",
+                    "/api/v1/chat/runs/{run_id}/interactions/{interaction_id}/options",
+                ),
             },
         )
         for path, method in [

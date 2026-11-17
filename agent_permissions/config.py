@@ -30,6 +30,11 @@ class Settings:
     account_window_seconds: int = 300
     source_window_seconds: int = 60
     password_window_seconds: int = 300
+    hitl_interaction_seconds: int = 1800
+    hitl_run_seconds: int = 86400
+    hitl_retention_seconds: int = 86400
+    hitl_receipt_seconds: int = 2592000
+    hitl_digest_key: str | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         if self.database_url is not None and not self.database_url.startswith(
@@ -50,6 +55,10 @@ class Settings:
                 raise ValueError(f"{name} must be positive")
         if self.db_pool_min_size > self.db_pool_max_size:
             raise ValueError("db_pool_min_size must not exceed db_pool_max_size")
+        if self.hitl_digest_key is not None and len(self.hitl_digest_key) < 32:
+            raise ValueError(
+                "AGENT_USERS_HITL_DIGEST_KEY must contain at least 32 characters"
+            )
 
     @classmethod
     def from_env(cls, env_file: Path | None = None) -> "Settings":
@@ -65,7 +74,7 @@ class Settings:
                 values[name] = getattr(defaults, name)
             elif name == "database_path":
                 values[name] = Path(raw).expanduser().resolve()
-            elif name == "database_url":
+            elif name in {"database_url", "hitl_digest_key"}:
                 values[name] = raw
             elif isinstance(getattr(defaults, name), float):
                 values[name] = float(raw)

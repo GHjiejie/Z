@@ -6,14 +6,21 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from threading import RLock
 
 from agent_permissions.config import Settings
+from agent_permissions.hitl_schema import HITL_SCHEMA
 from agent_permissions.permissions import (
     ADMIN_PERMISSIONS,
     MEMBER_PERMISSIONS,
     PERMISSION_CATALOG,
 )
 from agent_permissions.storage import Connection, DatabaseBackend
+
+# Graph and request workers borrow short-lived SQLite handles concurrently. Serialize
+# local transactions to avoid WAL open/close mutex inversion in the deployed build.
+# PostgreSQL retains pool concurrency; SQLite retains its cross-process write lock.
+_sqlite_connections = RLock()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS users (
@@ -123,7 +130,7 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3):
+                if version not in (0, 1, 2, 3, 4):
                     raise RuntimeError("Unsupported user database schema version")
                 if version == 0:
                     self._execute_schema(connection, SCHEMA)
@@ -148,7 +155,8 @@ class Database:
                         "ALTER TABLE users ADD COLUMN agent_tools_version INTEGER NOT NULL DEFAULT 1 CHECK(agent_tools_version>=1)"
                     )
                 self._execute_schema(connection, AGENT_GRANTS_SCHEMA)
-                connection.execute("PRAGMA user_version=3")
+                self._execute_schema(connection, HITL_SCHEMA)
+                connection.execute("PRAGMA user_version=4")
                 connection.commit()
             except BaseException:
                 connection.rollback()
@@ -190,6 +198,11 @@ class Database:
 
     @contextmanager
     def connect(self) -> Iterator[sqlite3.Connection]:
+        with _sqlite_connections, self._connect() as connection:
+            yield connection
+
+    @contextmanager
+    def _connect(self) -> Iterator[sqlite3.Connection]:
         connection = sqlite3.connect(self.path, isolation_level=None, timeout=10)
         try:
             connection.row_factory = sqlite3.Row

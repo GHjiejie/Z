@@ -163,7 +163,13 @@ class ChatTracing:
 
     @contextmanager
     def context(
-        self, *, request_id: str, model: str, stream: bool, tools: list[str]
+        self,
+        *,
+        request_id: str,
+        model: str,
+        stream: bool,
+        tools: list[str],
+        run_id: str | None = None,
     ) -> Iterator[None]:
         client = self._get_client()
         with tracing_context(
@@ -178,6 +184,7 @@ class ChatTracing:
                 "stream": stream,
                 "tool_count": len(tools),
                 "tool_names": tools,
+                **({"run_id": run_id} if run_id else {}),
             },
         ):
             yield

@@ -266,6 +266,46 @@ class ChatTracingTests(unittest.TestCase):
         self.assertEqual(len({root["trace_id"] for root in self.roots()}), 2)
         self.assertNotIn(self.token, json.dumps(self.session.runs))
 
+    def test_form_secret_is_absent_from_langsmith_and_resumed_traces_share_run_id(self):
+        from agent_permissions.test_hitl import InteractionModel, events
+
+        self.app.state.chat_model = InteractionModel(
+            operation="user.create", arguments={}, prepare=True
+        )
+        headers = {"Authorization": "Bearer " + self.token}
+        started = self.http.post(
+            "/api/v1/chat/runs",
+            headers=headers,
+            json={
+                "model": "hitl-fixture",
+                "messages": [{"role": "user", "content": "创建用户"}],
+                "conversation_id": "trace-hitl",
+                "client_request_id": "trace-hitl",
+            },
+        )
+        run = [event["run"] for event in events(started) if "run" in event][-1]
+        secret = "private-hitl-form-value-1234"
+        result = self.http.post(
+            f"/api/v1/chat/runs/{run['id']}/interactions/{run['interaction']['id']}/resume",
+            headers=headers,
+            json={
+                "submission_id": "trace-submit",
+                "expected_version": 1,
+                "values": {
+                    "/body/username": "trace_user",
+                    "/body/display_name": "追踪用户",
+                },
+                "sensitive_values": {"/body/password": secret},
+            },
+        )
+        done = [event["run"] for event in events(result) if "run" in event][-1]
+        self.assertEqual(done["status"], "completed", done)
+        self.assertNotIn(secret, json.dumps(self.session.runs))
+        self.assertEqual(
+            {item["extra"]["metadata"]["run_id"] for item in self.roots()}, {run["id"]}
+        )
+        self.assertEqual(len(self.roots()), 2)
+
     def test_concurrent_requests_keep_separate_trace_roots(self) -> None:
         async def exercise():
             async with httpx.AsyncClient(

@@ -202,7 +202,7 @@ npm run test:e2e
 
 - 支持 PostgreSQL 18+ 和本机 SQLite。PostgreSQL 可供多个服务进程连接；SQLite 文件仅支持同机共享，不使用网络共享盘。
 - SQLite 写事务使用 `BEGIN IMMEDIATE`；PostgreSQL 写事务使用统一的事务级 advisory lock。权限复核、目标版本检查、业务修改、会话撤销及成功审计均在持锁事务中串行提交；PostgreSQL 查询采用只读 `REPEATABLE READ`。
-- 当前 schema 版本为 3，支持空库初始化及旧版原子迁移，保留账号、密码与会话。升级前保存一致性备份，升级后用户工具默认未授权，需在页面开启；遇到未知版本停止启动。具体流程见 [RBAC 迁移说明](rbac.md#旧数据库升级)。
+- 当前 schema 版本为 4，支持空库初始化及旧版原子迁移，保留账号、密码与会话。升级前保存一致性备份，从 schema 1/2 升级时用户工具默认未授权，需在页面开启；从 schema 3 升级保留既有授权并新增 HITL 表；遇到未知版本停止启动。具体流程见 [RBAC 迁移说明](rbac.md#旧数据库升级)。
 - 初始管理员创建属于本地维护入口；HTTP API 不提供公开注册、找回密码、删除恢复。
 - 业务日志和接口错误不输出密码、密码哈希或会话令牌；排查时可通过 `request_id` 关联数据库中的审计事件。
 
@@ -227,3 +227,5 @@ npm run test:e2e
 | `test_api.py` | 离线接口与并发测试 |
 | `console_ui.py`、`test_console.py` | Console 静态页面托管及隔离验证 |
 | `console/` | React + TypeScript 页面、接口客户端与浏览器测试 |
+
+HITL 的暂停恢复、保留周期和摘要密钥配置见[交互工具部署说明](agent-hitl.md#持久化配置和升级)。

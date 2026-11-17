@@ -18,6 +18,7 @@ from pydantic import ValidationError
 from agent_permissions.agent_grants import config_view, grants_for, save_changes
 from agent_permissions.config import Settings
 from agent_permissions.errors import ApiError, invalid_field
+from agent_permissions.hitl_execution import guard_execution, record_execution
 from agent_permissions.models import (
     AgentToolGrantsUpdate,
     PasswordChange,
@@ -424,11 +425,17 @@ class UserService:
     def logout(self, authority: Authority, info: RequestInfo) -> None:
         with self.database.transaction(write=True) as connection:
             user = self._authorize(connection, authority, info, "auth.logout")
+            replay, _ = guard_execution(
+                connection, "auth.logout", user["id"], self.clock().timestamp()
+            )
+            if replay:
+                return
             connection.execute(
                 "UPDATE sessions SET revoked_at=? WHERE token_digest=?",
                 (timestamp(self.clock()), authority.token_digest),
             )
             self._audit(connection, info, "auth.logout", user["id"])
+            record_execution(connection, None, self.clock().timestamp())
 
     def get_me(self, authority: Authority, info: RequestInfo) -> dict:
         with self.database.transaction() as connection:
@@ -480,6 +487,11 @@ class UserService:
     ) -> dict:
         with self.database.transaction(write=True) as connection:
             actor = self._authorize(connection, authority, info, "user.create")
+            replay, saved = guard_execution(
+                connection, "user.create", actor["id"], self.clock().timestamp()
+            )
+            if replay:
+                return saved
             require_roles(connection, payload.roles)
             if payload.roles != ["member"]:
                 self._authorize(connection, authority, info, "user.roles.assign")
@@ -492,7 +504,11 @@ class UserService:
                     for permission in role_permissions(connection, code)
                 ],
             )
-            return self._insert_user(connection, payload, info)
+            return record_execution(
+                connection,
+                self._insert_user(connection, payload, info),
+                self.clock().timestamp(),
+            )
 
     def list_users(
         self, authority: Authority, query: UserQuery, info: RequestInfo
@@ -635,6 +651,11 @@ class UserService:
                 operation,
             )
             # Self operations can never be redirected to a caller-supplied ID.
+            replay, saved = guard_execution(
+                connection, operation, actor["id"], self.clock().timestamp()
+            )
+            if replay:
+                return saved
             target_id = actor["id"] if operation.startswith("user.self.") else user_id
             target = self._target(connection, target_id)
             if actor["id"] != target["id"]:
@@ -734,7 +755,9 @@ class UserService:
             row = connection.execute(
                 "SELECT * FROM users WHERE id=?", (target["id"],)
             ).fetchone()
-            return public_user(connection, row)
+            return record_execution(
+                connection, public_user(connection, row), self.clock().timestamp()
+            )
 
     @staticmethod
     def _check_grants(
@@ -792,6 +815,11 @@ class UserService:
                 raise invalid_field("body", "角色参数不符合接口字段规则") from None
         with self.database.transaction(write=True) as connection:
             actor = self._authorize(connection, authority, info, operation)
+            replay, saved = guard_execution(
+                connection, operation, actor["id"], self.clock().timestamp()
+            )
+            if replay:
+                return saved
             now = timestamp(self.clock())
             if operation == "role.create":
                 code = payload["code"]
@@ -818,7 +846,7 @@ class UserService:
                     self._audit(
                         connection, info, operation, None, changes={"role_code": code}
                     )
-                    return None
+                    return record_execution(connection, None, self.clock().timestamp())
                 selected = payload.get("permissions", old["permissions"])
             require_permissions(connection, selected)
             self._check_grants(connection, actor, selected)
@@ -852,4 +880,6 @@ class UserService:
                 None,
                 changes={"role_code": code, "permissions": selected},
             )
-            return role_record(connection, code)
+            return record_execution(
+                connection, role_record(connection, code), self.clock().timestamp()
+            )

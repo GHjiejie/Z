@@ -12,6 +12,11 @@ class OperationSpec:
     idempotent: bool = True
     authentication: str = "session"
     expose: bool = True
+    interaction_policy: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.interaction_policy not in {None, "when_needed", "always_confirm"}:
+            raise ValueError("Unsupported Agent interaction policy")
 
     def metadata(self) -> dict:
         if not self.expose:
@@ -26,6 +31,9 @@ class OperationSpec:
             "anyPermissions": list(self.any_permissions),
             "effect": self.effect,
             "idempotent": self.idempotent,
+            "interactionPolicy": self.interaction_policy
+            or ("when_needed" if self.effect == "read" else "always_confirm"),
+            "formVersion": 1,
         }
 
 

@@ -1,0 +1,28 @@
+{
+  "baselineDigest": "efa27ded9e5c629b838394cd03e47a7cc1114a720a46dec12b040dbc5cf2617a",
+  "candidateDigest": "0f295fda132b3f9531e694ac976ea505ae98787cfe20e97844b1103b11172162",
+  "breakingTools": [
+    "agent_users_auth_login",
+    "agent_users_auth_logout",
+    "agent_users_permission_list",
+    "agent_users_role_create",
+    "agent_users_role_delete",
+    "agent_users_role_list",
+    "agent_users_role_options",
+    "agent_users_role_read",
+    "agent_users_role_update",
+    "agent_users_user_create",
+    "agent_users_user_delete",
+    "agent_users_user_list",
+    "agent_users_user_password_reset",
+    "agent_users_user_read",
+    "agent_users_user_roles_assign",
+    "agent_users_user_self_password_change",
+    "agent_users_user_self_permissions",
+    "agent_users_user_self_read",
+    "agent_users_user_self_update",
+    "agent_users_user_status_update",
+    "agent_users_user_update"
+  ],
+  "reason": "Implement approved HITL: session write tools require per-call human confirmation. Read-only tools retain automatic execution; form and interaction policy revisions invalidate previous confirmations."
+}

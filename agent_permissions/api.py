@@ -652,4 +652,7 @@ def create_app(
     from agent_permissions.chat_api import mount_chat_api
 
     mount_chat_api(app, chat_model_factory)
+    from agent_permissions.hitl_api import mount_hitl_api
+
+    mount_hitl_api(app)
     return app

@@ -15,7 +15,7 @@ async function login(
   await expect(page.getByLabel("聊天模型")).toHaveValue("fixture-model");
 }
 async function fixture(page: Page) {
-  await page.route("**/v1/chat/completions", async (route) => {
+  await page.route("**/api/v1/chat/runs", async (route) => {
     await route.continue({
       url: new URL("/__test/chat-stream", route.request().url()).href,
     });
@@ -47,7 +47,7 @@ test("SSE 分段呈现，携带上下文并在刷新后恢复记录", async ({ p
   await login(page);
   const requests: unknown[] = [];
   page.on("request", (request) => {
-    if (request.url().endsWith("/v1/chat/completions"))
+    if (request.url().endsWith("/api/v1/chat/runs"))
       requests.push(request.postDataJSON());
   });
   await send(page, "分段回复验证");
@@ -63,7 +63,6 @@ test("SSE 分段呈现，携带上下文并在刷新后恢复记录", async ({ p
   ).toContainText("第二段");
   expect(requests[1]).toMatchObject({
     model: "fixture-model",
-    stream: true,
     messages: [
       { role: "user", content: "分段回复验证" },
       {
@@ -199,7 +198,7 @@ test("停止生成保留部分内容，下一次发送不重放中断任务", as
   await login(page);
   const bodies: unknown[] = [];
   page.on("request", (request) => {
-    if (request.url().endsWith("/v1/chat/completions"))
+    if (request.url().endsWith("/api/v1/chat/runs"))
       bodies.push(request.postDataJSON());
   });
   await send(page, "慢流操作");
@@ -223,7 +222,7 @@ test("流内错误与断流保留回复，编辑原消息不自动重试", async
   await login(page);
   let requests = 0;
   page.on("request", (request) => {
-    if (request.url().endsWith("/v1/chat/completions")) requests++;
+    if (request.url().endsWith("/api/v1/chat/runs")) requests++;
   });
   await send(page, "错误验证");
   const first = page.getByRole("article", { name: "Agent 回复" }).first();
@@ -262,7 +261,7 @@ test("连续生成时刷新可恢复部分内容，且不会重新发起任务",
   await login(page);
   let requests = 0;
   page.on("request", (request) => {
-    if (request.url().endsWith("/v1/chat/completions")) requests++;
+    if (request.url().endsWith("/api/v1/chat/runs")) requests++;
   });
   await send(page, "长回复刷新验证");
   await expect
@@ -339,7 +338,7 @@ test("中文输入法与换行不会误发送，401 返回登录页", async ({ p
   const input = page.getByLabel("输入消息");
   let requests = 0;
   page.on("request", (request) => {
-    if (request.url().endsWith("/v1/chat/completions")) requests++;
+    if (request.url().endsWith("/api/v1/chat/runs")) requests++;
   });
   await input.fill("输入法中的问题");
   await input.dispatchEvent("compositionstart");
@@ -352,8 +351,8 @@ test("中文输入法与换行不会误发送，401 返回登录页", async ({ p
   await expect(page.getByRole("article", { name: "Agent 回复" })).toContainText(
     "第二段",
   );
-  await page.unroute("**/v1/chat/completions");
-  await page.route("**/v1/chat/completions", (route) =>
+  await page.unroute("**/api/v1/chat/runs");
+  await page.route("**/api/v1/chat/runs", (route) =>
     route.fulfill({
       status: 401,
       contentType: "application/json",

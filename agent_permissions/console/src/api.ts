@@ -1,5 +1,14 @@
 import { ApiError, aborted } from "./errors";
 import {
+  decodeRun,
+  decodeRuns,
+  decodeOptions,
+  readRunStream,
+  type ChatRun,
+  type RunEvent,
+  type ToolOption,
+} from "./chatRuns";
+import {
   chatFailure,
   readChatStream,
   type ChatMessageInput,
@@ -393,6 +402,112 @@ export class ApiClient {
       });
       this.requireCurrentSession("/v1/chat/completions");
       return result;
+    } catch (error) {
+      return this.chatError(error);
+    }
+  }
+
+  async chatRuns(
+    conversationId: string,
+    signal: AbortSignal,
+  ): Promise<ChatRun[]> {
+    const result = await this.send(
+      `/chat/runs?conversation_id=${encodeURIComponent(conversationId)}`,
+      { signal },
+    );
+    return this.decode(result.data, decodeRuns);
+  }
+
+  async chatRun(runId: string, signal?: AbortSignal): Promise<ChatRun> {
+    const result = await this.send(`/chat/runs/${encodeURIComponent(runId)}`, {
+      signal,
+    });
+    return this.decode(result.data, decodeRun);
+  }
+
+  async cancelChatRun(runId: string): Promise<ChatRun> {
+    const result = await this.send(
+      `/chat/runs/${encodeURIComponent(runId)}/cancel`,
+      { method: "POST" },
+    );
+    return this.decode(result.data, decodeRun);
+  }
+
+  async refreshInteraction(
+    runId: string,
+    interactionId: string,
+    version: number,
+    requestId: string,
+  ): Promise<ChatRun> {
+    const result = await this.send(
+      `/chat/runs/${encodeURIComponent(runId)}/interactions/${encodeURIComponent(interactionId)}/refresh`,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          expected_version: version,
+          request_id: requestId,
+        }),
+      },
+    );
+    return this.decode(result.data, decodeRun);
+  }
+
+  async interactionOptions(
+    runId: string,
+    interactionId: string,
+    field: string,
+    query: string,
+    signal: AbortSignal,
+  ): Promise<ToolOption[]> {
+    const params = new URLSearchParams({ field, q: query });
+    const result = await this.send(
+      `/chat/runs/${encodeURIComponent(runId)}/interactions/${encodeURIComponent(interactionId)}/options?${params}`,
+      { signal },
+    );
+    return this.decode(result.data, decodeOptions);
+  }
+
+  async streamRun(
+    path: string,
+    payload: object,
+    signal: AbortSignal,
+    onEvent: (event: RunEvent) => void,
+  ): Promise<void> {
+    try {
+      const response = await this.request(path, {
+        method: "POST",
+        signal,
+        body: JSON.stringify(payload),
+      });
+      if (!response.ok) {
+        const raw: unknown = await response.json();
+        this.requireCurrentSession(path);
+        const failure = isObject(raw) && isObject(raw.error) ? raw.error : {};
+        const details = Array.isArray(failure.details)
+          ? failure.details.flatMap((item: unknown) =>
+              isObject(item) &&
+              typeof item.field === "string" &&
+              typeof item.message === "string"
+                ? [{ field: item.field, message: item.message }]
+                : [],
+            )
+          : [];
+        throw new ApiError(
+          typeof failure.message === "string" ? failure.message : "操作失败",
+          typeof failure.code === "string" ? failure.code : "REQUEST_FAILED",
+          response.status,
+          details,
+        );
+      }
+      if (
+        !response.body ||
+        !response.headers.get("Content-Type")?.includes("text/event-stream")
+      )
+        throw new ApiError("服务未返回任务流", "INVALID_RESPONSE");
+      await readRunStream(response.body, signal, (event) => {
+        this.requireCurrentSession(path);
+        onEvent(event);
+      });
     } catch (error) {
       return this.chatError(error);
     }

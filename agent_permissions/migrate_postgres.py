@@ -17,6 +17,78 @@ from agent_permissions.config import Settings
 from agent_permissions.database import Database
 from agent_permissions.postgres import PostgresDatabase
 
+HITL_COLUMNS = {
+    "agent_chat_runs": (
+        "id",
+        "user_id",
+        "conversation_id",
+        "client_request_id",
+        "request_digest",
+        "payload",
+        "status",
+        "version",
+        "graph_version",
+        "lease_token",
+        "lease_until",
+        "cancel_requested",
+        "output",
+        "finish_reason",
+        "usage",
+        "error",
+        "created_at",
+        "updated_at",
+        "expires_at",
+        "purged",
+    ),
+    "agent_interactions": (
+        "id",
+        "run_id",
+        "call_key",
+        "tool_call_id",
+        "operation_id",
+        "catalog_revision",
+        "document",
+        "status",
+        "version",
+        "submission_id",
+        "submission_digest",
+        "created_at",
+        "expires_at",
+    ),
+    "agent_tool_executions": (
+        "id",
+        "run_id",
+        "interaction_id",
+        "call_key",
+        "operation_id",
+        "arguments_digest",
+        "status",
+        "service_result",
+        "result",
+        "created_at",
+        "updated_at",
+    ),
+    "agent_checkpoints": (
+        "thread_id",
+        "namespace",
+        "checkpoint_id",
+        "parent_id",
+        "kind",
+        "checkpoint",
+        "metadata",
+    ),
+    "agent_checkpoint_writes": (
+        "thread_id",
+        "namespace",
+        "checkpoint_id",
+        "task_id",
+        "idx",
+        "channel",
+        "kind",
+        "value",
+    ),
+}
+
 TABLE_COLUMNS = {
     "permissions": ("code", "display_name", "resource"),
     "roles": (
@@ -73,6 +145,7 @@ TABLE_COLUMNS = {
         "created_at",
     ),
     "rate_limits": ("bucket_key", "attempts", "expires_at"),
+    **HITL_COLUMNS,
 }
 
 
@@ -111,9 +184,14 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
         source.row_factory = sqlite3.Row
         source.execute("BEGIN")
         version = source.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (2, 3):
-            raise ValueError("源数据库必须先升级为 schema 2 或 3，原文件与备份均已保留")
+        if version not in (2, 3, 4):
+            raise ValueError(
+                "源数据库必须先升级为 schema 2、3 或 4，原文件与备份均已保留"
+            )
         source_columns = dict(TABLE_COLUMNS)
+        if version < 4:
+            for table in HITL_COLUMNS:
+                del source_columns[table]
         if version == 2:
             source_columns["users"] = source_columns["users"][:-1]
             del source_columns["user_agent_tool_grants"]
@@ -162,7 +240,7 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
             # Preserve the imported records, then add permissions introduced by this release.
             Database._seed_catalog(destination)
             report["source_schema"] = version
-            report["target_schema"] = 3
+            report["target_schema"] = 4
         return report
 
 

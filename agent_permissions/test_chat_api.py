@@ -5,16 +5,14 @@ import json
 import tempfile
 import unittest
 from collections.abc import Callable
-from contextlib import asynccontextmanager
 from pathlib import Path
-from unittest.mock import patch
 
 import httpx
 import openai
 from fastapi.testclient import TestClient
 from langchain_core.language_models import BaseChatModel
-from langchain_core.messages import AIMessage, ToolMessage
-from langchain_core.outputs import ChatGeneration, ChatResult
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from pydantic import Field
 from starlette.requests import Request
 
@@ -54,7 +52,10 @@ class BusinessModel(BaseChatModel):
         elif isinstance(messages[-1], ToolMessage):
             tool = messages[-1]
             if tool.status == "error":
-                text = "PERMISSION_DENIED"
+                try:
+                    text = json.loads(tool.content)["error"]["code"]
+                except (ValueError, KeyError):
+                    text = "PERMISSION_DENIED"
             else:
                 result = json.loads(tool.content)
                 if "error" in result:
@@ -246,14 +247,14 @@ class OpenAIChatTests(unittest.TestCase):
         result = self.sdk.chat.completions.create(
             model="fixture-model", messages=[{"role": "user", "content": "创建角色"}]
         )
-        self.assertEqual(result.choices[0].message.content, "created:chat_role")
+        self.assertIn("尚未执行", result.choices[0].message.content)
         with self.app.state.database.transaction() as connection:
-            self.assertIsNotNone(
+            self.assertIsNone(
                 connection.execute(
                     "SELECT code FROM roles WHERE code='chat_role'"
                 ).fetchone()
             )
-            self.assertIsNotNone(
+            self.assertIsNone(
                 connection.execute(
                     "SELECT id FROM audit_events WHERE action='role.create'"
                 ).fetchone()
@@ -447,56 +448,44 @@ class OpenAIChatTests(unittest.TestCase):
         self.assertNotIn("private-provider-key", str(caught.exception))
 
     def test_closing_stream_aborts_graph_and_releases_agent_context(self) -> None:
-        closed = []
-
-        class Run:
-            async def __aenter__(self):
-                return self
-
-            async def __aexit__(self, *args):
-                closed.append("graph")
-
-        class Agent:
-            async def astream_events(self, *args, **kwargs):
-                self.version = kwargs["version"]
-                return Run()
-
-        agent = Agent()
-
-        @asynccontextmanager
-        async def context(*args):
-            try:
-                yield agent
-            finally:
-                closed.append("agent")
+        class SlowModel(BusinessModel):
+            async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+                yield ChatGenerationChunk(message=AIMessageChunk(content="partial"))
+                await asyncio.sleep(10)
 
         async def exercise():
             request = Request(
                 {
                     "type": "http",
                     "app": self.app,
-                    "state": {"info": RequestInfo("test", "test")},
+                    "method": "POST",
+                    "path": "/v1/chat/completions",
+                    "query_string": b"",
+                    "headers": [(b"authorization", ("Bearer " + self.token).encode())],
+                    "client": ("test", 0),
+                    "state": {"info": RequestInfo("abort", "test")},
                 }
             )
-            payload = ChatRequest(
-                model="fixture-model",
-                messages=[{"role": "user", "content": "hello"}],
-                stream=True,
+            stream = _stream(
+                request,
+                ChatRequest(
+                    model="fixture-model",
+                    messages=[{"role": "user", "content": "hello"}],
+                    stream=True,
+                ),
+                SlowModel(),
+                {"id": "abort", "created": 1, "model": "fixture-model"},
             )
-            with patch("agent_permissions.chat_api._agent", context):
-                stream = _stream(
-                    request,
-                    payload,
-                    self.model,
-                    {"id": "chatcmpl-test", "created": 1, "model": "fixture-model"},
-                )
-                first = await anext(stream)
-                self.assertIn('"role": "assistant"', first)
-                await stream.aclose()
+            self.assertIn('"role": "assistant"', await anext(stream))
+            self.assertIn("partial", await anext(stream))
+            await stream.aclose()
 
         asyncio.run(exercise())
-        self.assertEqual(agent.version, "v3")
-        self.assertEqual(closed, ["graph", "agent"])
+        with self.app.state.database.transaction() as connection:
+            run = connection.execute(
+                "SELECT status,output FROM agent_chat_runs"
+            ).fetchone()
+            self.assertEqual(tuple(run), ("interrupted", "partial"))
 
 
 if __name__ == "__main__":

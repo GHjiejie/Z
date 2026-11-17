@@ -14,7 +14,7 @@ import psycopg
 from fastapi.testclient import TestClient
 from psycopg import sql
 
-from agent_permissions import test_agent_grants, test_api, test_rbac
+from agent_permissions import test_agent_grants, test_api, test_hitl, test_rbac
 from agent_permissions.__main__ import main as cli_main
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
@@ -76,6 +76,13 @@ class PostgresRbacTests(PostgresFixture, test_rbac.RbacTests):
     TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
 )
 class PostgresAgentGrantTests(PostgresFixture, test_agent_grants.UserAgentGrantTests):
+    pass
+
+
+@unittest.skipUnless(
+    TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
+)
+class PostgresHitlTests(PostgresFixture, test_hitl.HitlTests):
     pass
 
 
@@ -243,10 +250,70 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                 target.execute(
                     "SELECT version FROM schema_metadata WHERE key='schema_version'"
                 ).fetchone()[0],
-                3,
+                4,
             )
             self.assertEqual(
                 target.execute("SELECT count(*) FROM users").fetchone()[0], 2
+            )
+
+    def test_migrate_waiting_graph_and_resume_on_postgres(self):
+        from agent_permissions.test_hitl import InteractionModel, events
+        from agent_permissions.tracing import ChatTracing, TracingSettings
+
+        model = InteractionModel()
+        with TestClient(
+            create_app(
+                Settings(database_path=self.path),
+                chat_model_factory=lambda: model,
+                chat_tracing=ChatTracing(TracingSettings()),
+            )
+        ) as source:
+            source.app.state.service.bootstrap_admin(
+                UserCreate(username="admin", display_name="管理员", password="12345")
+            )
+            login = source.post(
+                "/api/v1/auth/login", json={"username": "admin", "password": "12345"}
+            ).json()["data"]
+            headers = {"Authorization": "Bearer " + login["session_token"]}
+            grant_tools(source, headers, login["user"]["id"])
+            response = source.post(
+                "/api/v1/chat/runs",
+                headers=headers,
+                json={
+                    "model": model.model_name,
+                    "messages": [{"role": "user", "content": "创建角色"}],
+                    "client_request_id": "migration",
+                    "conversation_id": "migration",
+                },
+            )
+            run = [event["run"] for event in events(response) if "run" in event][-1]
+            self.assertEqual(run["status"], "waiting")
+        report = migrate(self.path, self.target)
+        self.assertGreater(report["tables"]["agent_checkpoints"]["rows"], 0)
+        settings = Settings(
+            database_path=self.path, database_url=self.target.database_url
+        )
+        with TestClient(
+            create_app(
+                settings,
+                chat_model_factory=lambda: model,
+                chat_tracing=ChatTracing(TracingSettings()),
+            )
+        ) as destination:
+            current = destination.get(
+                f"/api/v1/chat/runs/{run['id']}", headers=headers
+            ).json()["data"]
+            self.assertEqual(current["interaction"]["id"], run["interaction"]["id"])
+            result = destination.post(
+                f"/api/v1/chat/runs/{run['id']}/interactions/{run['interaction']['id']}/resume",
+                headers=headers,
+                json={"submission_id": "after-migration", "expected_version": 1},
+            )
+            done = [event["run"] for event in events(result) if "run" in event][-1]
+            self.assertEqual(done["status"], "completed", done)
+            self.assertEqual(
+                destination.get("/api/v1/roles/new_role", headers=headers).status_code,
+                200,
             )
 
     def test_copy_error_rolls_back_all_imported_tables(self) -> None:

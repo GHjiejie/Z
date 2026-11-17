@@ -8,6 +8,7 @@ import tempfile
 import unittest
 from contextlib import redirect_stdout
 from pathlib import Path
+from uuid import uuid4
 
 import httpx
 from fastapi.testclient import TestClient
@@ -15,11 +16,14 @@ from jsonschema import Draft202012Validator
 
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
+from agent_permissions.hitl_forms import read_pointer
 from agent_permissions.models import UserCreate
 from agent_permissions.operations import OPERATIONS
+from agent_permissions.test_hitl import InteractionModel, events
 from agent_permissions.test_support import grant_tools
 from agent_permissions.tooling import compile_tools
 from agent_permissions.tools import main as tools_main
+from agent_permissions.tracing import ChatTracing, TracingSettings
 from api_tools.client import AgentToolClient
 from api_tools.compiler import ContractError, digest
 
@@ -29,7 +33,10 @@ PASSWORD = "Offline tool tests password"
 class UserToolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.directory = Path(self.enterContext(tempfile.TemporaryDirectory()))
-        self.app = create_app(Settings(database_path=self.directory / "users.sqlite3"))
+        self.app = create_app(
+            Settings(database_path=self.directory / "users.sqlite3"),
+            chat_tracing=ChatTracing(TracingSettings()),
+        )
         self.client = self.enterContext(TestClient(self.app))
         self.app.state.service.bootstrap_admin(
             UserCreate(username="admin", display_name="管理员", password=PASSWORD)
@@ -53,17 +60,58 @@ class UserToolTests(unittest.TestCase):
         status: int = 200,
     ) -> dict:
         name = "agent_users_" + operation.replace(".", "_")
-        response = self.client.post(
-            "/agent-tools/call",
-            headers=self.headers if headers is None else headers,
-            json={
-                "name": name,
-                "arguments": arguments or {},
-                "revision": self.catalog["bundleDigest"],
-            },
-        )
-        self.assertEqual(response.status_code, 200, response.text)
-        result = response.json()
+        if (
+            OPERATIONS[operation].effect != "read"
+            and OPERATIONS[operation].authentication == "session"
+        ):
+            self.app.state.chat_model = InteractionModel(
+                operation=operation, arguments=arguments or {}
+            )
+            auth = self.headers if headers is None else headers
+            response = self.client.post(
+                "/api/v1/chat/runs",
+                headers=auth,
+                json={
+                    "model": "hitl-fixture",
+                    "messages": [{"role": "user", "content": "执行测试操作"}],
+                    "conversation_id": uuid4().hex,
+                    "client_request_id": uuid4().hex,
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            run = [item["run"] for item in events(response) if "run" in item][-1]
+            self.assertEqual(run["status"], "waiting", run)
+            interaction = run["interaction"]
+            sensitive = {
+                field["pointer"]: read_pointer(arguments or {}, field["pointer"])[1]
+                for field in interaction["fields"]
+                if field["sensitive"]
+            }
+            response = self.client.post(
+                f"/api/v1/chat/runs/{run['id']}/interactions/{interaction['id']}/resume",
+                headers=auth,
+                json={
+                    "submission_id": uuid4().hex,
+                    "expected_version": interaction["version"],
+                    "sensitive_values": sensitive,
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            run = [item["run"] for item in events(response) if "run" in item][-1]
+            self.assertTrue(run["executions"], run)
+            result = run["executions"][-1]["result"]
+        else:
+            response = self.client.post(
+                "/agent-tools/call",
+                headers=self.headers if headers is None else headers,
+                json={
+                    "name": name,
+                    "arguments": arguments or {},
+                    "revision": self.catalog["bundleDigest"],
+                },
+            )
+            self.assertEqual(response.status_code, 200, response.text)
+            result = response.json()
         self.assertEqual(result["httpStatus"], status, result)
         self.assertEqual(result["ok"], 200 <= status < 300)
         self.assertEqual(result["bundleDigest"], self.catalog["bundleDigest"])
@@ -285,10 +333,13 @@ class UserToolTests(unittest.TestCase):
         )
 
     def test_business_errors_version_preconditions_and_argument_redaction(self) -> None:
-        result = self.call(
-            "user.self.update", {"body": {"display_name": "test"}}, status=428
+        response = self.client.patch(
+            "/api/v1/users/me", headers=self.headers, json={"display_name": "test"}
         )
-        self.assertEqual(result["body"]["error"]["code"], "PRECONDITION_REQUIRED")
+        self.assertEqual(response.status_code, 428)
+        self.assertEqual(response.json()["error"]["code"], "PRECONDITION_REQUIRED")
+        # HITL resolves the current target version before showing the confirmation.
+        self.call("user.self.update", {"body": {"display_name": "test"}})
         secret = "never-include-this-password"
         for arguments in (
             {"password": secret},

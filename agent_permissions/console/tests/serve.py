@@ -5,6 +5,7 @@ import json
 from collections.abc import AsyncIterator
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from uuid import uuid4
 
 import uvicorn
 from fastapi import Request
@@ -17,6 +18,7 @@ from agent_permissions.models import UserCreate
 from agent_permissions.security import token_digest
 from agent_permissions.service import Authority, RequestInfo
 from agent_permissions.test_chat_api import BusinessModel
+from agent_permissions.test_hitl import InteractionModel
 from agent_permissions.test_support import grant_tools
 from agent_permissions.tooling import execution_context
 from agent_permissions.tracing import ChatTracing, TracingSettings
@@ -24,6 +26,44 @@ from agent_permissions.tracing import ChatTracing, TracingSettings
 ADMIN_PASSWORD = "12345"
 MEMBER_PASSWORD = "Console member password 2026!"
 INITIAL_PASSWORD = "12345"
+
+
+class ConsoleModel(BusinessModel):
+    def _generate(self, messages, stop=None, run_manager=None, **kwargs):
+        prompt = next(
+            (str(item.content) for item in reversed(messages) if item.type == "human"),
+            "",
+        )
+        if prompt.startswith("HITL "):
+            kind = prompt.split(" ")[1]
+            fixture = InteractionModel(model_name="fixture-model")
+            if kind == "创建用户":
+                fixture.operation, fixture.arguments, fixture.prepare = (
+                    "user.create",
+                    {},
+                    True,
+                )
+            elif kind == "删除角色":
+                fixture.operation, fixture.arguments, fixture.prepare = (
+                    "role.delete",
+                    {},
+                    True,
+                )
+            elif kind == "查询用户":
+                fixture.operation, fixture.arguments, fixture.prepare = (
+                    "user.read",
+                    {},
+                    True,
+                )
+            else:
+                fixture.arguments = {
+                    "body": {
+                        "code": prompt.split(" ")[-1],
+                        "display_name": "待确认角色",
+                    }
+                }
+            return fixture._generate(messages, stop, run_manager, **kwargs)
+        return super()._generate(messages, stop, run_manager, **kwargs)
 
 
 def main() -> None:
@@ -36,7 +76,7 @@ def main() -> None:
         )
         app = create_app(
             settings,
-            chat_model_factory=lambda: BusinessModel(),
+            chat_model_factory=lambda: ConsoleModel(),
             chat_tracing=ChatTracing(TracingSettings()),
         )
 
@@ -53,22 +93,49 @@ def main() -> None:
             prompt = payload["messages"][-1]["content"]
 
             async def events() -> AsyncIterator[str | bytes]:
-                def chunk(
-                    text: str | None = None, finish: str | None = None
-                ) -> dict[str, object]:
+                run = {
+                    "id": "fixture_" + uuid4().hex,
+                    "conversation_id": payload["conversation_id"],
+                    "client_request_id": payload["client_request_id"],
+                    "status": "running",
+                    "version": 1,
+                    "content": "",
+                    "finish": "stop",
+                    "usage": None,
+                    "error": None,
+                    "expires_at": 9999999999,
+                    "purged": False,
+                    "interaction": None,
+                    "executions": [],
+                }
+                sequence = 0
+
+                def event(kind, **data):
+                    nonlocal sequence
+                    sequence += 1
                     return {
-                        "id": "chatcmpl-browser",
-                        "object": "chat.completion.chunk",
-                        "created": 1,
-                        "model": "fixture-model",
-                        "choices": [
-                            {
-                                "index": 0,
-                                "delta": {"content": text} if text is not None else {},
-                                "finish_reason": finish,
-                            }
-                        ],
+                        "type": kind,
+                        "run_id": run["id"],
+                        "stream_id": run["id"],
+                        "sequence": sequence,
+                        "protocol_version": 1,
+                        **data,
                     }
+
+                def frame(kind, **data):
+                    return (
+                        "event: "
+                        + kind
+                        + "\ndata: "
+                        + json.dumps(event(kind, **data), ensure_ascii=False)
+                        + "\n\n"
+                    )
+
+                def chunk(text):
+                    run["content"] += text
+                    return event("text.delta", text=text)
+
+                yield frame("run.started", run=run)
 
                 yield b": keepalive\r\n\r\n"
                 first_text = (
@@ -77,7 +144,7 @@ def main() -> None:
                     else "第一段：正在处理你的请求。\n"
                 )
                 first = (
-                    "data: "
+                    "event: text.delta\ndata: "
                     + json.dumps(chunk(first_text), ensure_ascii=False)
                     + "\r\n\r\n"
                 ).encode()
@@ -87,7 +154,16 @@ def main() -> None:
                     await asyncio.sleep(0.002)
                 await asyncio.sleep(5 if "慢流" in prompt else 0.8)
                 if "错误" in prompt:
-                    yield 'data: {"error":{"message":"模型暂时繁忙，请先核对操作结果","code":"model_unavailable"}}\n\n'
+                    run.update(
+                        status="failed",
+                        version=2,
+                        error={
+                            "message": "模型暂时繁忙，请先核对操作结果",
+                            "code": "model_unavailable",
+                        },
+                    )
+                    yield frame("run.failed", run=run)
+                    yield frame("stream.closed", status="failed")
                     return
                 if "断流" in prompt:
                     return
@@ -108,14 +184,14 @@ def main() -> None:
                         "**渲染完成**\n\n"
                     )
                     yield (
-                        "data: "
+                        "event: text.delta\ndata: "
                         + json.dumps(chunk(markdown), ensure_ascii=False)
                         + "\n\n"
                     )
                 if "长回复" in prompt:
                     for number in range(32):
                         yield (
-                            "data: "
+                            "event: text.delta\ndata: "
                             + json.dumps(
                                 chunk(
                                     f"第 {number + 1} 项：这是一段用于检验阅读位置的长回复。\n\n"
@@ -126,13 +202,21 @@ def main() -> None:
                         )
                         await asyncio.sleep(0.06)
                 yield (
-                    "data: "
+                    "event: text.delta\ndata: "
                     + json.dumps(chunk("第二段：回复已经完成。"), ensure_ascii=False)
                     + "\n\n"
                 )
-                yield "data: " + json.dumps(chunk(finish="stop")) + "\n\n"
-                yield 'data: {"object":"chat.completion.chunk","choices":[],"usage":{"prompt_tokens":10,"completion_tokens":20,"total_tokens":30}}\n\n'
-                yield "data: [DONE]\n\n"
+                run.update(
+                    status="completed",
+                    version=2,
+                    usage={
+                        "prompt_tokens": 10,
+                        "completion_tokens": 20,
+                        "total_tokens": 30,
+                    },
+                )
+                yield frame("run.completed", run=run)
+                yield frame("stream.closed", status="completed")
 
             return StreamingResponse(events(), media_type="text/event-stream")
 

@@ -15,6 +15,7 @@ import {
 import { aborted, type ApiClient, type User } from "./api";
 import { ErrorBanner, Modal, Spinner } from "./components";
 import { ChatMarkdown } from "./ChatMarkdown";
+import { ToolInteractionCard } from "./ToolInteractionCard";
 import { useChat } from "./useChat";
 
 function timeLabel(value: string) {
@@ -45,6 +46,11 @@ export function ChatPage({
   const [modelLoading, setModelLoading] = useState(true);
   const [modelRevision, setModelRevision] = useState(0);
   const [deleteId, setDeleteId] = useState<string | null>(null);
+  const [deleting, setDeleting] = useState(false);
+  const [deleteError, setDeleteError] = useState<unknown>(null);
+  const [runReference, setRunReference] = useState("");
+  const [opening, setOpening] = useState(false);
+  const [openError, setOpenError] = useState<unknown>(null);
   const [historyOpen, setHistoryOpen] = useState(false);
   const [showLatest, setShowLatest] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
@@ -52,6 +58,10 @@ export function ChatPage({
   const following = useRef(true);
   const composing = useRef(false);
   const lastConversation = useRef(active?.id);
+  const lastInteraction = useRef<string | undefined>(undefined);
+  const interactionId = Object.values(chat.runs).find(
+    (run) => run.conversation_id === active?.id && run.interaction,
+  )?.interaction?.id;
   const model =
     active?.model && models.includes(active.model)
       ? active.model
@@ -62,7 +72,10 @@ export function ChatPage({
     model &&
     !modelLoading &&
     !modelError &&
-    !generating,
+    !generating &&
+    !chat.pending &&
+    !chat.recovering &&
+    !chat.recoveryError,
   );
 
   useEffect(() => {
@@ -92,9 +105,25 @@ export function ChatPage({
       following.current = true;
       setShowLatest(false);
     }
+    if (interactionId) {
+      if (lastInteraction.current !== interactionId && scroll.current) {
+        const card = scroll.current.querySelector(".tool-interaction-card");
+        if (card)
+          scroll.current.scrollTop +=
+            card.getBoundingClientRect().top -
+            scroll.current.getBoundingClientRect().top -
+            12;
+        following.current = false;
+        setShowLatest(false);
+      }
+      lastInteraction.current = interactionId;
+      return;
+    }
+    if (lastInteraction.current) following.current = true;
+    lastInteraction.current = undefined;
     if (following.current && scroll.current)
       scroll.current.scrollTop = scroll.current.scrollHeight;
-  }, [active?.id, active?.messages]);
+  }, [active?.id, active?.messages, interactionId]);
 
   function latest() {
     following.current = true;
@@ -128,13 +157,19 @@ export function ChatPage({
     ? last?.content
       ? "正在生成回复"
       : "正在处理请求"
-    : last?.status === "failed"
-      ? "回复未完成"
-      : last?.status === "stopped"
-        ? "已停止生成"
-        : last
-          ? "回复已完成"
-          : "可以开始新会话";
+    : last?.status === "waiting"
+      ? "等待填写参数或确认操作"
+      : last?.status === "cancelled"
+        ? "操作已取消"
+        : last?.status === "expired"
+          ? "操作已过期"
+          : last?.status === "failed"
+            ? "回复未完成"
+            : last?.status === "stopped"
+              ? "已停止生成"
+              : last
+                ? "回复已完成"
+                : "可以开始新会话";
 
   return (
     <section className="chat-page" aria-label="Agent 会话">
@@ -205,13 +240,52 @@ export function ChatPage({
                     className="icon-button conversation-delete"
                     aria-label={`删除会话：${item.title}`}
                     title="删除会话"
-                    onClick={() => setDeleteId(item.id)}
+                    onClick={() => {
+                      setDeleteError(null);
+                      setDeleteId(item.id);
+                    }}
                   >
                     <Trash2 size={15} />
                   </button>
                 </div>
               ))}
           </nav>
+          <details className="chat-open-run">
+            <summary>打开已有任务</summary>
+            <form
+              onSubmit={(event) => {
+                event.preventDefault();
+                if (opening) return;
+                setOpening(true);
+                setOpenError(null);
+                void chat
+                  .importRun(runReference)
+                  .then(() => {
+                    setRunReference("");
+                    setHistoryOpen(false);
+                  })
+                  .catch((error: unknown) => setOpenError(error))
+                  .finally(() => setOpening(false));
+              }}
+            >
+              <label htmlFor="chat-run-reference">任务标识</label>
+              <input
+                id="chat-run-reference"
+                value={runReference}
+                required
+                maxLength={128}
+                placeholder="粘贴 Chat 返回的任务标识"
+                onChange={(event) => setRunReference(event.target.value)}
+              />
+              <button
+                className="button secondary"
+                disabled={opening || generating || !runReference.trim()}
+              >
+                {opening ? "正在读取…" : "打开任务"}
+              </button>
+              {Boolean(openError) && <ErrorBanner error={openError} />}
+            </form>
+          </details>
           <p className="chat-storage-note">
             记录仅保存在此浏览器
             <br />
@@ -335,6 +409,12 @@ export function ChatPage({
                           )
                         ) : message.status === "streaming" ? (
                           <Spinner label="正在处理请求" />
+                        ) : message.status === "waiting" ? (
+                          "请处理下方的工具操作。"
+                        ) : message.status === "cancelled" ? (
+                          "本次待执行操作已取消。"
+                        ) : message.status === "expired" ? (
+                          "本次待执行操作已过期。"
                         ) : (
                           "本次没有收到回复内容"
                         )}
@@ -345,6 +425,46 @@ export function ChatPage({
                           />
                         )}
                       </div>
+                      {message.runId &&
+                        chat.runs[message.runId]?.interaction &&
+                        (() => {
+                          const run = chat.runs[message.runId];
+                          return run?.interaction ? (
+                            <ToolInteractionCard
+                              key={run.interaction.id}
+                              api={api}
+                              run={run}
+                              busy={generating}
+                              onSubmit={(payload) => chat.resume(run, payload)}
+                              onCancel={() => chat.cancel(run)}
+                              onRefresh={(requestId) =>
+                                chat.refresh(run, requestId)
+                              }
+                              onRecover={chat.recover}
+                            />
+                          ) : null;
+                        })()}
+                      {message.runId &&
+                        Boolean(
+                          chat.runs[message.runId]?.executions.length,
+                        ) && (
+                          <div
+                            className="tool-execution-summary"
+                            aria-label="工具执行结果"
+                          >
+                            {chat.runs[message.runId]?.executions.map(
+                              (execution) => (
+                                <p key={execution.id}>
+                                  {execution.status === "succeeded"
+                                    ? "业务操作已完成"
+                                    : execution.status === "failed"
+                                      ? "业务操作未成功，请查看回复中的原因"
+                                      : "业务操作执行结果待核对"}
+                                </p>
+                              ),
+                            )}
+                          </div>
+                        )}
                       {message.role === "assistant" && (
                         <div className="chat-message-footer">
                           {message.status === "streaming" &&
@@ -391,6 +511,30 @@ export function ChatPage({
                           <p>
                             已保留收到的内容。部分业务操作可能已执行，请先查询确认结果。
                           </p>
+                          {message.runId && (
+                            <button
+                              className="text-button"
+                              disabled={generating || chat.recovering}
+                              onClick={chat.recover}
+                            >
+                              读取最新任务状态
+                            </button>
+                          )}
+                          {message.runId &&
+                            ["interrupted", "failed"].includes(
+                              chat.runs[message.runId]?.status ?? "",
+                            ) && (
+                              <button
+                                className="text-button"
+                                disabled={generating || chat.recovering}
+                                onClick={() => {
+                                  const run = chat.runs[message.runId ?? ""];
+                                  if (run) void chat.continue(run);
+                                }}
+                              >
+                                恢复此任务
+                              </button>
+                            )}
                           <button
                             className="text-button"
                             disabled={generating}
@@ -410,7 +554,7 @@ export function ChatPage({
                 ))
               )}
             </div>
-            {showLatest && (
+            {showLatest && !interactionId && (
               <button className="button secondary chat-jump" onClick={latest}>
                 <ArrowDown size={15} />
                 回到最新消息
@@ -418,7 +562,7 @@ export function ChatPage({
             )}
           </div>
           <form
-            className="chat-composer"
+            className={`chat-composer${interactionId && !generating ? " is-waiting" : ""}`}
             onSubmit={(event) => {
               event.preventDefault();
               send();
@@ -429,6 +573,22 @@ export function ChatPage({
                 error={modelError}
                 onRetry={() => setModelRevision((value) => value + 1)}
               />
+            )}
+            {Boolean(chat.recoveryError) && (
+              <ErrorBanner error={chat.recoveryError} onRetry={chat.recover} />
+            )}
+            {chat.recovering && <p role="status">正在恢复任务状态…</p>}
+            {chat.pending && !generating && (
+              <p className="chat-pending-note" role="status">
+                请先处理或取消当前操作，也可以新建会话。
+                <button
+                  className="text-button"
+                  type="button"
+                  onClick={chat.recover}
+                >
+                  刷新任务状态
+                </button>
+              </p>
             )}
             <label className="sr-only" htmlFor="chat-message-input">
               输入消息
@@ -496,7 +656,7 @@ export function ChatPage({
         <Modal
           title="删除会话"
           description="这会删除此浏览器中保存的消息和草稿"
-          busy={false}
+          busy={deleting}
           destructive
           onClose={() => setDeleteId(null)}
           footer={
@@ -509,9 +669,16 @@ export function ChatPage({
               </button>
               <button
                 className="button danger"
+                disabled={deleting}
                 onClick={() => {
-                  chat.remove(deleteId);
-                  setDeleteId(null);
+                  if (deleting) return;
+                  setDeleting(true);
+                  setDeleteError(null);
+                  void chat
+                    .remove(deleteId)
+                    .then(() => setDeleteId(null))
+                    .catch((error: unknown) => setDeleteError(error))
+                    .finally(() => setDeleting(false));
                 }}
               >
                 确认删除
@@ -520,9 +687,10 @@ export function ChatPage({
           }
         >
           <p>
-            删除会话不会撤销已执行的业务操作。
+            待处理操作将被取消，已执行的业务操作会保留。
             {chat.generatingId === deleteId ? "当前回复也会停止生成。" : ""}
           </p>
+          {Boolean(deleteError) && <ErrorBanner error={deleteError} />}
         </Modal>
       )}
     </section>

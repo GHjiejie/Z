@@ -2805,3 +2805,176 @@ tbody tr:focus-within {
     transition: none;
   }
 }
+
+.tool-interaction-card {
+  margin: 18px 0 12px;
+  padding: 22px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-card);
+  background: var(--surface);
+  max-width: 740px;
+}
+.tool-card-heading {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  color: var(--primary);
+}
+.tool-card-heading h3 {
+  color: var(--text-primary);
+  margin: 0;
+  font-size: 16px;
+}
+.tool-card-heading span,
+.tool-interaction-card > p,
+.tool-card-expiry {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.tool-target {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  padding: 12px;
+  background: var(--raised);
+  border-radius: var(--radius-control);
+  margin: 12px 0;
+  overflow-wrap: anywhere;
+}
+.tool-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 18px;
+  margin: 20px 0;
+}
+.tool-form-field {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.tool-field-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.tool-field-heading > label:first-child {
+  font-weight: 600;
+}
+.tool-field-toggle {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 12px;
+  color: var(--text-secondary);
+}
+.tool-form-field input:not([type="checkbox"]),
+.tool-form-field select {
+  width: 100%;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-control);
+  background: var(--surface);
+  padding: 9px 10px;
+  min-height: 38px;
+}
+.tool-form-field select[multiple] {
+  min-height: 110px;
+}
+.tool-form-field input:disabled,
+.tool-form-field select:disabled {
+  background: var(--raised);
+  color: var(--text-muted);
+}
+.tool-form-field input[type="checkbox"] {
+  width: 15px;
+  height: 15px;
+  align-self: flex-start;
+  accent-color: var(--primary);
+}
+.tool-form-field small {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.tool-form-field .tool-field-error,
+.tool-card-error {
+  color: var(--danger);
+}
+.tool-card-error {
+  background: var(--danger-soft);
+  padding: 10px 12px;
+  border-radius: var(--radius-control);
+  margin: 12px 0;
+}
+.tool-card-error p {
+  margin: 0 0 5px;
+}
+.tool-interaction-card .tool-danger-note {
+  color: var(--danger);
+}
+.tool-card-actions {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 10px;
+  margin-top: 18px;
+}
+.tool-card-expiry {
+  display: block;
+  margin-top: 12px;
+}
+.tool-execution-summary {
+  margin: 10px 0;
+  color: var(--text-secondary);
+  font-size: 12px;
+}
+.tool-execution-summary p {
+  margin: 4px 0;
+}
+.chat-pending-note {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+@media (max-width: 640px) {
+  .tool-interaction-card {
+    padding: 16px;
+    margin-inline: -8px;
+  }
+  .tool-form-grid {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 14px;
+  }
+  .tool-card-actions .button {
+    flex: 1;
+    justify-content: center;
+  }
+}
+
+.chat-open-run {
+  padding: 12px 16px;
+  border-top: 1px solid var(--border);
+  font-size: 12px;
+}
+.chat-open-run summary {
+  cursor: pointer;
+  color: var(--muted);
+}
+.chat-open-run form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}
+.chat-open-run input {
+  width: 100%;
+  min-width: 0;
+}
+
+.chat-composer.is-waiting textarea,
+.chat-composer.is-waiting .chat-composer-footer,
+.chat-composer.is-waiting .chat-scope-note {
+  display: none;
+}
+.chat-composer.is-waiting {
+  padding-block: 12px;
+}

@@ -14,6 +14,7 @@
 - [用户级 Agent 工具授权](docs/user-agent-tool-grants.md)：用户页面配置、独立授权存储、角色变更保留设置和执行时 RBAC 校验；附[改造方案与架构图](docs/user-agent-tool-grants-plan.md)。
 - [项目独立模型配置](docs/model.md)：本目录专用的 Responses API 客户端、供应商配置及 Agent 接入示例。
 - [OpenAI 兼容 Chat 接口](docs/chat-api.md)：OpenAI SDK 对话、流式响应、自动业务工具执行和会话鉴权。
+- [Agent 交互工具](docs/agent-hitl.md)：会话参数填写、执行确认、取消、持久化暂停恢复、SSE 协议与部署说明；[设计方案](docs/agent-hitl-design.md)记录架构和约束。
 - [LangSmith 追踪](docs/langsmith.md)：Agent、模型与工具调用链、请求关联、项目独立配置和脱敏。
 - [运行说明](docs/running.md)：环境准备、管理员初始化、启动服务、登录、配置与测试。
 - [Console 页面说明](console/README.md)：登录、用户管理、角色与权限、个人设置及前端开发方式。构建后入口为 `/console/`。

@@ -11,6 +11,8 @@ from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
 from agent_permissions.errors import ApiError
+from agent_permissions.hitl_execution import confirmed_execution
+from agent_permissions.hitl_forms import requires_confirmation
 from agent_permissions.models import StrictModel
 from agent_permissions.security import token_digest
 from agent_permissions.service import Authority
@@ -145,6 +147,28 @@ def mount_agent_tools(app: FastAPI) -> None:
                     raise ToolError(
                         "TOOL_NOT_GRANTED", "当前用户未允许 Agent 调用此工具", 403
                     )
+                if not permitted(
+                    binding["policy"],
+                    set(context.permissions),
+                    authenticated=context.authenticated,
+                ):
+                    raise ToolError("PERMISSION_DENIED", "没有执行该工具的权限", 403)
+                if binding["policy"][
+                    "authentication"
+                ] == "session" and requires_confirmation(tool):
+                    confirmation = confirmed_execution.get()
+                    if (
+                        confirmation is None
+                        or confirmation.user_id != request.state.info.actor_user_id
+                        or confirmation.operation_id != binding["operationId"]
+                        or confirmation.arguments_digest
+                        != app.state.run_store.digest(payload.arguments)
+                    ):
+                        raise ToolError(
+                            "INTERACTION_REQUIRED",
+                            "此操作需要在会话页面填写参数并确认",
+                            409,
+                        )
                 return await app.state.tool_executor.call(
                     payload.name,
                     payload.arguments,

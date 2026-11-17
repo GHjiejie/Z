@@ -4,7 +4,15 @@ export interface ChatMessage {
   id: string;
   role: "user" | "assistant";
   content: string;
-  status: "complete" | "streaming" | "stopped" | "failed";
+  status:
+    | "complete"
+    | "streaming"
+    | "stopped"
+    | "failed"
+    | "waiting"
+    | "cancelled"
+    | "expired";
+  runId?: string;
   createdAt: string;
   error?: string;
   finish?: "stop" | "length";
@@ -55,12 +63,19 @@ function message(value: unknown): value is ChatMessage {
     typeof value.id === "string" &&
     (value.role === "user" || value.role === "assistant") &&
     typeof value.content === "string" &&
-    ["complete", "streaming", "stopped", "failed"].includes(
-      String(value.status),
-    ) &&
+    [
+      "complete",
+      "streaming",
+      "stopped",
+      "failed",
+      "waiting",
+      "cancelled",
+      "expired",
+    ].includes(String(value.status)) &&
     typeof value.createdAt === "string" &&
     Number.isFinite(Date.parse(value.createdAt)) &&
     (value.error === undefined || typeof value.error === "string") &&
+    (value.runId === undefined || typeof value.runId === "string") &&
     (value.finish === undefined ||
       value.finish === "stop" ||
       value.finish === "length") &&
