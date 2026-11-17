@@ -365,6 +365,24 @@ export class ApiClient {
     }
   }
 
+  async chatToolCount(signal: AbortSignal): Promise<number> {
+    try {
+      const response = await this.request("/agent-tools", { signal }, "");
+      const payload: unknown = await response.json();
+      this.requireCurrentSession("/agent-tools");
+      if (!response.ok) throw chatFailure(payload, response.status);
+      return this.decode(payload, (value) => {
+        const catalog = object(value);
+        if (!Array.isArray(catalog.tools)) throw new Error("Invalid tools");
+        return catalog.tools
+          .map((item: unknown) => text(object(item).name))
+          .filter((name) => name !== "agent_users_auth_login").length;
+      });
+    } catch (error) {
+      return this.chatError(error);
+    }
+  }
+
   async streamChat(
     model: string,
     messages: ChatMessageInput[],

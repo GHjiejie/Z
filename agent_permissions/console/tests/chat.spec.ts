@@ -10,7 +10,7 @@ async function login(
   await page.getByLabel("密码", { exact: true }).fill(password);
   await page.getByRole("button", { name: "登录控制台" }).click();
   await expect(
-    page.getByRole("heading", { name: "会话", exact: true }),
+    page.getByRole("region", { name: "Agent 会话", exact: true }),
   ).toBeVisible();
   await expect(page.getByLabel("聊天模型")).toHaveValue("fixture-model");
 }

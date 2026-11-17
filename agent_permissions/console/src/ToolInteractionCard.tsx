@@ -1,276 +1,25 @@
 import { useEffect, useRef, useState } from "react";
-import { Check, ShieldCheck } from "lucide-react";
+import {
+  Check,
+  ChevronDown,
+  Clock3,
+  LoaderCircle,
+  ShieldCheck,
+  TriangleAlert,
+} from "lucide-react";
 import { ApiError, aborted, errorMessage, type ApiClient } from "./api";
 import { chatId } from "./chatHistory";
 import type {
   ChatRun,
   FieldValue,
   ToolField,
-  ToolOption,
   ToolSubmission,
 } from "./chatRuns";
-
-interface Draft {
-  included: boolean;
-  nullValue: boolean;
-  value: string | boolean | string[];
-}
-
-function initial(field: ToolField): Draft {
-  return {
-    included: field.required || field.present,
-    nullValue: field.present && field.value === null,
-    value:
-      field.type === "array"
-        ? Array.isArray(field.value)
-          ? field.value
-          : []
-        : field.type === "boolean"
-          ? field.value === true
-          : field.value === undefined || field.value === null
-            ? ""
-            : String(field.value),
-  };
-}
-
-function FieldControl({
-  field,
-  draft,
-  onChange,
-  api,
-  run,
-  disabled,
-  error,
-}: {
-  field: ToolField;
-  draft: Draft;
-  onChange: (draft: Draft) => void;
-  api: ApiClient;
-  run: ChatRun;
-  disabled: boolean;
-  error?: string;
-}) {
-  const [options, setOptions] = useState<ToolOption[]>(field.options);
-  const [query, setQuery] = useState("");
-  const [loadError, setLoadError] = useState<unknown>(null);
-  const [loading, setLoading] = useState(false);
-  const [revision, setRevision] = useState(0);
-  const id = `${run.interaction?.id}-${field.pointer.replace(/[^a-zA-Z0-9]/g, "_")}`;
-  useEffect(() => {
-    if (!field.source || !run.interaction || !draft.included || draft.nullValue)
-      return;
-    const controller = new AbortController();
-    setLoading(true);
-    setLoadError(null);
-    const timer = window.setTimeout(
-      () => {
-        void api
-          .interactionOptions(
-            run.id,
-            run.interaction?.id ?? "",
-            field.pointer,
-            query,
-            controller.signal,
-          )
-          .then((values) => {
-            if (!controller.signal.aborted) setOptions(values);
-          })
-          .catch((failure: unknown) => {
-            if (!controller.signal.aborted && !aborted(failure))
-              setLoadError(failure);
-          })
-          .finally(() => {
-            if (!controller.signal.aborted) setLoading(false);
-          });
-      },
-      query ? 200 : 0,
-    );
-    return () => {
-      window.clearTimeout(timer);
-      controller.abort();
-    };
-  }, [
-    api,
-    run.id,
-    run.interaction?.id,
-    field.pointer,
-    field.source,
-    query,
-    revision,
-    draft.included,
-    draft.nullValue,
-  ]);
-
-  const unavailable =
-    disabled || !field.editable || !draft.included || draft.nullValue;
-  const selected = Array.isArray(draft.value)
-    ? draft.value
-    : typeof draft.value === "string" && draft.value
-      ? [draft.value]
-      : [];
-  const visibleOptions = [
-    ...options,
-    ...selected
-      .filter((value) => !options.some((item) => item.value === value))
-      .map((value) => ({ value, label: `${value}（当前值）` })),
-  ];
-  const numeric = (key: string) =>
-    typeof field.constraints[key] === "number"
-      ? field.constraints[key]
-      : undefined;
-  return (
-    <div className="tool-form-field">
-      <div className="tool-field-heading">
-        <label htmlFor={id}>
-          {field.label}
-          {field.required && <span aria-label="必填"> *</span>}
-        </label>
-        {!field.required && (
-          <label className="tool-field-toggle">
-            <input
-              type="checkbox"
-              checked={draft.included}
-              disabled={disabled || !field.editable}
-              onChange={(event) =>
-                onChange({ ...draft, included: event.target.checked })
-              }
-            />
-            填写此项
-          </label>
-        )}
-      </div>
-      {field.nullable && draft.included && (
-        <label className="tool-field-toggle">
-          <input
-            type="checkbox"
-            checked={draft.nullValue}
-            disabled={disabled}
-            onChange={(event) =>
-              onChange({ ...draft, nullValue: event.target.checked })
-            }
-          />
-          清空此值
-        </label>
-      )}
-      {field.source === "users" && draft.included && (
-        <input
-          aria-label="搜索目标用户"
-          placeholder="按姓名或账号搜索"
-          value={query}
-          disabled={unavailable}
-          onChange={(event) => setQuery(event.target.value)}
-        />
-      )}
-      {field.source || field.options.length ? (
-        <select
-          id={id}
-          multiple={field.type === "array"}
-          value={
-            field.type === "array"
-              ? selected
-              : typeof draft.value === "string"
-                ? draft.value
-                : ""
-          }
-          disabled={unavailable || loading || Boolean(loadError)}
-          required={field.required && draft.included && !draft.nullValue}
-          aria-invalid={Boolean(error)}
-          aria-describedby={error ? `${id}-error` : undefined}
-          onChange={(event) =>
-            onChange({
-              ...draft,
-              value:
-                field.type === "array"
-                  ? Array.from(
-                      event.target.selectedOptions,
-                      (item) => item.value,
-                    )
-                  : event.target.value,
-            })
-          }
-        >
-          {field.type !== "array" && (
-            <option value="">请选择{field.label}</option>
-          )}
-          {visibleOptions.map((item) => (
-            <option key={item.value} value={item.value}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      ) : field.type === "boolean" ? (
-        <input
-          id={id}
-          type="checkbox"
-          checked={draft.value === true}
-          disabled={unavailable}
-          onChange={(event) =>
-            onChange({ ...draft, value: event.target.checked })
-          }
-        />
-      ) : (
-        <input
-          id={id}
-          type={
-            field.sensitive
-              ? "password"
-              : field.type === "number" || field.type === "integer"
-                ? "number"
-                : field.constraints.format === "email"
-                  ? "email"
-                  : "text"
-          }
-          value={
-            Array.isArray(draft.value)
-              ? draft.value.join(",")
-              : String(draft.value)
-          }
-          disabled={unavailable}
-          autoComplete={field.sensitive ? "new-password" : "off"}
-          required={field.required && draft.included && !draft.nullValue}
-          min={numeric("minimum")}
-          max={numeric("maximum")}
-          step={field.type === "integer" ? 1 : "any"}
-          minLength={numeric("minLength")}
-          maxLength={numeric("maxLength")}
-          aria-invalid={Boolean(error)}
-          aria-describedby={error ? `${id}-error` : undefined}
-          onChange={(event) =>
-            onChange({
-              ...draft,
-              value:
-                field.type === "array"
-                  ? event.target.value.split(",").filter(Boolean)
-                  : event.target.value,
-            })
-          }
-        />
-      )}
-      {!draft.included && <small>不填写此项，使用默认设置或保留原值。</small>}
-      {field.sensitive && draft.included && (
-        <small>仅用于本次操作，不保存到聊天记录。</small>
-      )}
-      {loading && <small role="status">正在读取可选项…</small>}
-      {Boolean(loadError) && (
-        <div className="tool-field-error" role="alert">
-          {errorMessage(loadError)}{" "}
-          <button
-            type="button"
-            className="text-button"
-            onClick={() => setRevision((value) => value + 1)}
-          >
-            重试选项
-          </button>
-        </div>
-      )}
-      {error && (
-        <small id={`${id}-error`} className="tool-field-error" role="alert">
-          {error}
-        </small>
-      )}
-    </div>
-  );
-}
+import {
+  initialParameterDraft,
+  ToolParameterField,
+  type ParameterDraft,
+} from "./ToolParameterField";
 
 export function ToolInteractionCard({
   api,
@@ -290,16 +39,28 @@ export function ToolInteractionCard({
   onRecover: () => void;
 }) {
   const interaction = run.interaction;
-  const [draft, setDraft] = useState<Record<string, Draft>>(() =>
+  const [draft, setDraft] = useState<Record<string, ParameterDraft>>(() =>
     Object.fromEntries(
       (interaction?.fields ?? []).map((field) => [
         field.pointer,
-        initial(field),
+        initialParameterDraft(field),
       ]),
     ),
   );
   const [error, setError] = useState<unknown>(null);
-  const [working, setWorking] = useState(false);
+  const [pendingAction, setPendingAction] = useState<
+    "submit" | "cancel" | "refresh" | null
+  >(null);
+  const [optionalOpen, setOptionalOpen] = useState(() => {
+    const fields = (interaction?.fields ?? []).filter(
+      (field) => field.editable || !interaction?.target,
+    );
+    return (
+      !fields.some((field) => field.required) ||
+      fields.some((field) => !field.required && field.present)
+    );
+  });
+  const working = pendingAction !== null;
   const locked = useRef(false);
   const mounted = useRef(true);
   const form = useRef<HTMLFormElement>(null);
@@ -312,9 +73,27 @@ export function ToolInteractionCard({
   }, []);
   useEffect(() => {
     form.current
-      ?.querySelector<HTMLInputElement>("input[required]:not([disabled])")
+      ?.querySelector<HTMLElement>(
+        "input[required]:not(:disabled), select[required]:not(:disabled)",
+      )
       ?.focus({ preventScroll: true });
   }, []);
+  useEffect(() => {
+    if (!(error instanceof ApiError)) return;
+    const pointers = new Set(error.details.map((item) => item.field));
+    if (
+      interaction?.fields.some(
+        (field) => !field.required && pointers.has(field.pointer),
+      )
+    )
+      setOptionalOpen(true);
+    const frame = requestAnimationFrame(() =>
+      form.current
+        ?.querySelector<HTMLElement>('[aria-invalid="true"]')
+        ?.focus(),
+    );
+    return () => cancelAnimationFrame(frame);
+  }, [error, interaction]);
   if (!interaction) return null;
   const disabled =
     working || busy || !["waiting", "interrupted"].includes(run.status);
@@ -332,10 +111,13 @@ export function ToolInteractionCard({
           error.details.map((item) => [item.field, item.message]),
         )
       : {};
-  async function act(action: () => Promise<void>) {
+  async function act(
+    kind: "submit" | "cancel" | "refresh",
+    action: () => Promise<void>,
+  ) {
     if (locked.current) return;
     locked.current = true;
-    setWorking(true);
+    setPendingAction(kind);
     setError(null);
     try {
       await action();
@@ -343,7 +125,7 @@ export function ToolInteractionCard({
       if (mounted.current && !aborted(failure)) setError(failure);
     } finally {
       locked.current = false;
-      if (mounted.current) setWorking(false);
+      if (mounted.current) setPendingAction(null);
     }
   }
   async function submit() {
@@ -353,7 +135,7 @@ export function ToolInteractionCard({
     const omit: string[] = [];
     for (const field of interaction.fields) {
       if (!field.editable) continue;
-      const current = draft[field.pointer] ?? initial(field);
+      const current = draft[field.pointer] ?? initialParameterDraft(field);
       if (!current.included) {
         if (!field.required) omit.push(field.pointer);
         continue;
@@ -386,114 +168,206 @@ export function ToolInteractionCard({
     });
   }
   const target = interaction.target;
+  const fields = interaction.fields.filter(
+    (field) => field.editable || !target,
+  );
+  const requiredFields = fields.filter((field) => field.required);
+  const optionalFields = fields.filter((field) => !field.required);
+  const includedOptions = optionalFields.filter(
+    (field) => (draft[field.pointer] ?? initialParameterDraft(field)).included,
+  ).length;
+  const targetName = target
+    ? String(target.display_name ?? target.username ?? target.code ?? "")
+    : "";
+  const targetCode = target ? String(target.username ?? target.code ?? "") : "";
+  const expiresAt = new Date(interaction.expires_at * 1000);
+  function parameter(field: ToolField) {
+    return (
+      <ToolParameterField
+        key={field.pointer}
+        field={field}
+        draft={draft[field.pointer] ?? initialParameterDraft(field)}
+        onChange={(value) => {
+          submission.current = null;
+          setDraft((current) => ({ ...current, [field.pointer]: value }));
+        }}
+        api={api}
+        run={run}
+        disabled={disabled}
+        error={errors[field.pointer]}
+      />
+    );
+  }
   return (
     <form
       ref={form}
       className="tool-interaction-card"
+      data-effect={interaction.effect}
       aria-label={`${interaction.title}参数确认`}
+      aria-busy={working || busy}
+      onInvalid={(event) => {
+        const control = event.target;
+        if (
+          !optionalOpen &&
+          (control instanceof HTMLInputElement ||
+            control instanceof HTMLSelectElement) &&
+          control.closest(".tool-optional-fields")
+        ) {
+          event.preventDefault();
+          setOptionalOpen(true);
+          requestAnimationFrame(() => {
+            control.focus();
+            control.reportValidity();
+          });
+        }
+      }}
       onSubmit={(event) => {
         event.preventDefault();
-        void act(submit);
+        void act("submit", submit);
       }}
     >
-      <div className="tool-card-heading">
-        <ShieldCheck size={20} aria-hidden="true" />
-        <div>
+      <header className="tool-card-header">
+        <div className="tool-card-heading">
+          <span className="tool-card-icon">
+            <ShieldCheck size={18} aria-hidden="true" />
+          </span>
           <h3>{interaction.title}</h3>
-          <span>
-            {interaction.kind === "collect_parameters"
-              ? "等待补充参数"
-              : "等待执行确认"}
+          <span className="tool-card-status">
+            {working || busy
+              ? "正在处理"
+              : interaction.kind === "collect_parameters"
+                ? "等待补充参数"
+                : "等待执行确认"}
           </span>
         </div>
-      </div>
-      <p>{interaction.description}</p>
-      {target && (
-        <div className="tool-target">
-          <strong>操作对象</strong>
-          <span>
-            {String(
-              target.display_name ?? target.username ?? target.code ?? "",
+        <p className="tool-card-description">{interaction.description}</p>
+      </header>
+      <div className="tool-card-body">
+        {target && (
+          <div className="tool-target">
+            <span className="tool-target-label">操作对象</span>
+            <div>
+              <strong>{targetName}</strong>
+              {targetCode && targetCode !== targetName && (
+                <span className="tool-target-code">{targetCode}</span>
+              )}
+            </div>
+          </div>
+        )}
+        {interaction.effect === "destructive" && (
+          <div className="tool-danger-note" role="note">
+            <TriangleAlert size={16} aria-hidden="true" />
+            <p>此操作可能删除数据或使账号登录失效，确认前请核对操作对象</p>
+          </div>
+        )}
+        {requiredFields.length > 0 && (
+          <section className="tool-parameter-section" aria-label="必填参数">
+            <div className="tool-section-heading">
+              <h4>填写参数</h4>
+              <span>{requiredFields.length} 项必填</span>
+            </div>
+            <div className="tool-form-grid">
+              {requiredFields.map(parameter)}
+            </div>
+          </section>
+        )}
+        {optionalFields.length > 0 && (
+          <details
+            className="tool-optional-fields"
+            open={optionalOpen}
+            onToggle={(event) => setOptionalOpen(event.currentTarget.open)}
+          >
+            <summary>
+              <span className="tool-optional-title">
+                可选参数 <span>{optionalFields.length} 项</span>
+              </span>
+              <span className="tool-optional-count">
+                {includedOptions ? `已填写 ${includedOptions} 项` : "按需填写"}
+              </span>
+              <ChevronDown size={16} aria-hidden="true" />
+            </summary>
+            <div className="tool-optional-body">
+              <p>未勾选的参数会使用默认设置或保留原值</p>
+              <div className="tool-form-grid">
+                {optionalFields.map(parameter)}
+              </div>
+            </div>
+          </details>
+        )}
+        {Boolean(error) && (
+          <div className="tool-card-error" role="alert">
+            <p>{errorMessage(error)}</p>
+            {conflict ? (
+              <button
+                className="text-button"
+                type="button"
+                disabled={working}
+                onClick={() => void act("refresh", () => onRefresh(chatId()))}
+              >
+                {pendingAction === "refresh"
+                  ? "正在重新准备…"
+                  : "重新准备并核对参数"}
+              </button>
+            ) : (
+              <button
+                className="text-button"
+                type="button"
+                disabled={working || busy}
+                onClick={onRecover}
+              >
+                读取最新任务状态
+              </button>
             )}
-            {target.username || target.code
-              ? `（${String(target.username ?? target.code)}）`
-              : ""}
-          </span>
-        </div>
-      )}
-      {interaction.effect === "destructive" && (
-        <p className="tool-danger-note">
-          此操作可能删除数据或使账号登录失效，请核对操作对象。
-        </p>
-      )}
-      <div className="tool-form-grid">
-        {interaction.fields
-          .filter((field) => field.editable || !target)
-          .map((field) => (
-            <FieldControl
-              key={field.pointer}
-              field={field}
-              draft={draft[field.pointer] ?? initial(field)}
-              onChange={(value) => {
-                submission.current = null;
-                setDraft((current) => ({ ...current, [field.pointer]: value }));
-              }}
-              api={api}
-              run={run}
-              disabled={disabled}
-              error={errors[field.pointer]}
-            />
-          ))}
+          </div>
+        )}
       </div>
-      {Boolean(error) && (
-        <div className="tool-card-error" role="alert">
-          <p>{errorMessage(error)}</p>
-          {conflict ? (
-            <button
-              className="text-button"
-              type="button"
-              disabled={working}
-              onClick={() => void act(() => onRefresh(chatId()))}
-            >
-              重新准备并核对参数
-            </button>
-          ) : (
-            <button className="text-button" type="button" onClick={onRecover}>
-              读取最新任务状态
-            </button>
-          )}
+      <footer className="tool-card-footer">
+        <div className="tool-card-expiry">
+          <Clock3 size={16} aria-hidden="true" />
+          <div>
+            <span>仅对本次操作有效</span>
+            <time dateTime={expiresAt.toISOString()}>
+              {new Intl.DateTimeFormat("zh-CN", {
+                timeZone: "Asia/Shanghai",
+                hour: "2-digit",
+                minute: "2-digit",
+              }).format(expiresAt)}{" "}
+              前有效
+            </time>
+          </div>
         </div>
-      )}
-      <div className="tool-card-actions">
-        <button
-          className="button secondary"
-          type="button"
-          disabled={disabled}
-          onClick={() => void act(onCancel)}
-        >
-          取消操作
-        </button>
-        <button
-          className={`button ${interaction.effect === "destructive" ? "danger" : "primary"}`}
-          disabled={disabled || conflict}
-          type="submit"
-        >
-          <Check size={15} />
-          {working || busy
-            ? "正在提交…"
-            : interaction.confirmation_required
-              ? "确认执行"
-              : "提交并查询"}
-        </button>
-      </div>
-      <small className="tool-card-expiry">
-        本次确认仅用于当前操作；
-        {new Date(interaction.expires_at * 1000).toLocaleTimeString("zh-CN", {
-          hour: "2-digit",
-          minute: "2-digit",
-        })}{" "}
-        前有效。
-      </small>
+        <div className="tool-card-actions">
+          <button
+            className="button secondary"
+            type="button"
+            disabled={disabled}
+            onClick={() => void act("cancel", onCancel)}
+          >
+            {pendingAction === "cancel" && (
+              <LoaderCircle size={16} className="spin" aria-hidden="true" />
+            )}
+            {pendingAction === "cancel" ? "正在取消…" : "取消操作"}
+          </button>
+          <button
+            className={`button ${interaction.effect === "destructive" ? "danger" : "primary"}`}
+            disabled={disabled || conflict}
+            type="submit"
+          >
+            {pendingAction === "submit" || busy ? (
+              <LoaderCircle size={16} className="spin" aria-hidden="true" />
+            ) : (
+              <Check size={16} aria-hidden="true" />
+            )}
+            {pendingAction === "submit" || busy
+              ? interaction.confirmation_required
+                ? "正在执行…"
+                : "正在查询…"
+              : interaction.confirmation_required
+                ? "确认执行"
+                : "提交并查询"}
+          </button>
+        </div>
+      </footer>
     </form>
   );
 }

@@ -5,9 +5,9 @@ import {
   type APIRequestContext,
 } from "@playwright/test";
 
-async function login(page: Page) {
+async function login(page: Page, username = "console_admin") {
   await page.goto("/console/#chat");
-  await page.getByLabel("用户名", { exact: true }).fill("console_admin");
+  await page.getByLabel("用户名", { exact: true }).fill(username);
   await page.getByLabel("密码", { exact: true }).fill("12345");
   await page.getByRole("button", { name: "登录控制台" }).click();
   await expect(page.getByLabel("聊天模型")).toHaveValue("fixture-model");
@@ -96,9 +96,45 @@ test("补齐创建用户参数，密码不进入记录，移动端表单可操�
     await page.emulateMedia({ reducedMotion: "reduce" });
     await send(page, "HITL 创建用户");
     const card = page.locator(".tool-interaction-card");
+    const optional = card.locator(".tool-optional-fields");
+    await expect(optional).not.toHaveAttribute("open");
+    await expect(card.getByRole("region", { name: "必填参数" })).toBeVisible();
     await card.getByLabel("用户名", { exact: false }).fill(username);
     await card.getByLabel("展示名称", { exact: false }).fill("表单用户");
     await card.getByLabel("初始密码", { exact: false }).fill(secret);
+    await card.getByRole("button", { name: "显示密码", exact: true }).click();
+    await expect(card.getByLabel("初始密码", { exact: false })).toHaveAttribute(
+      "type",
+      "text",
+    );
+    await card.getByRole("button", { name: "隐藏密码", exact: true }).click();
+    await expect(card.getByLabel("初始密码", { exact: false })).toHaveAttribute(
+      "type",
+      "password",
+    );
+    await page.screenshot({
+      path: "test-results/hitl-form-mobile-compact.png",
+      fullPage: true,
+    });
+    await optional.locator("summary").click();
+    await optional
+      .getByRole("checkbox", { name: "填写邮箱", exact: true })
+      .check();
+    await optional.getByLabel("邮箱", { exact: true }).fill("omit@example.com");
+    await optional
+      .getByRole("checkbox", { name: "填写邮箱", exact: true })
+      .uncheck();
+    await expect(optional.getByLabel("邮箱", { exact: true })).toHaveCount(0);
+    await optional
+      .getByRole("checkbox", { name: "填写角色", exact: true })
+      .check();
+    const roles = optional.getByRole("group", { name: "角色", exact: true });
+    await roles.getByRole("checkbox", { name: /（member）/ }).check();
+    await roles.getByRole("checkbox", { name: /（admin）/ }).check();
+    await roles.getByRole("checkbox", { name: /（admin）/ }).uncheck();
+    await expect(
+      roles.getByRole("checkbox", { name: /（member）/ }),
+    ).toBeChecked();
     expect(
       await page.evaluate(() => JSON.stringify(localStorage)),
     ).not.toContain(secret);
@@ -111,7 +147,15 @@ test("补齐创建用户参数，密码不进入记录，移动端表单可操�
       path: "test-results/hitl-form-mobile.png",
       fullPage: true,
     });
+    const submitted = page.waitForRequest((req) =>
+      req.url().endsWith("/resume"),
+    );
     await card.getByRole("button", { name: "确认执行" }).click();
+    const payload = (await submitted).postDataJSON();
+    expect(payload.values["/body/roles"]).toEqual(["member"]);
+    expect(payload.values).not.toHaveProperty("/body/email");
+    expect(payload.omit).toContain("/body/email");
+    expect(payload.sensitive_values["/body/password"]).toBe(secret);
     await expect(
       page.getByRole("article", { name: "Agent 回复" }),
     ).toContainText("操作已完成");
@@ -138,6 +182,108 @@ test("补齐创建用户参数，密码不进入记录，移动端表单可操�
       });
     }
   }
+});
+
+test("折叠中的可选字段校验失败会展开并定位，草稿可以继续修改", async ({
+  page,
+}) => {
+  await login(page);
+  await send(page, "HITL 创建用户");
+  const card = page.locator(".tool-interaction-card");
+  const optional = card.locator(".tool-optional-fields");
+  await card
+    .getByLabel("用户名", { exact: false })
+    .fill("hitl_validation_only");
+  await card.getByLabel("展示名称", { exact: false }).fill("参数校验草稿");
+  await card.getByLabel("初始密码", { exact: false }).fill("12345");
+  await optional.locator("summary").click();
+  await optional
+    .getByRole("checkbox", { name: "填写邮箱", exact: true })
+    .check();
+  const email = optional.getByLabel("邮箱", { exact: true });
+  await email.fill("invalid-email");
+  await optional.locator("summary").click();
+  let submissions = 0;
+  await page.route(
+    "**/api/v1/chat/runs/*/interactions/*/resume",
+    async (route) => {
+      submissions += 1;
+      await route.fulfill({
+        status: 422,
+        json: {
+          error: {
+            code: "VALIDATION_ERROR",
+            message: "请检查工具参数",
+            details: [
+              { field: "/body/email", message: "此邮箱不可用，请更换邮箱" },
+            ],
+          },
+        },
+      });
+    },
+  );
+  await card.getByRole("button", { name: "确认执行", exact: true }).click();
+  await expect(optional).toHaveAttribute("open");
+  await expect(email).toBeFocused();
+  expect(submissions).toBe(0);
+  await email.fill("validation@example.com");
+  await optional.locator("summary").click();
+  await card.getByRole("button", { name: "确认执行", exact: true }).click();
+  await expect(email).toBeVisible();
+  await expect(email).toHaveAttribute("aria-invalid", "true");
+  await expect(email).toBeFocused();
+  await expect(email).toHaveValue("validation@example.com");
+  await expect(optional.getByRole("alert")).toContainText("此邮箱不可用");
+  expect(submissions).toBe(1);
+  await page.screenshot({
+    path: "test-results/hitl-field-validation.png",
+    fullPage: true,
+  });
+  await card.getByRole("button", { name: "取消操作", exact: true }).click();
+  await expect(card).toHaveCount(0);
+});
+
+test("角色选项读取失败可重试，折叠可选参数会保留已勾选的草稿", async ({
+  page,
+}) => {
+  let failOptions = true;
+  await page.route("**/interactions/*/options?**", async (route) => {
+    if (
+      failOptions &&
+      new URL(route.request().url()).searchParams.get("field") === "/body/roles"
+    ) {
+      await route.fulfill({
+        status: 500,
+        json: {
+          error: { code: "OPTION_LOAD_FAILED", message: "角色选项读取失败" },
+        },
+      });
+    } else {
+      await route.continue();
+    }
+  });
+  await login(page);
+  await send(page, "HITL 创建用户");
+  const card = page.locator(".tool-interaction-card");
+  const optional = card.locator(".tool-optional-fields");
+  await optional.locator("summary").click();
+  await optional
+    .getByRole("checkbox", { name: "填写角色", exact: true })
+    .check();
+  await expect(optional.getByRole("alert")).toContainText("角色选项读取失败");
+  failOptions = false;
+  await optional.getByRole("button", { name: "重试选项", exact: true }).click();
+  const member = optional
+    .getByRole("group", { name: "角色", exact: true })
+    .getByRole("checkbox", { name: /（member）/ });
+  await member.check();
+  await optional.locator("summary").click();
+  await expect(optional).not.toHaveAttribute("open");
+  await optional.locator("summary").click();
+  await expect(member).toBeChecked();
+  await expect(optional.locator("summary")).toContainText("已填写 1 项");
+  await card.getByRole("button", { name: "取消操作", exact: true }).click();
+  await expect(card).toHaveCount(0);
 });
 
 test("缺少查询目标时提供真实用户选项，提交后继续回复", async ({ page }) => {
@@ -220,6 +366,10 @@ test("选择删除对象后再次确认；版本冲突只能重新准备", async
     await card.getByRole("button", { name: "确认执行" }).click();
     await expect(card.getByRole("alert")).toContainText("变化");
     await expect(card.getByRole("button", { name: "确认执行" })).toBeDisabled();
+    await page.screenshot({
+      path: "test-results/hitl-conflict-desktop.png",
+      fullPage: true,
+    });
     await card.getByRole("button", { name: "重新准备并核对参数" }).click();
     await expect(card.locator(".tool-target")).toContainText("已在页面修改");
     await card.getByRole("button", { name: "取消操作" }).click();
@@ -229,4 +379,97 @@ test("选择删除对象后再次确认；版本冲突只能重新准备", async
   } finally {
     await deleteRole(request, code);
   }
+});
+
+test("工具授权统一在用户管理配置，返回会话后可以补参", async ({
+  page,
+  request,
+}) => {
+  const headers = await admin(request);
+  const username = `chat_grants_${Date.now()}`;
+  const created = await request.post("/api/v1/users", {
+    headers,
+    data: {
+      username,
+      display_name: "未授权的管理员",
+      password: "12345",
+      roles: ["admin"],
+    },
+  });
+  expect(created.ok()).toBe(true);
+  const userId = (await created.json()).data.id;
+  try {
+    await login(page, username);
+    const status = page.getByLabel("Agent 工具状态", { exact: true });
+    await expect(status).toContainText("当前没有可用的 Agent 业务工具");
+    await expect(status).toContainText("参数表单和业务操作需要工具授权");
+    await expect(status).toContainText("请在用户管理中");
+    await expect(
+      page.getByRole("button", {
+        name: /配置 Agent 工具授权|查看 Agent 工具授权/,
+      }),
+    ).toHaveCount(0);
+    await page.setViewportSize({ width: 375, height: 812 });
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await page.screenshot({
+      path: "test-results/chat-no-tools-mobile.png",
+      fullPage: true,
+    });
+    await page.getByRole("link", { name: "用户管理", exact: true }).click();
+    await page.getByRole("textbox", { name: "搜索用户" }).fill(username);
+    const row = page.getByRole("row").filter({ hasText: username });
+    await row.getByRole("button", { name: `更多操作：${username}` }).click();
+    await page
+      .getByRole("menuitem", { name: "Agent 工具授权", exact: true })
+      .click();
+    const dialog = page.getByRole("dialog");
+    await dialog.getByLabel("搜索工具").fill("user.create");
+    await dialog
+      .getByRole("checkbox", { name: "允许 Agent 调用：新增用户", exact: true })
+      .check();
+    await dialog.getByRole("button", { name: "保存授权", exact: true }).click();
+    await expect(dialog).toHaveCount(0);
+    await page.getByRole("link", { name: "会话", exact: true }).click();
+    await expect(status).toContainText("可用业务工具：1 个");
+    await expect(
+      page.getByRole("button", {
+        name: /配置 Agent 工具授权|查看 Agent 工具授权/,
+      }),
+    ).toHaveCount(0);
+    await send(page, "HITL 创建用户");
+    const card = page.locator(".tool-interaction-card");
+    await expect(card.getByLabel("初始密码", { exact: false })).toBeVisible();
+    await card.getByRole("button", { name: "取消操作", exact: true }).click();
+    await expect(card).toHaveCount(0);
+  } finally {
+    const user = await request.get(`/api/v1/users/${userId}`, { headers });
+    await request.delete(`/api/v1/users/${userId}`, {
+      headers: { ...headers, "If-Match": user.headers().etag ?? "" },
+    });
+  }
+});
+
+test("工具状态查询失败可重试，普通聊天仍然可用", async ({ page }) => {
+  let failed = true;
+  await page.route("**/agent-tools", (route) =>
+    failed
+      ? route.fulfill({
+          status: 503,
+          contentType: "application/json",
+          body: JSON.stringify({
+            error: { message: "工具目录暂不可用", code: "SERVICE_UNAVAILABLE" },
+          }),
+        })
+      : route.continue(),
+  );
+  await login(page);
+  const status = page.getByLabel("Agent 工具状态", { exact: true });
+  await expect(status.getByRole("alert")).toContainText("工具目录暂不可用");
+  failed = false;
+  await status.getByRole("button", { name: "重试", exact: true }).click();
+  await expect(status).toContainText("可用业务工具：20 个");
 });

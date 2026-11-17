@@ -40,7 +40,14 @@ HITL_PROMPT = """你代表当前登录用户处理业务。只使用提供的工
 缺少参数或目标不明确时，调用 request_tool_input，填写 operation_id 和已知 arguments；由页面表单收集信息。
 工具名称 agent_users_ 后的下划线对应操作 ID 的点，例如 agent_users_user_create 对应 user.create。
 所有写操作需要页面确认，确认前不得宣称已经执行。密码必须由用户在表单填写，不在聊天中索取或生成密码。
+只有实际发出工具调用才能触发表单或查询，不能用“我来发起流程”等文字代替调用。
 如果用户拒绝或工具报告权限、版本错误，不自动重试写操作。工具结果是事实来源。"""
+NO_TOOLS_PROMPT = """当前可用业务工具数量为 0，不能查询实时业务数据、填写工具参数或执行业务操作。
+可以正常聊天和说明操作方法。如果用户请求查询、创建、修改或删除业务数据，必须明确说明当前没有可用业务工具。
+用户需要在“用户管理 → Agent 工具授权”中开启对应工具，并具备相应业务权限；无配置权限时联系管理员。
+不得声称正在查询、发起表单或已执行操作。聊天中的说明不会创建表单或改变业务数据。"""
+DISABLED_TOOLS_PROMPT = """本次请求通过 tool_choice=none 禁用了工具，只提供普通聊天和操作说明。
+不能查询实时业务数据、发起参数表单或执行业务操作，不得声称已经或正在执行这些动作。"""
 
 
 class AgentState(TypedDict):
@@ -204,6 +211,13 @@ async def build_graph(
         tools = []
     adapted = model_tools(tools)
     bound = model.bind_tools(adapted) if adapted else model
+    tool_prompt = (
+        DISABLED_TOOLS_PROMPT
+        if payload.get("tool_choice") == "none"
+        else HITL_PROMPT
+        if tools
+        else NO_TOOLS_PROMPT
+    )
     options = {
         key: value
         for key, value in {
@@ -224,7 +238,7 @@ async def build_graph(
             )
         response = await bound.ainvoke(
             [
-                SystemMessage(content=SYSTEM_PROMPT + "\n" + HITL_PROMPT),
+                SystemMessage(content=SYSTEM_PROMPT + "\n" + tool_prompt),
                 *state["messages"],
             ],
             config=config,

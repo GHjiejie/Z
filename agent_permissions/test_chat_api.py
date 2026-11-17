@@ -31,6 +31,7 @@ class BusinessModel(BaseChatModel):
     model_name: str = "fixture-model"
     mode: str = "profile"
     tool_names: list[list[str]] = Field(default_factory=list)
+    system_prompts: list[str] = Field(default_factory=list)
     on_first_call: Callable | None = None
     failure: Exception | None = None
     options: list[dict] = Field(default_factory=list)
@@ -44,6 +45,7 @@ class BusinessModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.tool_names.append(kwargs.get("bound_names", []))
+        self.system_prompts.append(str(messages[0].content))
         self.options.append(kwargs)
         if self.failure:
             raise self.failure
@@ -341,6 +343,18 @@ class OpenAIChatTests(unittest.TestCase):
             "你好",
         )
         self.assertTrue(all(not names for names in self.model.tool_names))
+        self.assertTrue(
+            all(
+                "当前可用业务工具数量为 0" in prompt
+                for prompt in self.model.system_prompts
+            )
+        )
+        self.assertTrue(
+            all(
+                "调用 request_tool_input" not in prompt
+                for prompt in self.model.system_prompts
+            )
+        )
 
     def test_delegation_revocation_during_agent_run_blocks_cached_tool(self):
         headers = {"Authorization": "Bearer " + self.token}
@@ -405,6 +419,8 @@ class OpenAIChatTests(unittest.TestCase):
         )
         self.assertEqual(result.choices[0].message.content, "hello world")
         self.assertEqual(self.model.tool_names, [[]])
+        self.assertIn("tool_choice=none 禁用了工具", self.model.system_prompts[0])
+        self.assertNotIn("调用 request_tool_input", self.model.system_prompts[0])
 
     def test_model_error_and_stream_error_are_redacted_for_sdk(self) -> None:
         secret = "private-provider-credential-and-input"

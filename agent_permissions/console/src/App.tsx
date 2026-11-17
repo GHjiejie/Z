@@ -113,8 +113,45 @@ export function App() {
         : page === "roles"
           ? "角色与权限"
           : "个人设置";
+  const accountControls = (
+    <div className="topbar-account">
+      <button
+        className="account-button"
+        onClick={() => navigate("profile")}
+        aria-label="打开个人设置"
+      >
+        <Avatar user={user} />
+        <div>
+          <strong>{user.display_name}</strong>
+          <small>
+            {user.roles
+              .map(
+                (code) =>
+                  session.roles.find((value) => value.code === code)
+                    ?.display_name || roleLabel(code),
+              )
+              .join("、")}
+          </small>
+        </div>
+      </button>
+      <span className="topbar-separator" />
+      <button
+        className="icon-button"
+        aria-label="退出登录"
+        title="退出登录"
+        disabled={loggingOut}
+        onClick={() => {
+          void logout();
+        }}
+      >
+        <LogOut size={16} />
+      </button>
+    </div>
+  );
   return (
-    <div className="console-shell">
+    <div
+      className={`console-shell${page === "chat" ? " console-shell-chat" : ""}`}
+    >
       <aside className="sidebar">
         <Brand />
         <div className="sidebar-section-label">工作台</div>
@@ -173,48 +210,21 @@ export function App() {
             </a>
           )}
         </div>
+        {page === "chat" && (
+          <div className="chat-sidebar-account">{accountControls}</div>
+        )}
       </aside>
       <div className="workspace">
-        <header className="topbar">
-          <div className="breadcrumb">
-            <span>Console</span>
-            <ChevronRight size={16} />
-            <strong>{title}</strong>
-          </div>
-          <div className="topbar-account">
-            <button
-              className="account-button"
-              onClick={() => navigate("profile")}
-              aria-label="打开个人设置"
-            >
-              <Avatar user={user} />
-              <div>
-                <strong>{user.display_name}</strong>
-                <small>
-                  {user.roles
-                    .map(
-                      (code) =>
-                        session.roles.find((value) => value.code === code)
-                          ?.display_name || roleLabel(code),
-                    )
-                    .join("、")}
-                </small>
-              </div>
-            </button>
-            <span className="topbar-separator" />
-            <button
-              className="icon-button"
-              aria-label="退出登录"
-              title="退出登录"
-              disabled={loggingOut}
-              onClick={() => {
-                void logout();
-              }}
-            >
-              <LogOut size={16} />
-            </button>
-          </div>
-        </header>
+        {page !== "chat" && (
+          <header className="topbar">
+            <div className="breadcrumb">
+              <span>Console</span>
+              <ChevronRight size={16} />
+              <strong>{title}</strong>
+            </div>
+            {accountControls}
+          </header>
+        )}
         <main className="page-content">
           {Boolean(logoutError) && <ErrorBanner error={logoutError} />}
           {Boolean(session.error) && (
@@ -235,6 +245,7 @@ export function App() {
               key={user.id}
               api={session.api}
               user={user}
+              permissions={session.permissions}
               notify={notify}
               onSettled={session.refresh}
             />

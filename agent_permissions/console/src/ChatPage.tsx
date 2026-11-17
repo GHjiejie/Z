@@ -6,6 +6,7 @@ import {
   Copy,
   History,
   MessageSquare,
+  PanelLeftClose,
   Plus,
   RefreshCw,
   Square,
@@ -16,6 +17,7 @@ import { aborted, type ApiClient, type User } from "./api";
 import { ErrorBanner, Modal, Spinner } from "./components";
 import { ChatMarkdown } from "./ChatMarkdown";
 import { ToolInteractionCard } from "./ToolInteractionCard";
+import { ChatToolStatus } from "./ChatToolStatus";
 import { useChat } from "./useChat";
 
 function timeLabel(value: string) {
@@ -28,14 +30,22 @@ function timeLabel(value: string) {
   }).format(new Date(value));
 }
 
+function resizeComposer(element: HTMLTextAreaElement | null) {
+  if (!element) return;
+  element.style.height = "auto";
+  element.style.height = `${Math.max(44, Math.min(element.scrollHeight, 144))}px`;
+}
+
 export function ChatPage({
   api,
   user,
+  permissions,
   notify,
   onSettled,
 }: {
   api: ApiClient;
   user: User;
+  permissions: string[];
   notify: (text: string) => void;
   onSettled: () => void;
 }) {
@@ -51,10 +61,13 @@ export function ChatPage({
   const [runReference, setRunReference] = useState("");
   const [opening, setOpening] = useState(false);
   const [openError, setOpenError] = useState<unknown>(null);
-  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(
+    () => window.matchMedia("(min-width: 1101px)").matches,
+  );
   const [showLatest, setShowLatest] = useState(false);
   const scroll = useRef<HTMLDivElement>(null);
   const composer = useRef<HTMLTextAreaElement>(null);
+  const historyToggle = useRef<HTMLButtonElement>(null);
   const following = useRef(true);
   const composing = useRef(false);
   const lastConversation = useRef(active?.id);
@@ -77,6 +90,23 @@ export function ChatPage({
     !chat.recovering &&
     !chat.recoveryError,
   );
+
+  useEffect(() => {
+    const query = window.matchMedia("(min-width: 1101px)");
+    const changed = (event: MediaQueryListEvent) =>
+      setHistoryOpen(event.matches);
+    query.addEventListener("change", changed);
+    const resize = () => resizeComposer(composer.current);
+    window.addEventListener("resize", resize);
+    return () => {
+      query.removeEventListener("change", changed);
+      window.removeEventListener("resize", resize);
+    };
+  }, []);
+
+  useLayoutEffect(() => {
+    resizeComposer(composer.current);
+  }, [active?.id, active?.draft, interactionId, historyOpen]);
 
   useEffect(() => {
     const controller = new AbortController();
@@ -132,10 +162,13 @@ export function ChatPage({
   }
   function create() {
     chat.create();
-    setHistoryOpen(false);
+    closeHistoryOnNarrow();
     requestAnimationFrame(() =>
       composer.current?.focus({ preventScroll: true }),
     );
+  }
+  function closeHistoryOnNarrow() {
+    if (window.matchMedia("(max-width: 1100px)").matches) setHistoryOpen(false);
   }
   function send() {
     if (!canSend || composing.current) return;
@@ -172,30 +205,26 @@ export function ChatPage({
                 : "可以开始新会话";
 
   return (
-    <section className="chat-page" aria-label="Agent 会话">
-      <div className="page-heading">
-        <div>
-          <h1>会话</h1>
-          <p>与 Agent 对话，按当前账号的权限查询和处理业务</p>
-        </div>
-        <button
-          className="button secondary chat-mobile-history"
-          onClick={() => setHistoryOpen((value) => !value)}
-          aria-expanded={historyOpen}
-          aria-controls="chat-history"
-        >
-          <History size={16} />
-          会话记录
-        </button>
-      </div>
+    <section
+      className="chat-page"
+      aria-label="Agent 会话"
+      onKeyDown={(event) => {
+        if (event.key === "Escape" && historyOpen) {
+          setHistoryOpen(false);
+          historyToggle.current?.focus();
+        }
+      }}
+    >
+      <h1 className="sr-only">会话</h1>
       {chat.storageError && (
         <div className="info-note" role="status">
           {chat.storageError}
         </div>
       )}
-      <div className="chat-layout">
+      <div className={`chat-layout${historyOpen ? " has-history" : ""}`}>
         <aside
-          className={`chat-history panel${historyOpen ? " is-open" : ""}`}
+          className="chat-history panel"
+          hidden={!historyOpen}
           id="chat-history"
           aria-label="会话记录"
         >
@@ -203,11 +232,14 @@ export function ChatPage({
             <h2>会话记录</h2>
             <button
               className="icon-button"
-              aria-label="新建会话"
-              title="新建会话"
-              onClick={create}
+              aria-label="收起会话记录"
+              title="收起会话记录"
+              onClick={() => {
+                setHistoryOpen(false);
+                historyToggle.current?.focus();
+              }}
             >
-              <Plus size={18} />
+              <PanelLeftClose size={18} />
             </button>
           </div>
           <button className="button secondary chat-new" onClick={create}>
@@ -226,7 +258,7 @@ export function ChatPage({
                     className="conversation-select"
                     onClick={() => {
                       chat.select(item.id);
-                      setHistoryOpen(false);
+                      closeHistoryOnNarrow();
                     }}
                     aria-current={item.id === active.id ? "page" : undefined}
                   >
@@ -262,7 +294,7 @@ export function ChatPage({
                   .importRun(runReference)
                   .then(() => {
                     setRunReference("");
-                    setHistoryOpen(false);
+                    closeHistoryOnNarrow();
                   })
                   .catch((error: unknown) => setOpenError(error))
                   .finally(() => setOpening(false));
@@ -292,12 +324,25 @@ export function ChatPage({
             不同账号的会话相互隔离
           </p>
         </aside>
-        <div className="chat-thread panel">
+        <div className="chat-thread panel" onPointerDown={closeHistoryOnNarrow}>
           <header className="chat-thread-heading">
-            <div>
+            <div className="chat-thread-title">
+              <button
+                ref={historyToggle}
+                className="icon-button chat-history-toggle"
+                aria-label="会话记录"
+                title={historyOpen ? "收起会话记录" : "展开会话记录"}
+                onPointerDown={(event) => event.stopPropagation()}
+                onClick={() => setHistoryOpen((value) => !value)}
+                aria-expanded={historyOpen}
+                aria-controls="chat-history"
+              >
+                <History size={16} />
+              </button>
               <Bot size={18} />
               <h2>{active.title}</h2>
             </div>
+            <ChatToolStatus api={api} user={user} permissions={permissions} />
             <div className="chat-model-control">
               {modelLoading ? (
                 <Spinner label="加载模型" />
@@ -597,7 +642,7 @@ export function ChatPage({
               id="chat-message-input"
               ref={composer}
               value={active.draft}
-              rows={3}
+              rows={1}
               maxLength={16000}
               placeholder="输入消息，例如：查看我当前的账号信息"
               onChange={(event) => chat.setDraft(event.target.value)}
@@ -643,9 +688,6 @@ export function ChatPage({
                 </button>
               )}
             </div>
-            <p className="chat-scope-note">
-              Agent 仅能执行当前账号有权进行的操作
-            </p>
           </form>
         </div>
       </div>

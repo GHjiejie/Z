@@ -24,6 +24,7 @@ class AgentToolClient:
         response = await self._client.get(
             "/agent-tools", headers=self._headers(), follow_redirects=False
         )
+        print(f"Agent tool discovery: {response.status_code} {response.text}")
         response.raise_for_status()
         self._catalog = response.json()
         return self._catalog
