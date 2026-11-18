@@ -11,6 +11,7 @@ from typing import Any
 import psycopg
 from psycopg_pool import ConnectionPool, PoolClosed
 
+from agent_permissions.audit_schema import SOURCE_SCHEMA
 from agent_permissions.config import Settings
 from agent_permissions.database import (
     AGENT_GRANTS_SCHEMA,
@@ -317,11 +318,17 @@ class PostgresDatabase:
             version = connection.execute(
                 "SELECT version FROM schema_metadata WHERE key='schema_version'"
             ).fetchone()
-            if version is not None and version[0] not in (2, 3, 4, 5):
+            if version is not None and version[0] not in (2, 3, 4, 5, 6):
                 raise RuntimeError("Unsupported user database schema version")
             # BIGINT and DOUBLE PRECISION retain SQLite's integer/float range.
             schema = (
-                (SCHEMA + RBAC_SCHEMA + AGENT_GRANTS_SCHEMA + HITL_SCHEMA)
+                (
+                    SCHEMA
+                    + RBAC_SCHEMA
+                    + AGENT_GRANTS_SCHEMA
+                    + HITL_SCHEMA
+                    + SOURCE_SCHEMA
+                )
                 .replace(" INTEGER", " BIGINT")
                 .replace(" REAL", " DOUBLE PRECISION")
             )
@@ -339,5 +346,5 @@ class PostgresDatabase:
             if seed:
                 Database._seed_catalog(connection)
             connection.execute(
-                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',5) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
+                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',6) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
             )

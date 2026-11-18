@@ -271,7 +271,7 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                 target.execute(
                     "SELECT version FROM schema_metadata WHERE key='schema_version'"
                 ).fetchone()[0],
-                5,
+                6,
             )
             self.assertEqual(
                 target.execute("SELECT count(*) FROM users").fetchone()[0], 2

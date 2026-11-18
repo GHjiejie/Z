@@ -21,6 +21,8 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
+from agent_permissions.audit_delivery import AuditDelivery
+from agent_permissions.audit_service import mount_audit_api
 from agent_permissions.config import Settings
 from agent_permissions.console_ui import mount_console
 from agent_permissions.database import create_database
@@ -539,8 +541,10 @@ def create_app(
             activate_tools(app, manifest_path=tools_manifest)
             await run_in_threadpool(database.open)
             await run_in_threadpool(database.initialize)
+            await app.state.audit.start()
             yield
         finally:
+            await app.state.audit.close()
             from agent_permissions.chat_api import close_chat_model
 
             try:
@@ -557,6 +561,7 @@ def create_app(
         description="用户、会话与系统角色管理；接口契约见用户管理服务文档。",
         lifespan=lifespan,
     )
+    app.state.audit = AuditDelivery(database, settings)
     app.state.database = database
     app.state.service = service
     app.state.settings = settings
@@ -645,6 +650,7 @@ def create_app(
         )
 
     app.include_router(router)
+    mount_audit_api(app)
     mount_console(app, console_directory)
     from agent_permissions.tooling import mount_agent_tools
 

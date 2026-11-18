@@ -168,6 +168,13 @@ class UserService:
             ),
         )
 
+    def authorize_audit(self, authority, info):
+        with self.database.transaction(write=True) as conn:
+            user = self._authorize(conn, authority, info, None)
+            if "agent.audit.read" not in permissions_for(conn, user["id"]):
+                raise ApiError(403, "PERMISSION_DENIED", "没有查看审计记录的权限")
+            self._audit(conn, info, "agent.audit.read", None)
+
     def record_failure(
         self,
         info: RequestInfo,

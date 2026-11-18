@@ -1005,6 +1005,9 @@ class UserApiTests(unittest.TestCase):
             operations,
             expected
             | {
+                ("GET", "/api/v1/audit/agent-operations"),
+                ("GET", "/api/v1/audit/agent-operations/{call_id}"),
+                ("GET", "/api/v1/audit/agent-grant-changes"),
                 ("GET", "/agent-tools"),
                 ("POST", "/agent-tools/call"),
                 ("GET", "/v1/models"),

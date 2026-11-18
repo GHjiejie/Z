@@ -14,6 +14,7 @@ UV ?= uv
 NPM ?= npm
 HOST ?= 127.0.0.1
 PORT ?= 8000
+AUDIT_PORT ?= 8011
 UI_PORT ?= 5173
 ADMIN_USERNAME ?= admin
 ADMIN_DISPLAY_NAME ?= 管理员
@@ -26,13 +27,13 @@ PASSWORD_ARGS = $(if $(filter 1,$(PROMPT_PASSWORD)),--prompt-password,)
 
 PYTHON_TESTS := api_tools.test_tools agent_permissions.test_tools \
 	agent_permissions.test_chat_model agent_permissions.test_chat_api agent_permissions.test_tracing agent_permissions.test_hitl agent_permissions.test_agui \
-	agent_permissions.test_tool_discovery \
+	agent_permissions.test_tool_discovery agent_permissions.test_audit \
 	agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_agent_grants agent_permissions.test_console \
 	agent_permissions.test_connection_pool.PoolConfigurationTests \
 	agent_permissions.test_connection_pool.DatabaseLifecycleTests
 
 .PHONY: help setup python-deps ui-deps model-env init-admin build ui-build tools \
-	run start serve dev ui-dev check-env db-config db-up db-down db-status \
+	run start serve audit-serve dev ui-dev check-env db-config db-up db-down db-status \
 	check check-python check-ui test test-python test-ui
 
 help:
@@ -48,6 +49,7 @@ help:
 		'  dev           启动可自动重载的后端' \
 		'  ui-dev        启动 Vite；其 API 代理连接本机 8000 端口' \
 		'  build         构建 Console，再生成 API 工具包' \
+		'  audit-serve   启动独立 Agent 操作审计服务' \
 		'  tools         生成并核对 API 工具包' \
 		'  db-status     查看 Docker PostgreSQL 状态' \
 		'  db-down       停止 Docker PostgreSQL，保留数据库卷' \
@@ -109,6 +111,10 @@ serve: check-env
 		'Chat:    http://$(HOST):$(PORT)/console/#chat'
 	cd "$(REPO_ROOT)" && exec $(UV) run uvicorn agent_permissions.main:app \
 		--host "$(HOST)" --port "$(PORT)" --no-proxy-headers $(ENV_ARGS)
+
+audit-serve: check-env
+	cd "$(REPO_ROOT)" && exec $(UV) run uvicorn agent_permissions.audit_service:create_audit_app --factory \
+		--host "$(HOST)" --port "$(AUDIT_PORT)" --no-proxy-headers $(ENV_ARGS)
 
 dev: check-env
 	cd "$(REPO_ROOT)" && exec $(UV) run uvicorn agent_permissions.main:app \

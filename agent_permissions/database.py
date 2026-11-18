@@ -8,6 +8,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from threading import RLock
 
+from agent_permissions.audit_schema import SOURCE_SCHEMA
 from agent_permissions.config import Settings
 from agent_permissions.hitl_schema import HITL_SCHEMA
 from agent_permissions.permissions import (
@@ -130,7 +131,7 @@ class Database:
             connection.execute("BEGIN IMMEDIATE")
             try:
                 version = connection.execute("PRAGMA user_version").fetchone()[0]
-                if version not in (0, 1, 2, 3, 4, 5):
+                if version not in (0, 1, 2, 3, 4, 5, 6):
                     raise RuntimeError("Unsupported user database schema version")
                 if version == 0:
                     self._execute_schema(connection, SCHEMA)
@@ -156,7 +157,8 @@ class Database:
                     )
                 self._execute_schema(connection, AGENT_GRANTS_SCHEMA)
                 self._execute_schema(connection, HITL_SCHEMA)
-                connection.execute("PRAGMA user_version=5")
+                self._execute_schema(connection, SOURCE_SCHEMA)
+                connection.execute("PRAGMA user_version=6")
                 connection.commit()
             except BaseException:
                 connection.rollback()

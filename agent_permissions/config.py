@@ -36,7 +36,19 @@ class Settings:
     hitl_receipt_seconds: int = 2592000
     hitl_digest_key: str | None = field(default=None, repr=False)
 
+    audit_database_path: Path | None = None
+    audit_database_url: str | None = field(default=None, repr=False)
+    audit_service_url: str | None = None
+    audit_write_token: str | None = field(default=None, repr=False)
+    audit_read_token: str | None = field(default=None, repr=False)
+    audit_store_mode: str = "automatic"
+    audit_producer_id: str = "agent_permissions"
+    audit_retention_days: int = 90
+    audit_outbox_days: int = 7
+
     def __post_init__(self) -> None:
+        if self.audit_store_mode not in {"automatic", "managed"}:
+            raise ValueError("审计存储模式必须为 automatic 或 managed")
         if self.database_url is not None and not self.database_url.startswith(
             ("postgresql://", "postgres://")
         ):
@@ -72,9 +84,18 @@ class Settings:
             raw = os.getenv(key, file_values.get(key))
             if raw is None:
                 values[name] = getattr(defaults, name)
-            elif name == "database_path":
+            elif name in {"database_path", "audit_database_path"}:
                 values[name] = Path(raw).expanduser().resolve()
-            elif name in {"database_url", "hitl_digest_key"}:
+            elif name in {
+                "database_url",
+                "hitl_digest_key",
+                "audit_database_url",
+                "audit_service_url",
+                "audit_write_token",
+                "audit_read_token",
+                "audit_producer_id",
+                "audit_store_mode",
+            }:
                 values[name] = raw
             elif isinstance(getattr(defaults, name), float):
                 values[name] = float(raw)

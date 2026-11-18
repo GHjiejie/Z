@@ -13,6 +13,7 @@ from uuid import uuid4
 
 import psycopg
 
+from agent_permissions.audit_schema import SOURCE_COLUMNS
 from agent_permissions.config import Settings
 from agent_permissions.database import Database
 from agent_permissions.postgres import PostgresDatabase
@@ -147,6 +148,7 @@ TABLE_COLUMNS = {
     ),
     "rate_limits": ("bucket_key", "attempts", "expires_at"),
     **HITL_COLUMNS,
+    **SOURCE_COLUMNS,
 }
 
 
@@ -185,11 +187,12 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
         source.row_factory = sqlite3.Row
         source.execute("BEGIN")
         version = source.execute("PRAGMA user_version").fetchone()[0]
-        if version not in (2, 3, 4, 5):
-            raise ValueError(
-                "源数据库必须先升级为 schema 2、3、4 或 5，原文件与备份均已保留"
-            )
+        if version not in (2, 3, 4, 5, 6):
+            raise ValueError("源数据库必须先升级为 schema 2 至 6，原文件与备份均已保留")
         source_columns = dict(TABLE_COLUMNS)
+        if version < 6:
+            for table in SOURCE_COLUMNS:
+                del source_columns[table]
         if version < 4:
             for table in HITL_COLUMNS:
                 del source_columns[table]
@@ -243,7 +246,7 @@ def migrate(source_path: Path, target: PostgresDatabase) -> dict:
             # Preserve the imported records, then add permissions introduced by this release.
             Database._seed_catalog(destination)
             report["source_schema"] = version
-            report["target_schema"] = 5
+            report["target_schema"] = 6
         return report
 
 
