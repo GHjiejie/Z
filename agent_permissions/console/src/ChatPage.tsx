@@ -15,10 +15,9 @@ import {
 } from "lucide-react";
 import { aborted, type ApiClient, type User } from "./api";
 import { ErrorBanner, Modal, Spinner } from "./components";
-import { ChatMarkdown } from "./ChatMarkdown";
+import { AgentReply } from "./AgentReply";
 import { ToolInteractionCard } from "./ToolInteractionCard";
 import { ChatToolStatus } from "./ChatToolStatus";
-import { AgentWorkflow } from "./AgentWorkflow";
 import { useChat } from "./useChat";
 
 function timeLabel(value: string) {
@@ -446,42 +445,18 @@ export function ChatPage({
                           {timeLabel(message.createdAt)}
                         </time>
                       </div>
-                      {message.role === "assistant" && (
-                        <AgentWorkflow
-                          entries={
-                            (message.runId
-                              ? chat.runs[message.runId]?.workflow
-                              : undefined) ??
-                            message.workflow ??
-                            []
+                      {message.role === "assistant" ? (
+                        <AgentReply
+                          message={message}
+                          run={
+                            message.runId ? chat.runs[message.runId] : undefined
                           }
                         />
+                      ) : (
+                        <div className="chat-message-text">
+                          {message.content}
+                        </div>
                       )}
-                      <div className="chat-message-text">
-                        {message.content ? (
-                          message.role === "assistant" ? (
-                            <ChatMarkdown content={message.content} />
-                          ) : (
-                            message.content
-                          )
-                        ) : message.status === "streaming" ? (
-                          <Spinner label="正在处理请求" />
-                        ) : message.status === "waiting" ? (
-                          "请处理下方的工具操作。"
-                        ) : message.status === "cancelled" ? (
-                          "本次待执行操作已取消。"
-                        ) : message.status === "expired" ? (
-                          "本次待执行操作已过期。"
-                        ) : (
-                          "本次没有收到回复内容"
-                        )}
-                        {message.status === "streaming" && message.content && (
-                          <span
-                            className="chat-stream-cursor"
-                            aria-hidden="true"
-                          />
-                        )}
-                      </div>
                       {message.runId &&
                         chat.runs[message.runId]?.interaction &&
                         (() => {
@@ -500,27 +475,6 @@ export function ChatPage({
                             />
                           ) : null;
                         })()}
-                      {message.runId &&
-                        Boolean(
-                          chat.runs[message.runId]?.executions.length,
-                        ) && (
-                          <div
-                            className="tool-execution-summary"
-                            aria-label="工具执行结果"
-                          >
-                            {chat.runs[message.runId]?.executions.map(
-                              (execution) => (
-                                <p key={execution.id}>
-                                  {execution.status === "succeeded"
-                                    ? "业务操作已完成"
-                                    : execution.status === "failed"
-                                      ? "业务操作未成功，请查看回复中的原因"
-                                      : "业务操作执行结果待核对"}
-                                </p>
-                              ),
-                            )}
-                          </div>
-                        )}
                       {message.role === "assistant" && (
                         <div className="chat-message-footer">
                           {message.status === "streaming" &&

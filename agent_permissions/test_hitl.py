@@ -904,6 +904,7 @@ class HitlTests(unittest.TestCase):
         done = self.final(self.recover(run))
         self.assertEqual(done["status"], "completed", done)
         self.assertEqual(done["content"], "完整回复")
+        self.assertEqual([e["answer_offset"] for e in done["workflow"]], [0, 0, 0, 0])
 
     def test_recover_committed_write_after_model_failure_never_replays_it(self):
         self.model.fail_after_tool = True

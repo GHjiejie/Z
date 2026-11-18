@@ -92,7 +92,15 @@ class ConsoleModel(BusinessModel):
                     }
                 }
             return fixture._generate(messages, stop, run_manager, **kwargs)
-        return super()._generate(messages, stop, run_manager, **kwargs)
+        result = super()._generate(messages, stop, run_manager, **kwargs)
+        if prompt.startswith("AGUI "):
+            reply = result.generations[0].message
+            reply.content = (
+                "我先核对 🔎 **当前账号**。"
+                if reply.tool_calls
+                else f"当前登录账号是 **{reply.text}**。"
+            )
+        return result
 
 
 def main() -> None:

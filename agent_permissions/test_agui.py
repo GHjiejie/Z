@@ -23,7 +23,10 @@ class SummaryModel(InteractionModel):
                 "type": "reasoning",
                 "reasoning": "先核对当前账号，再使用已授权的查询工具。",
             },
-            *([{"type": "text", "text": message.content}] if message.content else []),
+            {
+                "type": "text",
+                "text": "正在查询🔎。" if message.tool_calls else message.content,
+            },
         ]
         return result
 
@@ -144,6 +147,22 @@ class AguiTests(unittest.TestCase):
         self.assertTrue(summaries)
         self.assertIn("核对当前账号", "".join(summaries))
         self.assertNotIn("核对当前账号", self.snapshot(stream)["content"])
+        run = self.snapshot(stream)
+        preface = "正在查询🔎。"
+        self.assertEqual(run["content"], preface + "操作已完成")
+        self.assertEqual(
+            [(entry["kind"], entry["answer_offset"]) for entry in run["workflow"]],
+            [
+                ("step", 0),
+                ("model", 0),
+                ("tool", len(preface)),
+                ("model", len(preface)),
+            ],
+        )
+        stored = self.client.get(
+            f"/api/v1/chat/runs/{run['id']}", headers=self.headers
+        ).json()["data"]
+        self.assertEqual(stored["workflow"], run["workflow"])
         self.assertEqual(
             sum(item["type"] == "REASONING_MESSAGE_START" for item in stream),
             sum(item["type"] == "REASONING_MESSAGE_END" for item in stream),

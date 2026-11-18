@@ -1,6 +1,11 @@
 import { expect, test, type Page } from "@playwright/test";
 import { readAguiStream } from "../src/aguiStream";
 import type { RunEvent } from "../src/chatRuns";
+import {
+  decodeWorkflowEntry,
+  replyParts,
+  type WorkflowEntry,
+} from "../src/workflow";
 
 const identity = { threadId: "thread-1", runId: "agui-1" };
 const baseRun = {
@@ -20,6 +25,44 @@ const baseRun = {
   workflow: [],
 };
 const started = { type: "RUN_STARTED", ...identity, protocolVersion: "1.0" };
+test("中断恢复、尚未到达的正文和旧记录都能保留原文及操作顺序", () => {
+  const model: WorkflowEntry = {
+    id: "model",
+    kind: "model",
+    title: "分析",
+    status: "succeeded",
+    detail: "",
+    started_at: 1,
+    updated_at: 1,
+  };
+  const read = {
+    ...model,
+    id: "read",
+    kind: "tool" as const,
+    answer_offset: 3,
+  };
+  const body = "先🔎查**结果**";
+  const parts = (entries: WorkflowEntry[], content = body, live = false) =>
+    replyParts(content, entries, live).map((p) =>
+      p.kind === "text" ? p.text : p.entries.map((e) => e.id),
+    );
+  expect(parts([model])).toEqual([body, ["model"]]);
+  expect(parts([{ ...model, answer_offset: 0 }, read], "先🔎", true)).toEqual([
+    ["model"],
+    "先🔎",
+  ]);
+  expect(parts([{ ...model, answer_offset: 0 }, read])).toEqual([
+    ["model"],
+    "先🔎查",
+    ["read"],
+    "**结果**",
+  ]);
+  expect(parts([read, { ...model, id: "retry", answer_offset: 0 }])).toEqual([
+    ["read", "retry"],
+    body,
+  ]);
+  expect(() => decodeWorkflowEntry({ ...model, answer_offset: -1 })).toThrow();
+});
 const snapshot = (status: string, content = "") => ({
   type: "STATE_SNAPSHOT",
   snapshot: { run: { ...baseRun, status, content } },
@@ -204,7 +247,7 @@ async function login(page: Page) {
   await expect(page.getByLabel("聊天模型")).toHaveValue("fixture-model");
 }
 
-test("页面实时显示思考摘要、实际工具参数和结果，刷新后恢复完整过程", async ({
+test("正文按实际顺序穿插工具操作，流式展开详情和刷新均保留正文", async ({
   page,
 }) => {
   await login(page);
@@ -218,42 +261,62 @@ test("页面实时显示思考摘要、实际工具参数和结果，刷新后�
   });
   await page.getByLabel("输入消息", { exact: true }).fill("AGUI 查看当前账号");
   await page.getByRole("button", { name: "发送消息", exact: true }).click();
-  const workflow = page.locator(".agent-workflow");
-  await expect(workflow.getByLabel("模型思考内容").first()).toContainText(
+  const reply = page.getByRole("article", { name: "Agent 回复" });
+  const flow = reply.locator(".reply-flow");
+  const activities = flow.locator("details.reply-activity");
+  const thinking = activities.first();
+  await expect(thinking.locator("summary")).toContainText("思考摘要");
+  await expect(thinking).not.toHaveAttribute("open");
+  await thinking.locator("summary").focus();
+  await page.keyboard.press("Enter");
+  await expect(thinking.getByLabel("模型思考内容")).toContainText(
     "先核对当前账号权限",
   );
   await expect(
     page.getByRole("button", { name: "停止生成", exact: true }),
   ).toBeVisible();
-  await expect(workflow.locator(".workflow-entry.is-running")).toContainText(
-    "分析请求",
+  await expect(thinking.getByLabel("模型思考内容")).toContainText(
+    "再查询当前账号资料",
+  );
+  await expect(flow.locator(".reply-prose strong").first()).toHaveText(
+    "当前账号",
   );
   await expect(
     page.getByRole("button", { name: "停止生成", exact: true }),
   ).toHaveCount(0);
-  await expect(workflow).toContainText("agent_users_user_self_read");
-  const tool = workflow
-    .locator(".workflow-entry")
-    .filter({ hasText: "agent_users_user_self_read" });
-  await expect(tool).toHaveClass(/is-succeeded/);
-  await tool.getByText("调用参数", { exact: true }).click();
-  await expect(tool.locator("pre").first()).toHaveText("{}");
-  await tool.getByText("执行结果", { exact: true }).click();
-  await expect(tool.locator("pre").last()).toContainText("console_admin");
-  await tool.getByText("执行结果", { exact: true }).click();
+  await expect(thinking).toHaveAttribute("open");
+  await thinking.locator("summary").click();
+
+  const bodies = flow.locator(".reply-prose");
+  const tool = activities.nth(1);
+  async function checkOrder() {
+    await expect(flow.locator(":scope > *")).toHaveCount(4);
+    await expect(flow.locator(":scope > :nth-child(2)")).toHaveText(
+      "我先核对 🔎 当前账号。",
+    );
+    await expect(
+      flow.locator(":scope > :nth-child(3) > summary"),
+    ).toContainText("查看自己的资料");
+    await expect(flow.locator(":scope > :nth-child(4)")).toHaveText(
+      "当前登录账号是 console_admin。",
+    );
+    await expect(bodies.last().locator("strong")).toHaveText("console_admin");
+    await expect(flow.locator("details[open]")).toHaveCount(0);
+  }
+  await checkOrder();
+  await bodies.first().click();
+  await reply.screenshot({ path: "test-results/reply-flow-desktop.png" });
+  await tool.locator("summary").click();
+  await expect(tool.getByLabel("调用参数")).toHaveText("{}");
+  await expect(tool.getByLabel("执行结果")).toBeVisible();
+  await expect(tool.getByLabel("执行结果")).toContainText("console_admin");
+  await expect(tool).toContainText("agent_users_user_self_read");
   await page.screenshot({
-    path: "test-results/agui-workflow-desktop.png",
+    path: "test-results/reply-flow-details.png",
     fullPage: true,
   });
   await page.reload();
-  await expect(page.locator(".agent-workflow")).toContainText(
-    "先核对当前账号权限",
-  );
-  await expect(
-    page
-      .locator(".workflow-entry.is-succeeded")
-      .filter({ hasText: "agent_users_user_self_read" }),
-  ).toHaveCount(1);
+  await checkOrder();
   expect(starts).toBe(1);
 });
 
@@ -266,23 +329,21 @@ test("窄屏中的工具等待状态与 HITL 卡片一致，取消后不再显�
   await page.getByRole("button", { name: "发送消息", exact: true }).click();
   const form = page.locator(".tool-interaction-card");
   await expect(form).toBeVisible();
-  const waiting = page.locator(".workflow-entry.is-waiting");
-  await expect(waiting).toContainText("新增用户");
-  await expect(waiting).toContainText("agent_users_user_create");
-  await page.locator(".agent-workflow").scrollIntoViewIfNeeded();
+  const activity = page.locator(".reply-activity");
+  await expect(activity.locator("summary")).toContainText("新增用户");
+  await expect(activity.locator("summary")).toContainText("等待你处理");
+  await expect(activity).not.toHaveAttribute("open");
+  await activity.scrollIntoViewIfNeeded();
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(375);
   await page.screenshot({
-    path: "test-results/agui-workflow-mobile.png",
+    path: "test-results/reply-flow-hitl-mobile.png",
     fullPage: true,
   });
   await form.getByRole("button", { name: "取消操作", exact: true }).click();
   await expect(form).toHaveCount(0);
-  await expect(
-    page.locator(".workflow-entry.is-running, .workflow-entry.is-waiting"),
-  ).toHaveCount(0);
-  await expect(page.locator(".agent-workflow")).toContainText("已取消");
+  await expect(activity.locator("summary")).toContainText("已取消");
 });
 
 test("AG-UI 连接中断时页面标记过程待核对，不继续显示执行中", async ({
@@ -325,10 +386,12 @@ test("AG-UI 连接中断时页面标记过程待核对，不继续显示执行�
   });
   await page.getByLabel("输入消息", { exact: true }).fill("断流状态验证");
   await page.getByRole("button", { name: "发送消息", exact: true }).click();
-  await expect(page.locator(".workflow-entry.is-interrupted")).toContainText(
+  const activity = page.locator(".reply-activity");
+  await expect(activity.locator("summary")).toContainText("已中断");
+  await activity.locator("summary").click();
+  await expect(activity.getByLabel("操作详情")).toContainText(
     "连接已中断，请读取最新任务状态",
   );
-  await expect(page.locator(".workflow-entry.is-running")).toHaveCount(0);
   await expect(
     page.getByRole("button", { name: "停止生成", exact: true }),
   ).toHaveCount(0);
@@ -340,13 +403,13 @@ test("停止生成会结束工作流中的活动步骤，刷新后保留中断�
   await login(page);
   await page.getByLabel("输入消息", { exact: true }).fill("AGUI 查看当前账号");
   await page.getByRole("button", { name: "发送消息", exact: true }).click();
-  await expect(page.locator(".workflow-reasoning").first()).toContainText(
-    "先核对",
-  );
+  const reply = page.getByRole("article", { name: "Agent 回复" });
+  const summaries = reply.locator(".reply-activity > summary");
+  await expect(summaries.filter({ hasText: "思考摘要" }).first()).toBeVisible();
   await page.getByRole("button", { name: "停止生成", exact: true }).click();
-  await expect(
-    page.locator(".workflow-entry.is-running, .workflow-entry.is-waiting"),
-  ).toHaveCount(0);
+  await expect(summaries.filter({ hasText: /已中断|已取消/ })).toBeVisible();
+  await expect(summaries.filter({ hasText: "进行中" })).toHaveCount(0);
   await page.reload();
-  await expect(page.locator(".agent-workflow")).toContainText("已取消");
+  await expect(summaries.filter({ hasText: "已取消" })).toBeVisible();
+  await expect(summaries.filter({ hasText: "进行中" })).toHaveCount(0);
 });

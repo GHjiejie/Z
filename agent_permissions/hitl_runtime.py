@@ -311,10 +311,12 @@ async def build_graph(
                 409, "agent_step_limit", "任务步骤达到上限，请核对已执行结果"
             )
         entry_id = f"model:{state['turns'] + 1}:{identity('attempt')}"
+        previous_output = state.get("output", "")
         await progress(
             {
                 "id": entry_id,
                 "kind": "model",
+                "answer_offset": len(previous_output),
                 "title": f"分析请求 · 第 {state['turns'] + 1} 轮",
                 "status": "running",
                 "reasoning": "",
@@ -331,6 +333,7 @@ async def build_graph(
             **options,
         )
         response = safe_model_message(response, tools)
+        output = previous_output + response.text
         calls = response.tool_calls
         await progress(
             {
@@ -347,6 +350,7 @@ async def build_graph(
                 {
                     "id": f"tool:{state['turns'] + 1}:{index}:{call['id']}",
                     "kind": "tool",
+                    "answer_offset": len(output),
                     "title": _label(operation, selected)[0]
                     if selected
                     else call["name"],
@@ -370,7 +374,7 @@ async def build_graph(
             "pending": calls,
             "index": 0,
             "turns": state["turns"] + 1,
-            "output": state.get("output", "") + response.text,
+            "output": output,
         }
 
     async def execute(state: AgentState) -> dict:
@@ -384,6 +388,7 @@ async def build_graph(
             {
                 "id": entry_id,
                 "kind": "tool",
+                "answer_offset": len(state.get("output", "")),
                 "title": _label(operation_hint, selected)[0]
                 if selected
                 else call["name"],
@@ -720,6 +725,7 @@ async def _run_events(
                 {
                     "id": access_id,
                     "kind": "step",
+                    "answer_offset": len(output),
                     "title": "检查可用工具",
                     "status": "running",
                     "detail": "正在读取当前账号的工具授权和业务权限",
@@ -733,13 +739,6 @@ async def _run_events(
                 sensitive or {},
                 resume.get("interaction_id") if resume else None,
                 progress,
-            )
-            await progress(
-                {
-                    "id": access_id,
-                    "status": "succeeded",
-                    "detail": f"当前可用业务工具：{len(tools)} 个",
-                }
             )
             payload = json.loads(run["payload"])
             initial = (
@@ -772,6 +771,14 @@ async def _run_events(
                             ).fetchone()
                         if accepted:
                             initial = Command(resume={"interaction_id": accepted[0]})
+            await progress(
+                {
+                    "id": access_id,
+                    "status": "succeeded",
+                    "answer_offset": len(output),
+                    "detail": f"当前可用业务工具：{len(tools)} 个",
+                }
+            )
             if recovering:
                 yield event("run.snapshot", run=await snapshot())
             with request.app.state.chat_tracing.context(
