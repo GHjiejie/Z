@@ -1,0 +1,27 @@
+{
+  "name": "webassembly-practical-demos",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": "^20.19.0 || >=22.12.0",
+    "npm": ">=10"
+  },
+  "scripts": {
+    "build:wasm": "asc assembly/checkout.ts --outFile build/checkout.wasm --textFile build/checkout.wat --optimize --runtime stub",
+    "predev": "npm run build:wasm",
+    "dev": "vite --host 127.0.0.1",
+    "prebuild": "npm run build:wasm",
+    "build": "vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "precheckout": "npm run build:wasm",
+    "checkout": "node cli/checkout.js"
+  },
+  "dependencies": {
+    "@duckdb/duckdb-wasm": "1.32.0",
+    "@jsquash/webp": "1.5.0"
+  },
+  "devDependencies": {
+    "assemblyscript": "0.28.20",
+    "vite": "7.3.8"
+  }
+}

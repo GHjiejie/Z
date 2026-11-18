@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="theme-color" content="#f7f7f2">
+    <title>WebAssembly 实验手册</title>
+    <link rel="stylesheet" href="./src/styles.css">
+  </head>
+  <body>
+    <div class="layout">
+      <header class="intro">
+        <h1><span lang="en">WebAssembly</span>实验手册</h1>
+        <p>Wasm 是一种可移植的二进制指令格式。这里的 JavaScript 读取输入、更新页面，编译好的 Wasm 模块负责算折扣、编码图片和查询订单。</p>
+        <nav aria-label="跳至示例">
+          <a href="#checkout">结账优惠</a>
+          <a href="#image">素材压缩</a>
+          <a href="#orders">订单报表</a>
+        </nav>
+      </header>
+      <main>
+        <noscript>请启用 JavaScript 以运行这些浏览器示例。</noscript>
+        <section id="checkout" aria-labelledby="checkout-title">
+          <h2 id="checkout-title">结账优惠</h2>
+          <p class="description">同款满 3 件打九折，满 10 件打八折。Wasm 按整笔小计打折，再四舍五入到分。</p>
+          <div class="workbench">
+            <form id="checkout-form" novalidate>
+              <fieldset>
+                <legend class="sr-only">输入购物车商品</legend>
+                <div class="price-fields">
+                  <label>单价（元）<input name="price" inputmode="decimal" value="39.90" required></label>
+                  <label>件数<input name="quantity" inputmode="numeric" value="3" required></label>
+                </div>
+                <button type="submit">计算应付金额</button>
+              </fieldset>
+            </form>
+            <div class="result-panel" aria-live="polite">
+              <dl id="receipt" hidden>
+                <div><dt>商品小计</dt><dd data-amount="subtotal"></dd></div>
+                <div><dt>已优惠</dt><dd data-amount="discount"></dd></div>
+                <div class="total"><dt>应付金额</dt><dd data-amount="payable"></dd></div>
+              </dl>
+              <p class="status" id="checkout-status">正在加载折扣规则…</p>
+            </div>
+          </div>
+        </section>
+        <section id="image" aria-labelledby="image-title">
+          <h2 id="image-title">素材压缩</h2>
+          <p class="description">把活动海报或商品图导出为 WebP。可以直接用示例海报试压，比较质量与文件大小。</p>
+          <div class="workbench">
+            <form id="image-form">
+              <fieldset>
+                <legend class="sr-only">选择图片与编码质量</legend>
+                <label>替换示例图片<input type="file" name="image" accept="image/png,image/jpeg,image/webp"></label>
+                <button id="restore-image" class="text-button" type="button" hidden>使用示例海报</button>
+                <div class="quality-field">
+                  <label for="quality">编码质量</label>
+                  <output id="quality-value" for="quality">75</output>
+                  <input id="quality" name="quality" type="range" min="1" max="100" value="75">
+                </div>
+                <button type="submit">压缩为 WebP</button>
+              </fieldset>
+            </form>
+            <figure class="result-panel">
+              <canvas id="poster" width="720" height="320" role="img" aria-label="用于演示压缩效果的周末市集海报"></canvas>
+              <img id="image-preview" alt="当前图片预览" hidden>
+              <figcaption id="image-caption">内置 PNG · 周末市集海报</figcaption>
+              <p class="status" id="image-status" role="status"></p>
+              <a id="download-image" download hidden>下载 WebP</a>
+            </figure>
+          </div>
+        </section>
+        <section id="orders" aria-labelledby="orders-title">
+          <h2 id="orders-title">订单报表</h2>
+          <p class="description">用 DuckDB-Wasm 在本机汇总各城市的订单数和销售额。每行一笔订单，CSV 需含 <code>city</code> 和 <code>amount</code> 两列，金额单位为元。</p>
+          <div class="workbench">
+            <form id="orders-form">
+              <fieldset>
+                <legend class="sr-only">选择订单数据</legend>
+                <label>替换示例 CSV<input type="file" name="csv" accept=".csv,text/csv"></label>
+                <button id="restore-orders" class="text-button" type="button" hidden>使用示例订单</button>
+                <a id="sample-csv" download="orders.csv">下载示例 CSV</a>
+                <button type="submit">按城市汇总</button>
+              </fieldset>
+            </form>
+            <div class="result-panel">
+              <p class="status" id="orders-status" role="status">已准备 6 笔示例订单。点击汇总即可查看结果。</p>
+              <table id="orders-table" hidden>
+                <caption class="sr-only">各城市订单汇总</caption>
+                <thead><tr><th scope="col">城市</th><th scope="col">订单数</th><th scope="col">销售额（元）</th></tr></thead>
+                <tbody></tbody>
+              </table>
+            </div>
+          </div>
+        </section>
+      </main>
+    </div>
+    <script type="module" src="./src/checkout-form.js"></script>
+    <script type="module" src="./src/image-form.js"></script>
+    <script type="module" src="./src/orders-form.js"></script>
+  </body>
+</html>
