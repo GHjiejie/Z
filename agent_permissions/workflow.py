@@ -49,9 +49,18 @@ class ReasoningProgress(AsyncCallbackHandler):
         self.entry_id, self.progress = entry_id, progress
         self.text = ""
         self.next_update = 0.0
+        self.received_output = False
 
     async def on_llm_new_token(self, token: str, *, chunk=None, **kwargs) -> None:
-        value = reasoning_text(getattr(chunk, "message", None))
+        message = getattr(chunk, "message", None)
+        value = reasoning_text(message)
+        if (
+            token
+            or value
+            or getattr(message, "content", None)
+            or getattr(message, "tool_call_chunks", None)
+        ):
+            self.received_output = True
         if not value:
             return
         self.text = (self.text + value)[:64000]

@@ -9,6 +9,7 @@ from typing import Literal
 from uuid import uuid4
 
 import httpx
+import httpx2
 import openai
 from fastapi import FastAPI, Request
 from langchain_core.language_models import BaseChatModel
@@ -18,7 +19,7 @@ from pydantic import ConfigDict, Field, model_validator
 from starlette.concurrency import run_in_threadpool
 from starlette.responses import JSONResponse, StreamingResponse
 
-from agent_permissions.chat_model import create_chat_model
+from agent_permissions.chat_model import MODEL_TIMEOUT_ERRORS, create_chat_model
 from agent_permissions.errors import ApiError
 from agent_permissions.models import StrictModel
 from agent_permissions.tooling import execution_context
@@ -112,7 +113,9 @@ def compatible_error(error: ApiError, request_id: str) -> JSONResponse:
 def _model_error(error: Exception) -> ApiError:
     if isinstance(error, ApiError):
         return error
-    if isinstance(error, (TimeoutError, openai.APITimeoutError)):
+    if isinstance(error, MODEL_TIMEOUT_ERRORS):
+        return ApiError(504, "chat_timeout", "等待模型响应超时，可稍后恢复此任务")
+    if isinstance(error, TimeoutError):
         return ApiError(
             504, "chat_timeout", "任务超时，部分操作可能已执行，请先核对结果"
         )
@@ -124,7 +127,7 @@ def _model_error(error: Exception) -> ApiError:
         )
     if isinstance(error, openai.RateLimitError):
         return ApiError(429, "model_rate_limit", "模型服务暂时繁忙，请稍后重试")
-    if isinstance(error, (openai.APIError, httpx.HTTPError)):
+    if isinstance(error, (openai.APIError, httpx2.HTTPError, httpx.HTTPError)):
         return ApiError(
             502, "model_unavailable", "模型服务暂时不可用，请凭请求标识排查"
         )

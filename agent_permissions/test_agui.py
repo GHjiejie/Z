@@ -4,14 +4,64 @@ import json
 import unittest
 from uuid import uuid4
 
+import httpx2
 from ag_ui.core import Event
 from langchain_core.messages import AIMessage
+from langchain_openai import ChatOpenAI
 from pydantic import TypeAdapter
 
 from agent_permissions import test_hitl
 from agent_permissions.test_hitl import InteractionModel, events
 from agent_permissions.test_support import grant_tools
 from agent_permissions.workflow import reasoning_text
+
+
+class FailingResponsesStream(httpx2.AsyncByteStream):
+    def __init__(self, prefix=b": keepalive\n\n", error=httpx2.ReadTimeout):
+        self.prefix = prefix
+        self.error = error
+
+    async def __aiter__(self):
+        yield self.prefix
+        raise self.error("upstream-private-diagnostic")
+
+
+def responses_wire(item: dict) -> bytes:
+    return test_hitl.responses_sse(
+        {
+            "id": "resp_fixture",
+            "object": "response",
+            "model": "stream-fixture",
+            "created_at": 1,
+            "status": "completed",
+            "output": [item],
+        }
+    ).content
+
+
+def text_response(text: str) -> bytes:
+    return responses_wire(
+        {
+            "type": "message",
+            "id": "msg_fixture",
+            "status": "completed",
+            "role": "assistant",
+            "content": [{"type": "output_text", "text": text, "annotations": []}],
+        }
+    )
+
+
+def function_response(call_id: str, name: str, args: dict) -> bytes:
+    return responses_wire(
+        {
+            "type": "function_call",
+            "id": "fc_" + call_id,
+            "call_id": call_id,
+            "name": name,
+            "arguments": json.dumps(args),
+            "status": "completed",
+        }
+    )
 
 
 class SummaryModel(InteractionModel):
@@ -92,6 +142,115 @@ class AguiTests(unittest.TestCase):
             }
         ]
         return body
+
+    def scripted_responses(self, *replies):
+        requests = []
+
+        async def respond(request):
+            self.assertEqual(request.url.path, "/v1/responses")
+            index = len(requests)
+            requests.append(json.loads(request.content))
+            reply = replies[index]
+            body = {"content": reply} if isinstance(reply, bytes) else {"stream": reply}
+            return httpx2.Response(
+                200, headers={"Content-Type": "text/event-stream"}, **body
+            )
+
+        http = httpx2.AsyncClient(transport=httpx2.MockTransport(respond))
+        self.addCleanup(self.client.portal.call, http.aclose)
+        self.model = ChatOpenAI(
+            model="stream-fixture",
+            base_url="https://fixture.invalid/v1",
+            api_key="fixture",
+            use_responses_api=True,
+            streaming=True,
+            max_retries=0,
+            http_socket_options=(),
+            http_async_client=http,
+        )
+        return requests
+
+    def test_first_empty_responses_stream_timeout_recovers_on_one_model_retry(self):
+        requests = self.scripted_responses(
+            FailingResponsesStream(), text_response("你好")
+        )
+        stream = self.call(self.input())
+        run = self.snapshot(stream)
+        self.assertEqual(
+            (run["status"], run["content"], run["executions"]),
+            ("completed", "你好", []),
+        )
+        self.assertEqual(stream[-1]["type"], "RUN_FINISHED")
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(requests[0]["input"], requests[1]["input"])
+        self.assertEqual([t["name"] for t in requests[1]["tools"]], ["search_tools"])
+        self.assertEqual(
+            "".join(e["delta"] for e in stream if e["type"] == "TEXT_MESSAGE_CONTENT"),
+            "你好",
+        )
+
+    def test_persistent_empty_responses_timeout_is_a_redacted_504(self):
+        requests = self.scripted_responses(
+            FailingResponsesStream(), FailingResponsesStream()
+        )
+        with self.assertLogs("agent_permissions.hitl_runtime", level="WARNING") as logs:
+            stream = self.call(self.input())
+        run = self.snapshot(stream)
+        self.assertEqual(len(requests), 2)
+        self.assertEqual(
+            (stream[-1]["type"], stream[-1]["code"]), ("RUN_ERROR", "chat_timeout")
+        )
+        self.assertEqual(
+            (run["status"], run["error"]["http_status"], run["executions"]),
+            ("failed", 504, []),
+        )
+        self.assertIn("模型", stream[-1]["message"])
+        self.assertIn(run["id"], " ".join(logs.output))
+        self.assertNotIn("upstream-private-diagnostic", repr((logs.output, stream)))
+
+    def test_read_timeout_after_partial_text_preserves_text_and_skips_retry(self):
+        # The fixture starts with response.created and a single output_text.delta.
+        prefix = b"\n\n".join(text_response("已有回复").split(b"\n\n")[:2]) + b"\n\n"
+        requests = self.scripted_responses(FailingResponsesStream(prefix))
+        stream = self.call(self.input())
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(self.snapshot(stream)["content"], "已有回复")
+        self.assertEqual(stream[-1]["code"], "chat_timeout")
+
+    def test_read_timeout_after_partial_function_call_skips_retry_and_execution(self):
+        wire = function_response(
+            "discover", "search_tools", {"query": "user.self.read"}
+        )
+        # response.created, output_item.added and the first function argument delta.
+        prefix = b"\n\n".join(wire.split(b"\n\n")[:3]) + b"\n\n"
+        requests = self.scripted_responses(FailingResponsesStream(prefix))
+        stream = self.call(self.input())
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(self.snapshot(stream)["executions"], [])
+        self.assertEqual(stream[-1]["code"], "chat_timeout")
+
+    def test_responses_timeout_after_a_completed_tool_preserves_the_receipt(self):
+        requests = self.scripted_responses(
+            function_response("discover", "search_tools", {"query": "user.self.read"}),
+            function_response("read", "agent_users_user_self_read", {}),
+            FailingResponsesStream(),
+        )
+        stream = self.call(self.input())
+        self.assertEqual(len(requests), 3)
+        self.assertEqual(stream[-1]["code"], "chat_timeout")
+        self.assertEqual(
+            [r["status"] for r in self.snapshot(stream)["executions"]], ["succeeded"]
+        )
+
+    def test_broken_responses_stream_is_a_redacted_upstream_error(self):
+        requests = self.scripted_responses(
+            FailingResponsesStream(error=httpx2.RemoteProtocolError)
+        )
+        stream = self.call(self.input())
+        self.assertEqual(len(requests), 1)
+        self.assertEqual(stream[-1]["code"], "model_unavailable")
+        self.assertEqual(self.snapshot(stream)["error"]["http_status"], 502)
+        self.assertNotIn("upstream-private-diagnostic", repr(stream))
 
     def test_standard_events_and_actual_read_tool_are_visible(self):
         self.model.operation, self.model.arguments = "user.self.read", {}

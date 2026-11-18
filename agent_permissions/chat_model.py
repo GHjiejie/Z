@@ -3,11 +3,20 @@
 import os
 from pathlib import Path
 
+import httpx
+import httpx2
+import openai
 from dotenv import dotenv_values
 from langchain_openai import ChatOpenAI
 from pydantic import SecretStr
 
 DEFAULT_ENV_FILE = Path(__file__).resolve().parent / ".env"
+# The SDK wraps timeouts before headers. Once SSE starts, its transport raises directly.
+MODEL_TIMEOUT_ERRORS = (
+    openai.APITimeoutError,
+    httpx2.TimeoutException,
+    httpx.TimeoutException,
+)
 
 
 def create_chat_model(*, env_file: Path | None = None) -> ChatOpenAI:

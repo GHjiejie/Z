@@ -26,7 +26,7 @@ response = chat_model.invoke("请只回复 OK。")
 print(response.text)
 ```
 
-工厂在实际构建 Agent 时才校验模型配置。用户管理 API 和工具目录可以在没有模型密钥时独立启动。默认参数为温度 `0`、流式响应、60 秒超时、零次自动重试，以及 `reasoning={"effort": "medium", "summary": "auto"}`。
+工厂在实际构建 Agent 时才校验模型配置。用户管理 API 和工具目录可以在没有模型密钥时独立启动。默认参数为温度 `0`、流式响应、60 秒超时、SDK 自动重试次数 `0`，以及 `reasoning={"effort": "medium", "summary": "auto"}`。Chat 执行图可以对尚未输出的首轮模型超时重试一次，详见[请求参数与用量](chat-api.md)。
 
 接入生成的 API 工具时，在 HTTP client 的生命周期内构建和调用 Agent：
 

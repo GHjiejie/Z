@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from collections.abc import AsyncIterator
 from contextlib import suppress
 from typing import Annotated, NotRequired, TypedDict
@@ -19,6 +20,7 @@ from langsmith import traceable
 from starlette.concurrency import run_in_threadpool
 
 from agent_permissions.agent_grants import _label
+from agent_permissions.chat_model import MODEL_TIMEOUT_ERRORS
 from agent_permissions.errors import ApiError
 from agent_permissions.hitl_checkpoint import DatabaseCheckpointer
 from agent_permissions.hitl_execution import (
@@ -50,6 +52,7 @@ from agent_permissions.workflow import (
 )
 from api_tools.registry import permitted
 
+logger = logging.getLogger(__name__)
 PREPARE_NAME = "request_tool_input"
 DISCOVERY_PROMPT = """你代表当前登录账号。问候和普通聊天直接回答。询问可用工具时调用 search_tools，query 传空字符串，按需翻页。
 需要处理业务时，若本轮没有匹配的业务函数，先用 search_tools 搜索能力关键词。查询中省略姓名、密码和业务参数。
@@ -359,14 +362,22 @@ async def build_graph(
             tool_prompt = DISCOVERY_PROMPT if allowed else NO_TOOLS_PROMPT
             if candidates:
                 tool_prompt += "\n" + HITL_PROMPT
-        response = await bound.ainvoke(
-            [
-                SystemMessage(content=SYSTEM_PROMPT + "\n" + tool_prompt),
-                *state["messages"],
-            ],
-            config=merge_configs(config, {"callbacks": [reasoning]}),
-            **options,
-        )
+        messages = [
+            SystemMessage(content=SYSTEM_PROMPT + "\n" + tool_prompt),
+            *state["messages"],
+        ]
+        model_config = merge_configs(config, {"callbacks": [reasoning]})
+        try:
+            response = await bound.ainvoke(messages, config=model_config, **options)
+        except MODEL_TIMEOUT_ERRORS:
+            # Only repeat the initial model request, before any streamed content or tool call.
+            if state["turns"] or reasoning.received_output:
+                raise
+            await run_in_threadpool(store.assert_running, run)
+            await progress(
+                {"id": entry_id, "detail": "等待模型响应超时，正在重试首次请求"}
+            )
+            response = await bound.ainvoke(messages, config=model_config, **options)
         response = safe_model_message(
             response, candidates, searchable=allowed if discovery_enabled else []
         )
@@ -967,6 +978,14 @@ async def _run_events(
 
         safe = _model_error(error)
         status = "cancelled" if safe.code == "RUN_CANCELLED" else "failed"
+        if status == "failed":
+            logger.warning(
+                "Agent run failed request_id=%s run_id=%s reason=%s error_type=%s",
+                request.state.info.request_id,
+                run["id"],
+                safe.code,
+                type(error).__qualname__,
+            )
         await run_in_threadpool(
             store.update,
             run,
