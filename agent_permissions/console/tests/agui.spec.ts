@@ -247,6 +247,18 @@ async function login(page: Page) {
   await expect(page.getByLabel("聊天模型")).toHaveValue("fixture-model");
 }
 
+test("会话按当前账号列出工具，浏览目录不触发业务确认", async ({ page }) => {
+  await login(page);
+  await page
+    .getByLabel("输入消息", { exact: true })
+    .fill("当前账号有哪些工具？");
+  await page.getByRole("button", { name: "发送消息", exact: true }).click();
+  const reply = page.getByRole("article", { name: "Agent 回复" });
+  await expect(reply).toContainText(/当前账号可用 \d+ 个业务工具/);
+  await expect(reply).toContainText("退出当前登录");
+  await expect(reply.getByRole("button", { name: "确认执行" })).toHaveCount(0);
+});
+
 test("正文按实际顺序穿插工具操作，流式展开详情和刷新均保留正文", async ({
   page,
 }) => {

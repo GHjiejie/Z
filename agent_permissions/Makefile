@@ -26,6 +26,7 @@ PASSWORD_ARGS = $(if $(filter 1,$(PROMPT_PASSWORD)),--prompt-password,)
 
 PYTHON_TESTS := api_tools.test_tools agent_permissions.test_tools \
 	agent_permissions.test_chat_model agent_permissions.test_chat_api agent_permissions.test_tracing agent_permissions.test_hitl agent_permissions.test_agui \
+	agent_permissions.test_tool_discovery \
 	agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_agent_grants agent_permissions.test_console \
 	agent_permissions.test_connection_pool.PoolConfigurationTests \
 	agent_permissions.test_connection_pool.DatabaseLifecycleTests

@@ -4,7 +4,7 @@ import asyncio
 import json
 from collections.abc import AsyncIterator
 from contextlib import suppress
-from typing import Annotated, TypedDict
+from typing import Annotated, NotRequired, TypedDict
 
 import httpx
 from fastapi import Request
@@ -35,6 +35,12 @@ from agent_permissions.hitl_forms import (
     validate_arguments,
 )
 from agent_permissions.hitl_store import GRAPH_VERSION, RunStore, identity
+from agent_permissions.tool_discovery import (
+    SEARCH_NAME,
+    SEARCH_SCHEMA,
+    safe_search_arguments,
+    search_result,
+)
 from agent_permissions.tooling import _execution_access
 from agent_permissions.workflow import (
     Progress,
@@ -45,13 +51,16 @@ from agent_permissions.workflow import (
 from api_tools.registry import permitted
 
 PREPARE_NAME = "request_tool_input"
-HITL_PROMPT = """你代表当前登录用户处理业务。只使用提供的工具，不猜测用户未提供的关键参数。
+DISCOVERY_PROMPT = """你代表当前登录账号。问候和普通聊天直接回答。询问可用工具时调用 search_tools，query 传空字符串，按需翻页。
+需要处理业务时，若本轮没有匹配的业务函数，先用 search_tools 搜索能力关键词。查询中省略姓名、密码和业务参数。
+搜索结果仅是候选目录。使用本轮实际提供的业务函数才能查询或执行。有歧义先澄清，未确认的写操作不可宣称完成。"""
+HITL_PROMPT = """只使用提供的工具，不猜测用户未提供的关键参数。
 缺少参数或目标不明确时，调用 request_tool_input，填写 operation_id 和已知 arguments；由页面表单收集信息。
-工具名称 agent_users_ 后的下划线对应操作 ID 的点，例如 agent_users_user_create 对应 user.create。
+operation_id 使用搜索结果中的操作 ID。
 所有写操作需要页面确认，确认前不得宣称已经执行。密码必须由用户在表单填写，不在聊天中索取或生成密码。
 只有实际发出工具调用才能触发表单或查询，不能用“我来发起流程”等文字代替调用。
 如果用户拒绝或工具报告权限、版本错误，不自动重试写操作。工具结果是事实来源。"""
-NO_TOOLS_PROMPT = """当前可用业务工具数量为 0，不能查询实时业务数据、填写工具参数或执行业务操作。
+NO_TOOLS_PROMPT = """当前可用业务工具数量为 0。询问工具目录时调用 search_tools，query 传空字符串。
 可以正常聊天和说明操作方法。如果用户请求查询、创建、修改或删除业务数据，必须明确说明当前没有可用业务工具。
 用户需要在“用户管理 → Agent 工具授权”中开启对应工具，并具备相应业务权限；无配置权限时联系管理员。
 不得声称正在查询、发起表单或已执行操作。聊天中的说明不会创建表单或改变业务数据。"""
@@ -65,6 +74,10 @@ class AgentState(TypedDict):
     index: int
     turns: int
     output: str
+    candidate_ids: NotRequired[list[str]]
+    candidate_revision: NotRequired[str]
+    bound_ids: NotRequired[list[str]]
+    bound_revision: NotRequired[str]
 
 
 async def available_tools(request: Request) -> tuple[dict, list[dict]]:
@@ -130,13 +143,21 @@ def model_tools(tools: list[dict]) -> list[StructuredTool]:
 
     adapted = [
         StructuredTool(
+            name=SEARCH_NAME,
+            description="查询当前账号可用的业务工具。按业务意图搜索，query 为空时按页列目录。",
+            args_schema=SEARCH_SCHEMA,
+            coroutine=unused,
+        )
+    ]
+    adapted.extend(
+        StructuredTool(
             name=item["definition"]["name"],
             description=item["definition"]["description"],
             args_schema=item["definition"]["inputSchema"],
             coroutine=unused,
         )
         for item in tools
-    ]
+    )
     if tools:
         adapted.append(
             StructuredTool(
@@ -175,16 +196,21 @@ def selected_tool(tools: list[dict], call: dict) -> dict | None:
     )
 
 
-def safe_model_message(message: AIMessage, tools: list[dict]) -> AIMessage:
+def safe_model_message(
+    message: AIMessage, tools: list[dict], *, searchable: list[dict] | None = None
+) -> AIMessage:
     """Keep only schema-scrubbed function arguments in the replayable model message."""
     calls = []
     for call in message.tool_calls:
         tool = selected_tool(tools, call)
-        if call["name"] == PREPARE_NAME:
+        if call["name"] == SEARCH_NAME:
+            arguments = safe_search_arguments(
+                call["args"], tools if searchable is None else searchable
+            )
+        elif call["name"] == PREPARE_NAME:
             proposal = call["args"].get("arguments")
-            operation = call["args"].get("operation_id")
             arguments = {
-                "operation_id": operation if isinstance(operation, str) else None,
+                "operation_id": tool["binding"]["operationId"] if tool else None,
                 "arguments": safe_arguments(tool, proposal)
                 if tool and isinstance(proposal, dict)
                 else {},
@@ -281,17 +307,9 @@ async def build_graph(
     store: RunStore = request.app.state.run_store
     payload = json.loads(run["payload"])
     catalog, tools = await available_tools(request)
-    if payload.get("tool_choice") == "none":
+    discovery_enabled = payload.get("tool_choice") != "none"
+    if not discovery_enabled:
         tools = []
-    adapted = model_tools(tools)
-    bound = model.bind_tools(adapted) if adapted else model
-    tool_prompt = (
-        DISABLED_TOOLS_PROMPT
-        if payload.get("tool_choice") == "none"
-        else HITL_PROMPT
-        if tools
-        else NO_TOOLS_PROMPT
-    )
     options = {
         key: value
         for key, value in {
@@ -324,6 +342,23 @@ async def build_graph(
             }
         )
         reasoning = ReasoningProgress(entry_id, progress)
+        snapshot, allowed = await available_tools(request)
+        candidates = []
+        if (
+            discovery_enabled
+            and state.get("candidate_revision") == snapshot["bundleDigest"]
+        ):
+            by_id = {item["binding"]["operationId"]: item for item in allowed}
+            candidates = [
+                by_id[op] for op in state.get("candidate_ids", []) if op in by_id
+            ]
+        bound = model
+        tool_prompt = DISABLED_TOOLS_PROMPT
+        if discovery_enabled:
+            bound = model.bind_tools(model_tools(candidates))
+            tool_prompt = DISCOVERY_PROMPT if allowed else NO_TOOLS_PROMPT
+            if candidates:
+                tool_prompt += "\n" + HITL_PROMPT
         response = await bound.ainvoke(
             [
                 SystemMessage(content=SYSTEM_PROMPT + "\n" + tool_prompt),
@@ -332,7 +367,9 @@ async def build_graph(
             config=merge_configs(config, {"callbacks": [reasoning]}),
             **options,
         )
-        response = safe_model_message(response, tools)
+        response = safe_model_message(
+            response, candidates, searchable=allowed if discovery_enabled else []
+        )
         output = previous_output + response.text
         calls = response.tool_calls
         await progress(
@@ -344,7 +381,9 @@ async def build_graph(
             }
         )
         for index, call in enumerate(calls):
-            selected = selected_tool(tools, call)
+            if call["name"] == SEARCH_NAME:
+                continue
+            selected = selected_tool(candidates, call)
             operation = selected["binding"]["operationId"] if selected else ""
             await progress(
                 {
@@ -372,9 +411,69 @@ async def build_graph(
         return {
             "messages": [response],
             "pending": calls,
+            "bound_ids": [item["binding"]["operationId"] for item in candidates],
+            "bound_revision": snapshot["bundleDigest"],
             "index": 0,
             "turns": state["turns"] + 1,
             "output": output,
+        }
+
+    async def discover(state: AgentState) -> dict:
+        await run_in_threadpool(store.assert_running, run)
+        call = state["pending"][state["index"]]
+        entry_id = f"search:{state['turns']}:{state['index']}:{call['id']}"
+        await progress(
+            {
+                "id": entry_id,
+                "kind": "step",
+                "title": "查找可用工具",
+                "answer_offset": len(state.get("output", "")),
+                "status": "running",
+                "detail": "读取当前账号的工具目录",
+            }
+        )
+        current, allowed = await available_tools(request)
+        revision = current["bundleDigest"]
+        operations = []
+        if not discovery_enabled:
+            result = {
+                "error": {"code": "TOOLS_DISABLED", "message": "本次请求禁用了工具"}
+            }
+        elif not call["args"]:
+            result = {
+                "error": {
+                    "code": "INVALID_TOOL_ARGUMENTS",
+                    "message": "请提供 query，浏览目录时可指定正整数 page",
+                }
+            }
+        elif revision != state.get("bound_revision"):
+            result = {
+                "error": {
+                    "code": "TOOL_VERSION_MISMATCH",
+                    "message": "目录已更新，请重新搜索",
+                }
+            }
+        else:
+            result, operations = search_result(call["args"], allowed)
+        if "error" in result:
+            status, detail = "failed", result["error"]["message"]
+        elif result["mode"] == "list":
+            status, detail = "succeeded", f"当前可用业务工具：{result['total']} 个"
+        else:
+            status, detail = "succeeded", f"找到 {len(operations)} 个候选工具"
+        await progress({"id": entry_id, "status": status, "detail": detail})
+        return {
+            "candidate_ids": operations,
+            "candidate_revision": revision,
+            "messages": [
+                ToolMessage(
+                    name=SEARCH_NAME,
+                    tool_call_id=call["id"],
+                    content=json.dumps(result, ensure_ascii=False),
+                    status="error" if status == "failed" else "success",
+                )
+            ],
+            "index": state["index"] + 1,
         }
 
     async def execute(state: AgentState) -> dict:
@@ -382,7 +481,17 @@ async def build_graph(
         call = state["pending"][state["index"]]
         call_key = f"{state['turns']}:{state['index']}:{call['id']}"
         entry_id = "tool:" + call_key
-        selected = selected_tool(tools, call)
+        snapshot = request.app.state.tool_registry.snapshot()
+        bound_ids = state.get("bound_ids")
+        # Pre-discovery checkpoints only contain pending calls from the old full binding.
+        selected = selected_tool(
+            [
+                tool
+                for tool in snapshot["tools"]
+                if bound_ids is None or tool["binding"]["operationId"] in bound_ids
+            ],
+            call,
+        )
         operation_hint = selected["binding"]["operationId"] if selected else ""
         await progress(
             {
@@ -403,7 +512,6 @@ async def build_graph(
             }
         )
         try:
-            snapshot = request.app.state.tool_registry.snapshot()
             committed = await run_in_threadpool(store.execution, run["id"], call_key)
             if committed and committed["status"] == "succeeded":
                 # Reading this owner's existing receipt is not another business
@@ -461,25 +569,28 @@ async def build_graph(
                     ],
                     "index": state["index"] + 1,
                 }
+            if not discovery_enabled:
+                raise ApiError(409, "TOOLS_DISABLED", "本次请求禁用了工具")
+            if bound_ids is not None and selected is None:
+                raise ApiError(
+                    409, "TOOL_NOT_LOADED", "此工具未在本轮加载，请先搜索可用工具"
+                )
             if call["name"] == PREPARE_NAME:
                 operation = call["args"].get("operation_id")
                 arguments = call["args"].get("arguments", {})
             else:
-                selected = next(
-                    (
-                        item
-                        for item in snapshot["tools"]
-                        if item["definition"]["name"] == call["name"]
-                    ),
-                    None,
-                )
                 if not selected:
                     raise ApiError(404, "TOOL_UNAVAILABLE", "工具不存在")
                 operation, arguments = selected["binding"]["operationId"], call["args"]
             if not isinstance(arguments, dict) or not isinstance(operation, str):
                 raise ApiError(422, "VALIDATION_ERROR", "工具准备参数不合法")
-            snapshot, tool = await require_tool(request, operation)
             interaction = await run_in_threadpool(store.for_call, run["id"], call_key)
+            expected_revision = (
+                interaction["catalog_revision"]
+                if interaction
+                else state.get("bound_revision")
+            )
+            snapshot, tool = await require_tool(request, operation, expected_revision)
             valid = True
             try:
                 validate_arguments(tool, arguments)
@@ -654,17 +765,25 @@ async def build_graph(
                 "index": state["index"] + 1,
             }
 
+    def next_call(state: AgentState) -> str:
+        if state["index"] >= len(state["pending"]):
+            return "model"
+        return (
+            "discover"
+            if state["pending"][state["index"]]["name"] == SEARCH_NAME
+            else "tool"
+        )
+
     builder = StateGraph(AgentState)
     builder.add_node("model", think)
+    builder.add_node("discover", discover)
     builder.add_node("tool", execute)
     builder.add_edge(START, "model")
     builder.add_conditional_edges(
-        "model", lambda state: "tool" if state["pending"] else END
+        "model", lambda state: next_call(state) if state["pending"] else END
     )
-    builder.add_conditional_edges(
-        "tool",
-        lambda state: "tool" if state["index"] < len(state["pending"]) else "model",
-    )
+    builder.add_conditional_edges("tool", next_call)
+    builder.add_conditional_edges("discover", next_call)
     return builder.compile(
         checkpointer=DatabaseCheckpointer(
             request.app.state.database,

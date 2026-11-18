@@ -18,6 +18,13 @@ class SummaryModel(InteractionModel):
     def _generate(self, *args, **kwargs):
         result = super()._generate(*args, **kwargs)
         message = result.generations[0].message
+        text = message.content
+        if message.tool_calls:
+            text = (
+                "先查找工具。"
+                if message.tool_calls[0]["name"] == "search_tools"
+                else "正在查询🔎。"
+            )
         message.content = [
             {
                 "type": "reasoning",
@@ -25,7 +32,7 @@ class SummaryModel(InteractionModel):
             },
             {
                 "type": "text",
-                "text": "正在查询🔎。" if message.tool_calls else message.content,
+                "text": text,
             },
         ]
         return result
@@ -148,13 +155,16 @@ class AguiTests(unittest.TestCase):
         self.assertIn("核对当前账号", "".join(summaries))
         self.assertNotIn("核对当前账号", self.snapshot(stream)["content"])
         run = self.snapshot(stream)
-        preface = "正在查询🔎。"
+        discovery = "先查找工具。"
+        preface = discovery + "正在查询🔎。"
         self.assertEqual(run["content"], preface + "操作已完成")
         self.assertEqual(
             [(entry["kind"], entry["answer_offset"]) for entry in run["workflow"]],
             [
                 ("step", 0),
                 ("model", 0),
+                ("step", len(discovery)),
+                ("model", len(discovery)),
                 ("tool", len(preface)),
                 ("model", len(preface)),
             ],

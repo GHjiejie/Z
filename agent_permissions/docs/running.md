@@ -175,7 +175,7 @@ uv run uvicorn agent_permissions.main:app --host 127.0.0.1 --port 8000 --no-prox
 ## 6. 验证
 
 ```bash
-uv run python -m unittest api_tools.test_tools agent_permissions.test_tools agent_permissions.test_chat_model agent_permissions.test_chat_api agent_permissions.test_tracing agent_permissions.test_api agent_permissions.test_rbac agent_permissions.test_console agent_permissions.test_connection_pool.PoolConfigurationTests agent_permissions.test_connection_pool.DatabaseLifecycleTests -v
+make -C agent_permissions test-python
 uv run ruff check api_tools agent_permissions
 uv run ruff format --check api_tools agent_permissions
 ```

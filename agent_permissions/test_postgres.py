@@ -20,6 +20,7 @@ from agent_permissions import (
     test_api,
     test_hitl,
     test_rbac,
+    test_tool_discovery,
 )
 from agent_permissions.__main__ import main as cli_main
 from agent_permissions.api import create_app
@@ -96,6 +97,13 @@ class PostgresHitlTests(PostgresFixture, test_hitl.HitlTests):
     TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
 )
 class PostgresAguiTests(PostgresFixture, test_agui.AguiTests):
+    pass
+
+
+@unittest.skipUnless(
+    TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
+)
+class PostgresDiscoveryTests(PostgresFixture, test_tool_discovery.DiscoveryTests):
     pass
 
 

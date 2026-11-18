@@ -22,6 +22,7 @@ from agent_permissions.config import Settings
 from agent_permissions.models import UserCreate
 from agent_permissions.service import RequestInfo
 from agent_permissions.test_support import grant_tools
+from agent_permissions.tool_discovery import SEARCH_NAME
 from agent_permissions.tracing import ChatTracing, TracingSettings
 
 USAGE = {"input_tokens": 10, "output_tokens": 2, "total_tokens": 12}
@@ -51,7 +52,18 @@ class BusinessModel(BaseChatModel):
             raise self.failure
         if self.mode == "echo":
             response = AIMessage(content=messages[-1].content, usage_metadata=USAGE)
-        elif isinstance(messages[-1], ToolMessage):
+        elif not isinstance(messages[-1], ToolMessage):
+            query = {"create": "role.create", "list": "user.list"}.get(
+                self.mode, "user.self.read"
+            )
+            response = AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "call_search", "name": SEARCH_NAME, "args": {"query": query}}
+                ],
+                usage_metadata=USAGE,
+            )
+        elif messages[-1].name != SEARCH_NAME:
             tool = messages[-1]
             if tool.status == "error":
                 try:
@@ -67,6 +79,8 @@ class BusinessModel(BaseChatModel):
                 else:
                     text = result["body"]["data"]["username"]
             response = AIMessage(content=text, usage_metadata=USAGE)
+        elif not json.loads(messages[-1].content).get("tools"):
+            response = AIMessage(content="没有匹配的可用工具", usage_metadata=USAGE)
         else:
             if self.on_first_call:
                 self.on_first_call()
@@ -165,12 +179,16 @@ class OpenAIChatTests(unittest.TestCase):
         self.assertEqual(result.choices[0].message.content, "admin")
         self.assertEqual(result.choices[0].finish_reason, "stop")
         self.assertIsNone(result.choices[0].message.tool_calls)
-        self.assertEqual(result.usage.total_tokens, 24)
+        self.assertEqual(result.usage.total_tokens, 36)
         self.assertTrue(result._request_id.startswith("req_"))
         self.assertEqual(self.factory_calls, 1)
         self.assertEqual(self.model.options[-1]["max_tokens"], 256)
         self.assertEqual(self.model.options[-1]["temperature"], 0.2)
-        self.assertNotIn("agent_users_auth_login", self.model.tool_names[0])
+        self.assertEqual(self.model.tool_names[0], [SEARCH_NAME])
+        self.assertEqual(
+            set(self.model.tool_names[1]),
+            {SEARCH_NAME, "agent_users_user_self_read", "request_tool_input"},
+        )
 
     def test_stream_sdk_decodes_deltas_finish_and_usage(self) -> None:
         stream = self.sdk.chat.completions.create(
@@ -189,7 +207,7 @@ class OpenAIChatTests(unittest.TestCase):
         )
         self.assertEqual(chunks[-2].choices[0].finish_reason, "stop")
         self.assertEqual(chunks[-1].choices, [])
-        self.assertEqual(chunks[-1].usage.total_tokens, 24)
+        self.assertEqual(chunks[-1].usage.total_tokens, 36)
         self.assertEqual(len({chunk.id for chunk in chunks}), 1)
         self.assertEqual({chunk.object for chunk in chunks}, {"chat.completion.chunk"})
         raw = self.http.post(
@@ -239,7 +257,7 @@ class OpenAIChatTests(unittest.TestCase):
         denied = self.sdk_for(member).chat.completions.create(
             model="fixture-model", messages=[{"role": "user", "content": "创建角色"}]
         )
-        self.assertEqual(denied.choices[0].message.content, "PERMISSION_DENIED")
+        self.assertEqual(denied.choices[0].message.content, "没有匹配的可用工具")
         with self.app.state.database.transaction() as connection:
             self.assertIsNone(
                 connection.execute(
@@ -301,7 +319,8 @@ class OpenAIChatTests(unittest.TestCase):
             model="fixture-model", messages=[{"role": "user", "content": "列出用户"}]
         )
         self.assertEqual(result.choices[0].message.content, "PERMISSION_DENIED")
-        self.assertIn("agent_users_user_list", self.model.tool_names[0])
+        self.assertEqual(self.model.tool_names[0], [SEARCH_NAME])
+        self.assertIn("agent_users_user_list", self.model.tool_names[1])
 
     def test_no_delegated_tools_still_supports_normal_and_streaming_chat(self):
         headers = {"Authorization": "Bearer " + self.token}
@@ -342,7 +361,7 @@ class OpenAIChatTests(unittest.TestCase):
             ),
             "你好",
         )
-        self.assertTrue(all(not names for names in self.model.tool_names))
+        self.assertTrue(all(names == [SEARCH_NAME] for names in self.model.tool_names))
         self.assertTrue(
             all(
                 "当前可用业务工具数量为 0" in prompt

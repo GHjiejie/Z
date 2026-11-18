@@ -24,6 +24,7 @@ from agent_permissions.hitl_checkpoint import DatabaseCheckpointer
 from agent_permissions.hitl_runtime import safe_model_message
 from agent_permissions.models import UserCreate
 from agent_permissions.test_support import grant_tools
+from agent_permissions.tool_discovery import SEARCH_NAME
 from agent_permissions.tracing import ChatTracing, TracingSettings
 
 
@@ -113,7 +114,18 @@ class InteractionModel(BaseChatModel):
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
         self.recorded.append(repr(messages))
-        if isinstance(messages[-1], ToolMessage):
+        if not isinstance(messages[-1], ToolMessage):
+            reply = AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "name": SEARCH_NAME,
+                        "args": {"query": self.operation},
+                        "id": "discover_one",
+                    }
+                ],
+            )
+        elif messages[-1].name != SEARCH_NAME:
             if self.fail_after_tool:
                 raise RuntimeError("offline-failure")
             result = json.loads(messages[-1].content)
@@ -296,7 +308,7 @@ class HitlTests(unittest.TestCase):
         values = {"/body/display_name": "人工修改的名称"}
         done = self.final(self.submit(run, values=values))
         self.assertEqual(done["status"], "completed")
-        self.assertEqual(done["usage"]["total_tokens"], 24)
+        self.assertEqual(done["usage"]["total_tokens"], 36)
         self.assertEqual(done["executions"][0]["status"], "succeeded")
         self.assertEqual(
             self.client.get("/api/v1/roles/new_role", headers=self.headers).json()[
@@ -403,6 +415,9 @@ class HitlTests(unittest.TestCase):
             ),
         ]
         requests = []
+        search_call = function_call(
+            "search", SEARCH_NAME, json.dumps({"query": "user.self.read user.create"})
+        )
 
         def respond(request):
             self.assertEqual(request.url.path, "/v1/responses")
@@ -415,7 +430,7 @@ class HitlTests(unittest.TestCase):
                 "content": [
                     {
                         "type": "output_text",
-                        "text": "核对资料" if len(requests) == 1 else "已完成",
+                        "text": "核对资料" if len(requests) == 2 else "已完成",
                         "annotations": [],
                     }
                 ],
@@ -426,7 +441,9 @@ class HitlTests(unittest.TestCase):
                 "created_at": 1,
                 "model": "hitl-fixture",
                 "status": "completed",
-                "output": [message, *calls] if len(requests) == 1 else [message],
+                "output": {1: [search_call], 2: [message, *calls]}.get(
+                    len(requests), [message]
+                ),
             }
             self.assertEqual(requests[-1].get("stream", False), streaming)
             return (
@@ -457,16 +474,42 @@ class HitlTests(unittest.TestCase):
         self.assertEqual(
             [e["status"] for e in done["executions"]], ["succeeded", "succeeded"]
         )
-        self.assertEqual(len(requests), 2)
+        self.assertEqual(len(requests), 3)
+        self.assertEqual([t["name"] for t in requests[0]["tools"]], [SEARCH_NAME])
+        for request in requests[1:]:
+            offered = {tool["name"]: tool for tool in request["tools"]}
+            self.assertEqual(
+                set(offered),
+                {
+                    SEARCH_NAME,
+                    "agent_users_user_self_read",
+                    "agent_users_user_create",
+                    "request_tool_input",
+                },
+            )
+            self.assertEqual(
+                offered["request_tool_input"]["parameters"]["properties"][
+                    "operation_id"
+                ]["enum"],
+                ["user.self.read", "user.create"],
+            )
         replay = requests[-1]["input"]
         forwarded = [item for item in replay if item["type"] == "function_call"]
         self.assertEqual(
             [(c["id"], c["call_id"]) for c in forwarded],
-            [("fc_read", "call_read"), ("fc_form", "call_form")],
+            [
+                ("fc_search", "call_search"),
+                ("fc_read", "call_read"),
+                ("fc_form", "call_form"),
+            ],
         )
         self.assertEqual(
             [json.loads(c["arguments"]) for c in forwarded],
-            [{}, {"operation_id": "user.create", "arguments": {"body": body}}],
+            [
+                {"query": "user.self.read user.create"},
+                {},
+                {"operation_id": "user.create", "arguments": {"body": body}},
+            ],
         )
         self.assertEqual(
             [
@@ -474,7 +517,7 @@ class HitlTests(unittest.TestCase):
                 for item in replay
                 if item["type"] == "function_call_output"
             ],
-            ["call_read", "call_form"],
+            ["call_search", "call_read", "call_form"],
         )
         self.assertIn("核对资料", repr(replay))
         checkpoints = list(
@@ -496,17 +539,34 @@ class HitlTests(unittest.TestCase):
             self.assertEqual(stored["interaction"]["id"], run["interaction"]["id"])
             done = self.final(self.submit(stored, client=restarted))
             self.assertEqual(done["status"], "completed")
-            self.assertEqual(len(self.model.recorded), 2)
+            self.assertEqual(len(self.model.recorded), 3)
 
     def test_resuming_a_legacy_checkpoint_cleans_future_messages_and_checkpoints(self):
         run = self.start()
         saver = DatabaseCheckpointer(self.app.state.database)
         config = {"configurable": {"thread_id": run["id"]}}
         saved = saver.get_tuple(config)
-        message = next(
+        # Runs paused before discovery was introduced have none of these state channels.
+        channels = saved.checkpoint["channel_values"]
+        for name in (
+            "candidate_ids",
+            "candidate_revision",
+            "bound_ids",
+            "bound_revision",
+        ):
+            channels.pop(name, None)
+            saved.checkpoint["channel_versions"].pop(name, None)
+        channels["messages"] = [
             m
-            for m in saved.checkpoint["channel_values"]["messages"]
-            if isinstance(m, AIMessage)
+            for m in channels["messages"]
+            if not (isinstance(m, ToolMessage) and m.name == SEARCH_NAME)
+            and not (
+                isinstance(m, AIMessage)
+                and any(c["name"] == SEARCH_NAME for c in m.tool_calls)
+            )
+        ]
+        message = next(
+            m for m in channels["messages"] if isinstance(m, AIMessage) and m.tool_calls
         )
         call = message.tool_calls[0]
         legacy_secret = "legacy-model-private"
@@ -521,7 +581,11 @@ class HitlTests(unittest.TestCase):
         ]
         saver.put(saved.parent_config or config, saved.checkpoint, saved.metadata, {})
         self.assertIn(legacy_secret, repr(saver.get_tuple(config)))
-        self.assertEqual(self.final(self.submit(run))["status"], "completed")
+        done = self.final(self.submit(run))
+        self.assertEqual(done["status"], "completed")
+        self.assertEqual(
+            [item["operation_id"] for item in done["executions"]], ["role.create"]
+        )
         self.assertNotIn(legacy_secret, repr(self.model.recorded))
         newer = [
             item
@@ -665,7 +729,7 @@ class HitlTests(unittest.TestCase):
         run = self.start(conversation="one", request_id="one")
         replay = self.start(conversation="one", request_id="one")
         self.assertEqual(run["id"], replay["id"])
-        self.assertEqual(len(self.model.recorded), 1)
+        self.assertEqual(len(self.model.recorded), 2)
         response = self.client.post(
             "/api/v1/chat/runs",
             headers=self.headers,

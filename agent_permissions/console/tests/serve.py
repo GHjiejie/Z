@@ -12,8 +12,8 @@ from uuid import uuid4
 import uvicorn
 from fastapi import Request
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessageChunk
-from langchain_core.outputs import ChatGenerationChunk
+from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
+from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
 from starlette.responses import StreamingResponse
 
 from agent_permissions.agui import AguiContext, encode_agui
@@ -25,6 +25,7 @@ from agent_permissions.service import Authority, RequestInfo
 from agent_permissions.test_chat_api import BusinessModel
 from agent_permissions.test_hitl import InteractionModel
 from agent_permissions.test_support import grant_tools
+from agent_permissions.tool_discovery import SEARCH_NAME
 from agent_permissions.tooling import execution_context
 from agent_permissions.tracing import ChatTracing, TracingSettings
 
@@ -39,7 +40,7 @@ class ConsoleModel(BusinessModel):
             (str(item.content) for item in reversed(messages) if item.type == "human"),
             "",
         )
-        if prompt.startswith("AGUI "):
+        if prompt.startswith("AGUI ") and kwargs.get("bound_names") != [SEARCH_NAME]:
             for summary in ("先核对当前账号权限。", "再查询当前账号资料。"):
                 yield ChatGenerationChunk(
                     message=AIMessageChunk(
@@ -63,6 +64,21 @@ class ConsoleModel(BusinessModel):
             (str(item.content) for item in reversed(messages) if item.type == "human"),
             "",
         )
+        if prompt == "当前账号有哪些工具？":
+            if isinstance(messages[-1], ToolMessage):
+                directory = json.loads(messages[-1].content)
+                titles = "、".join(item["title"] for item in directory["tools"])
+                reply = AIMessage(
+                    content=f"当前账号可用 {directory['total']} 个业务工具。第一页包括{titles}。"
+                )
+            else:
+                reply = AIMessage(
+                    content="",
+                    tool_calls=[
+                        {"name": SEARCH_NAME, "args": {"query": ""}, "id": "directory"}
+                    ],
+                )
+            return ChatResult(generations=[ChatGeneration(message=reply)])
         if prompt.startswith("HITL "):
             kind = prompt.split(" ")[1]
             fixture = InteractionModel(model_name="fixture-model")
@@ -93,7 +109,7 @@ class ConsoleModel(BusinessModel):
                 }
             return fixture._generate(messages, stop, run_manager, **kwargs)
         result = super()._generate(messages, stop, run_manager, **kwargs)
-        if prompt.startswith("AGUI "):
+        if prompt.startswith("AGUI ") and kwargs.get("bound_names") != [SEARCH_NAME]:
             reply = result.generations[0].message
             reply.content = (
                 "我先核对 🔎 **当前账号**。"
