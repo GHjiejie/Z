@@ -12,6 +12,7 @@
 - [可配置 RBAC](docs/rbac.md)：数据模型、角色管理接口、授权边界和旧数据库迁移。
 - [API Agent 工具](docs/agent-tools.md)：工具生成、发现与调用、LangChain 适配、版本绑定和自动同步检查。
 - [用户级 Agent 工具授权](docs/user-agent-tool-grants.md)：用户页面配置、独立授权存储、角色变更保留设置和执行时 RBAC 校验；附[改造方案与架构图](docs/user-agent-tool-grants-plan.md)。
+- Agent 操作审计按业务调用关联操作者、当时的授权、HITL 确认和业务结果。[查询接口与部署](docs/agent-operation-audit.md) · [方案与架构图](docs/agent-operation-audit-design.md)
 - [项目独立模型配置](docs/model.md)：本目录专用的 Responses API 客户端、供应商配置及 Agent 接入示例。
 - [OpenAI 兼容 Chat 接口](docs/chat-api.md)：OpenAI SDK 对话、流式响应、自动业务工具执行和会话鉴权。
 - [Agent 按需发现工具的方案与架构图](docs/tool-discovery.md)说明首轮绑定、按账号列目录、搜索候选和执行时的权限校验。

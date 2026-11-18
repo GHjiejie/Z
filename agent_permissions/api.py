@@ -21,6 +21,7 @@ from starlette.concurrency import run_in_threadpool
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse
 
+from agent_permissions import audit_http
 from agent_permissions.audit_delivery import AuditDelivery
 from agent_permissions.audit_service import mount_audit_api
 from agent_permissions.config import Settings
@@ -109,7 +110,10 @@ class ContractRoute(APIRoute):
                 raise invalid_field("Content-Type", "请求体必须使用 application/json")
             return await handler(request)
 
-        return enforce_contract
+        async def audited(request: Request) -> Response:
+            return await audit_http.business(request, enforce_contract, self.name)
+
+        return audited
 
 
 bearer = HTTPBearer(auto_error=False)
@@ -486,6 +490,7 @@ def error_response(
     request: Request, error: ApiError, *, audit_failure: bool = True
 ) -> JSONResponse:
     info = request.state.info
+    request.state.audit_reason = error.code
     if request.url.path.startswith("/v1/"):
         from agent_permissions.chat_api import compatible_error
 
@@ -575,7 +580,12 @@ def create_app(
             f"req_{uuid4().hex}", request.client.host if request.client else "unknown"
         )
         try:
-            response = await call_next(request)
+            if request.method == "POST" and request.url.path == "/agent-tools/call":
+                response = await audit_http.gateway(request, call_next)
+            else:
+                response = await call_next(request)
+        except ApiError as error:
+            response = await run_in_threadpool(error_response, request, error)
         except Exception:  # noqa: BLE001 -- final HTTP boundary must redact all errors
             # Keep framework exception strings and request inputs out of errors.
             response = await run_in_threadpool(
@@ -596,9 +606,18 @@ def create_app(
         return error_response(request, error)
 
     @app.exception_handler(RequestValidationError)
-    def validation_error(
+    async def validation_error(
         request: Request, error: RequestValidationError
     ) -> JSONResponse:
+        route_name = getattr(request.scope.get("route"), "name", "")
+        if route_name in {
+            "chat.interactions.resume",
+            "chat.interactions.refresh",
+            "chat.interactions.options",
+        }:
+            from agent_permissions.hitl_api import invalid_interaction
+
+            await invalid_interaction(request, route_name.rsplit(".", 1)[1])
         details = [
             {
                 "field": ".".join(str(part) for part in item["loc"]),
@@ -606,7 +625,8 @@ def create_app(
             }
             for item in error.errors()
         ]
-        return error_response(
+        return await run_in_threadpool(
+            error_response,
             request,
             ApiError(422, "VALIDATION_ERROR", "请求参数不符合要求", details=details),
         )

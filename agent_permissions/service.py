@@ -15,6 +15,7 @@ from uuid import uuid4
 import psycopg
 from pydantic import ValidationError
 
+from agent_permissions import audit
 from agent_permissions.agent_grants import config_view, grants_for, save_changes
 from agent_permissions.config import Settings
 from agent_permissions.errors import ApiError, invalid_field
@@ -149,13 +150,14 @@ class UserService:
         outcome: str = "success",
         reason: str | None = None,
         changes: dict | None = None,
-    ) -> None:
+    ) -> str:
+        event_id = f"evt_{uuid4().hex}"
         connection.execute(
             """INSERT INTO audit_events
             (id,actor_user_id,target_user_id,action,outcome,reason_code,
              request_id,source,changes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)""",
             (
-                f"evt_{uuid4().hex}",
+                event_id,
                 info.actor_user_id,
                 target,
                 action,
@@ -167,6 +169,12 @@ class UserService:
                 timestamp(self.clock()),
             ),
         )
+
+        if outcome == "success":
+            audit.business_audit(
+                action, event_id, target, changes or {}, info.actor_user_id
+            )
+        return event_id
 
     def authorize_audit(self, authority, info):
         with self.database.transaction(write=True) as conn:
@@ -228,6 +236,18 @@ class UserService:
         if permission:
             policy = operation_spec(permission)
             granted = set(permissions_for(connection, user["id"]))
+            call = audit.active.get()
+            if call and call.stage == "business":
+                call.identify(user["id"])
+                call.checks.append(
+                    audit.rbac_check(
+                        "business",
+                        policy.all_permissions,
+                        policy.any_permissions,
+                        granted,
+                        roles_for(connection, user["id"]),
+                    )
+                )
             if not set(policy.all_permissions) <= granted or (
                 policy.any_permissions and not set(policy.any_permissions) & granted
             ):
@@ -248,6 +268,12 @@ class UserService:
         """Read current RBAC and delegation for one authenticated subject."""
         with self.database.transaction() as connection:
             user = self._authorize(connection, authority, info, None)
+            call = audit.active.get()
+            if call is not None:
+                if call.fields.get("operation_id") != "auth.login":
+                    call.identify(user["id"])
+                if operation := call.fields.get("operation_id"):
+                    call.grant = audit.grant_snapshot(connection, user, operation)
             return (
                 frozenset(permissions_for(connection, user["id"])),
                 frozenset(
@@ -286,8 +312,17 @@ class UserService:
                     now=timestamp(self.clock()),
                 )
                 if changes:
-                    self._audit(
+                    event_id = self._audit(
                         connection, info, operation, user_id, changes={"tools": changes}
+                    )
+                    audit.grant_changes(
+                        self,
+                        connection,
+                        info,
+                        user_id,
+                        target["agent_tools_version"] + 1,
+                        changes,
+                        event_id,
                     )
                 target = self._target(connection, user_id)
             return config_view(connection, target, snapshot, can_manage=can_manage)
@@ -299,6 +334,9 @@ class UserService:
         ).fetchone()
         if not user:
             raise ApiError(404, "USER_NOT_FOUND", "用户不存在或已删除")
+        call = audit.active.get()
+        if call and call.stage == "business":
+            call.fields["target_id"] = user["id"]
         return user
 
     @staticmethod
@@ -353,7 +391,15 @@ class UserService:
             ) from None
         assign_roles(connection, user_id, payload.roles)
         self._audit(
-            connection, info, "user.create", user_id, changes={"roles": payload.roles}
+            connection,
+            info,
+            "user.create",
+            user_id,
+            changes={
+                "roles": payload.roles,
+                "fields": ["username", "display_name", "roles"]
+                + (["email"] if payload.email is not None else []),
+            },
         )
         return public_user(connection, self._target(connection, user_id))
 
@@ -421,6 +467,7 @@ class UserService:
             )
             info.actor_user_id = user["id"]
             self._audit(connection, info, "auth.login", user["id"])
+            audit.committed(connection)
             return {
                 "session_token": token,
                 "token_type": "Bearer",
@@ -770,7 +817,20 @@ class UserService:
     def _check_grants(
         connection: Connection, actor: Mapping[str, Any], permissions: list[str]
     ) -> None:
-        if not set(permissions) <= set(permissions_for(connection, actor["id"])):
+        granted = set(permissions_for(connection, actor["id"]))
+        call = audit.active.get()
+        if call and call.stage == "business":
+            call.checks.append(
+                audit.rbac_check(
+                    "business",
+                    permissions,
+                    [],
+                    granted,
+                    roles_for(connection, actor["id"]),
+                    check="grant_scope",
+                )
+            )
+        if not set(permissions) <= granted:
             raise ApiError(
                 403, "PERMISSION_DENIED", "不能授予或管理超出自身权限范围的授权"
             )
@@ -885,7 +945,16 @@ class UserService:
                 info,
                 operation,
                 None,
-                changes={"role_code": code, "permissions": selected},
+                changes={
+                    "role_code": code,
+                    "permissions": selected,
+                    "fields": [
+                        key
+                        for key in ("display_name", "description", "permissions")
+                        if key in payload and (old is None or payload[key] != old[key])
+                    ]
+                    + (["version"] if old is not None else []),
+                },
             )
             return record_execution(
                 connection, role_record(connection, code), self.clock().timestamp()

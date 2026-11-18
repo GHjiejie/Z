@@ -19,6 +19,7 @@ from langgraph.types import Command, interrupt
 from langsmith import traceable
 from starlette.concurrency import run_in_threadpool
 
+from agent_permissions import audit
 from agent_permissions.agent_grants import _label
 from agent_permissions.chat_model import MODEL_TIMEOUT_ERRORS
 from agent_permissions.errors import ApiError
@@ -102,7 +103,10 @@ async def available_tools(request: Request) -> tuple[dict, list[dict]]:
 async def require_tool(
     request: Request, operation: str, revision: str | None = None
 ) -> tuple[dict, dict]:
-    snapshot, allowed = await available_tools(request)
+    snapshot = request.app.state.tool_registry.snapshot()
+    context, operations = await _execution_access(request)
+    if not context.authenticated:
+        raise ApiError(401, "UNAUTHENTICATED", "请重新登录")
     tool = next(
         (
             item
@@ -115,11 +119,17 @@ async def require_tool(
         raise ApiError(404, "TOOL_UNAVAILABLE", "工具已下线，请重新发起任务")
     if revision is not None and revision != snapshot["bundleDigest"]:
         raise ApiError(409, "TOOL_VERSION_MISMATCH", "工具定义已变化，请重新准备并确认")
-    if tool not in allowed:
-        _, operations = await _execution_access(request)
-        if operation not in operations:
-            raise ApiError(403, "TOOL_NOT_GRANTED", "当前用户未允许 Agent 使用此工具")
+    call = audit.active.get()
+    if call:
+        audit.tool_checks(call, tool, context, operations)
+    if operation not in operations:
+        raise ApiError(403, "TOOL_NOT_GRANTED", "当前用户未允许 Agent 使用此工具")
+    if tool["binding"]["policy"]["authentication"] != "session" or not permitted(
+        tool["binding"]["policy"], set(context.permissions), authenticated=True
+    ):
         raise ApiError(403, "PERMISSION_DENIED", "当前账号缺少业务权限")
+    if call:
+        await call.emit("permission.checked")
     if (
         tool["binding"]["policy"]["effect"] != "read"
         and operation not in TRANSACTIONAL_OPERATIONS
@@ -396,6 +406,19 @@ async def build_graph(
                 continue
             selected = selected_tool(candidates, call)
             operation = selected["binding"]["operationId"] if selected else ""
+            requested = audit.runtime_call(
+                request,
+                run,
+                f"{state['turns'] + 1}:{index}:{call['id']}",
+                selected or selected_tool(snapshot["tools"], call),
+                snapshot["bundleDigest"],
+            )
+            requested.requested_target(
+                call["args"].get("arguments")
+                if call["name"] == PREPARE_NAME
+                else call["args"]
+            )
+            await requested.emit("requested", fact="requested")
             await progress(
                 {
                     "id": f"tool:{state['turns'] + 1}:{index}:{call['id']}",
@@ -503,6 +526,22 @@ async def build_graph(
             ],
             call,
         )
+        evidence = audit.runtime_call(
+            request,
+            run,
+            call_key,
+            selected or selected_tool(snapshot["tools"], call),
+            snapshot["bundleDigest"],
+        )
+        with audit.scope(evidence):
+            await evidence.emit("attempt.started")
+            return await execute_call(
+                state, call, call_key, entry_id, snapshot, bound_ids, selected, evidence
+            )
+
+    async def execute_call(
+        state, call, call_key, entry_id, snapshot, bound_ids, selected, evidence
+    ):
         operation_hint = selected["binding"]["operationId"] if selected else ""
         await progress(
             {
@@ -535,6 +574,11 @@ async def build_graph(
                         or decision.get("interaction_id") != previous["id"]
                     ):
                         raise ApiError(409, "INTERACTION_REQUIRED", "确认上下文不匹配")
+                await evidence.emit(
+                    "receipt.reconciled",
+                    execution_id=committed["id"],
+                    interaction_id=previous["id"] if previous else None,
+                )
                 original = next(
                     (
                         tool
@@ -675,6 +719,9 @@ async def build_graph(
                     fingerprint,
                     interaction["id"] if interaction else None,
                 )
+                evidence.fields["execution_id"] = execution["id"]
+                if interaction:
+                    evidence.fields["interaction_id"] = interaction["id"]
                 context = ConfirmedExecution(
                     execution["id"],
                     run["user_id"],
@@ -711,6 +758,10 @@ async def build_graph(
                             value = saved_result(
                                 committed, tool, snapshot["bundleDigest"]
                             )
+                            if value is not None and committed["status"] == "succeeded":
+                                await evidence.emit(
+                                    "receipt.reconciled", execution_id=committed["id"]
+                                )
                             if value is None:
                                 raise ApiError(
                                     502,
@@ -752,6 +803,7 @@ async def build_graph(
                 "index": state["index"] + 1,
             }
         except ApiError as error:
+            await evidence.reject(error, control=False)
             await progress(
                 {
                     "id": entry_id,

@@ -5,6 +5,7 @@ import os
 import tempfile
 import unittest
 from contextlib import closing, redirect_stdout
+from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -18,6 +19,7 @@ from agent_permissions import (
     test_agent_grants,
     test_agui,
     test_api,
+    test_audit,
     test_hitl,
     test_rbac,
     test_tool_discovery,
@@ -34,23 +36,26 @@ from agent_permissions.test_support import grant_tools
 TEST_URL = os.getenv("AGENT_USERS_TEST_DATABASE_URL")
 
 
+AUDIT_TEST_URL = os.getenv("AGENT_AUDIT_TEST_DATABASE_URL")
+
+
 class PostgresFixture:
-    def settings_for(self, path: Path) -> Settings:
+    def isolated_url(self, base_url):
         schema = f"test_agent_users_{uuid4().hex}"
-        with psycopg.connect(TEST_URL, autocommit=True) as connection:
+        with psycopg.connect(base_url, autocommit=True) as connection:
             connection.execute(
                 sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(schema))
             )
 
         def cleanup() -> None:
-            with psycopg.connect(TEST_URL, autocommit=True) as connection:
+            with psycopg.connect(base_url, autocommit=True) as connection:
                 connection.execute(
                     sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema))
                 )
 
         self.addCleanup(cleanup)
-        parts = urlsplit(TEST_URL)
-        url = urlunsplit(
+        parts = urlsplit(base_url)
+        return urlunsplit(
             parts._replace(
                 query=urlencode(
                     [
@@ -60,8 +65,25 @@ class PostgresFixture:
                 )
             )
         )
+
+    def settings_for(self, path: Path) -> Settings:
         return Settings(
-            database_path=path, database_url=url, db_pool_min_size=1, db_pool_max_size=2
+            database_path=path,
+            database_url=self.isolated_url(TEST_URL),
+            db_pool_min_size=1,
+            db_pool_max_size=2,
+        )
+
+
+@unittest.skipUnless(
+    TEST_URL and AUDIT_TEST_URL,
+    "Set both disposable business and audit PostgreSQL URLs",
+)
+class PostgresAuditTests(PostgresFixture, test_audit.AuditTests):
+    def settings_for(self, path):
+        return replace(
+            super().settings_for(path),
+            audit_database_url=self.isolated_url(AUDIT_TEST_URL),
         )
 
 
@@ -310,6 +332,8 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
             run = [event["run"] for event in events(response) if "run" in event][-1]
             self.assertEqual(run["status"], "waiting")
         report = migrate(self.path, self.target)
+        self.assertGreater(report["tables"]["agent_audit_outbox"]["rows"], 0)
+        self.assertGreater(report["tables"]["agent_audit_call_refs"]["rows"], 0)
         self.assertGreater(report["tables"]["agent_checkpoints"]["rows"], 0)
         settings = Settings(
             database_path=self.path, database_url=self.target.database_url

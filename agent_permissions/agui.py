@@ -10,6 +10,7 @@ from ag_ui.encoder import EventEncoder
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from agent_permissions import audit
 from agent_permissions.chat_api import CHAT_METADATA, _cached_model
 from agent_permissions.errors import ApiError
 
@@ -223,7 +224,14 @@ def mount_agui_api(app: FastAPI, *, start, resume, recover) -> None:
 
         from agent_permissions.hitl_api import InteractionSubmission, RunRequest, owner
 
-        user_id = await owner(request)
+        try:
+            user_id = await owner(request)
+        except ApiError as error:
+            if isinstance(
+                payload.forwarded_props, dict
+            ) and payload.forwarded_props.get("action") in {"resume", "recover"}:
+                await audit.detached_rejection(request, error)
+            raise
         if (
             not payload.thread_id
             or len(payload.thread_id) > 128
@@ -246,9 +254,13 @@ def mount_agui_api(app: FastAPI, *, start, resume, recover) -> None:
             run_id = props.get("businessRunId")
             if not isinstance(run_id, str):
                 raise ApiError(422, "VALIDATION_ERROR", "缺少服务端任务标识")
-            run = await run_in_threadpool(app.state.run_store.raw, run_id, user_id)
-            if run["conversation_id"] != payload.thread_id:
-                raise ApiError(409, "AGUI_THREAD_MISMATCH", "任务不属于当前会话")
+            try:
+                run = await run_in_threadpool(app.state.run_store.raw, run_id, user_id)
+                if run["conversation_id"] != payload.thread_id:
+                    raise ApiError(409, "AGUI_THREAD_MISMATCH", "任务不属于当前会话")
+            except ApiError as error:
+                await audit.detached_rejection(request, error)
+                raise
             if action == "recover":
                 if payload.resume:
                     raise ApiError(

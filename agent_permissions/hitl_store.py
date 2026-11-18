@@ -11,6 +11,7 @@ from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
+from agent_permissions import audit as operation_audit
 from agent_permissions.config import Settings
 from agent_permissions.errors import ApiError
 from agent_permissions.storage import Connection, DatabaseBackend
@@ -81,6 +82,59 @@ class RunStore:
             ),
         )
 
+    def interaction_evidence(self, conn, run, item, kind):
+        call = operation_audit.active.get()
+        if (
+            call is None
+            or call.fields.get("run_id") != run["id"]
+            or call.key != hashlib.sha256(item["call_key"].encode()).hexdigest()
+        ):
+            call = operation_audit.Call(
+                self.database,
+                self.clock,
+                "chat_runs",
+                {
+                    "purpose": "operation",
+                    "run_id": run["id"],
+                    "agent_id": "agent_permissions.chat",
+                    "subject_user_id": run["user_id"],
+                },
+            )
+            operation_audit.identify_run_call(call, run["id"], item["call_key"])
+        details = {"interaction_id": item["id"], "operation_id": item["operation_id"]}
+        details["interaction_version"] = dict(item).get("version", 1)
+        target = dict(item).get("target")
+        if target and (target.get("id") or target.get("code")):
+            details["target_id"] = target.get("id") or target["code"]
+        if kind == "confirmed":
+            details["confirmed_by_user_id"] = run["user_id"]
+        if kind in {"cancelled", "confirmed"}:
+            details["actor_user_id"] = run["user_id"]
+        call.write(conn, kind, fact=kind + ":" + item["id"], **details)
+
+    def close_unstarted_calls(self, connection, run, kind):
+        rows = connection.execute(
+            """SELECT call_id,entrypoint FROM agent_audit_call_refs
+            WHERE run_id=? AND call_key IS NOT NULL AND state IN ('requested','waiting','confirmed')""",
+            (run["id"],),
+        ).fetchall()
+        for row in rows:
+            call = operation_audit.Call(
+                self.database,
+                self.clock,
+                row["entrypoint"],
+                {
+                    "purpose": "operation",
+                    "run_id": run["id"],
+                    "subject_user_id": run["user_id"],
+                    "agent_id": "agent_permissions.chat",
+                },
+                call_id=row["call_id"],
+            )
+            if kind == "cancelled":
+                call.identify(run["user_id"])
+            call.write(connection, kind, fact="run." + kind)
+
     @staticmethod
     def _owned(connection: Connection, run_id: str, user_id: str) -> dict:
         row = connection.execute(
@@ -93,19 +147,34 @@ class RunStore:
     def cleanup(self) -> None:
         now = self.now()
         with self.database.transaction(write=True) as connection:
-            connection.execute(
-                "UPDATE agent_chat_runs SET status='expired',lease_token=NULL,version=version+1 WHERE status IN ('running','waiting','interrupted') AND expires_at<=?",
+            expired = connection.execute(
+                "UPDATE agent_chat_runs SET status='expired',lease_token=NULL,version=version+1 WHERE status IN ('running','waiting','interrupted') AND expires_at<=? RETURNING id,user_id",
                 (now,),
-            )
+            ).fetchall()
+            for item in connection.execute(
+                """SELECT i.*,r.user_id FROM agent_interactions i
+                JOIN agent_chat_runs r ON r.id=i.run_id WHERE i.status='pending' AND i.expires_at<=?""",
+                (now,),
+            ).fetchall():
+                self.interaction_evidence(
+                    connection,
+                    {"id": item["run_id"], "user_id": item["user_id"]},
+                    item,
+                    "expired",
+                )
             connection.execute(
                 "UPDATE agent_interactions SET status='expired' WHERE status='pending' AND expires_at<=?",
                 (now,),
             )
-            connection.execute(
-                """UPDATE agent_chat_runs SET status='expired' WHERE status='waiting' AND EXISTS
+            expired.extend(
+                connection.execute(
+                    """UPDATE agent_chat_runs SET status='expired' WHERE status='waiting' AND EXISTS
                 (SELECT 1 FROM agent_interactions i WHERE i.run_id=agent_chat_runs.id AND i.status='expired')
-                AND NOT EXISTS (SELECT 1 FROM agent_interactions i WHERE i.run_id=agent_chat_runs.id AND i.status='pending')"""
+                AND NOT EXISTS (SELECT 1 FROM agent_interactions i WHERE i.run_id=agent_chat_runs.id AND i.status='pending') RETURNING id,user_id"""
+                ).fetchall()
             )
+            for run in expired:
+                self.close_unstarted_calls(connection, run, "expired")
             connection.execute(
                 "UPDATE agent_chat_runs SET status=CASE WHEN cancel_requested=1 THEN 'cancelled' ELSE 'interrupted' END,lease_token=NULL,version=version+1 WHERE status='running' AND lease_until<?",
                 (now,),
@@ -416,6 +485,17 @@ class RunStore:
                 "UPDATE agent_chat_runs SET version=version+1,updated_at=? WHERE id=?",
                 (now, run["id"]),
             )
+            self.interaction_evidence(
+                connection,
+                run,
+                {
+                    "id": interaction_id,
+                    "call_key": call_key,
+                    "operation_id": operation,
+                    "target": document.get("target"),
+                },
+                "waiting",
+            )
             self.audit(
                 connection,
                 run,
@@ -478,6 +558,7 @@ class RunStore:
                     412, "INTERACTION_VERSION_CONFLICT", "操作已变化，请载入最新状态"
                 )
             if cancel:
+                self.interaction_evidence(connection, run, row, "cancelled")
                 connection.execute(
                     "UPDATE agent_interactions SET status='cancelled',version=version+1,submission_id=?,submission_digest=? WHERE id=?",
                     (submission_id, fingerprint, row["id"]),
@@ -509,6 +590,7 @@ class RunStore:
                 "UPDATE agent_chat_runs SET status='running',version=version+1,lease_token=?,lease_until=?,updated_at=?,error=NULL WHERE id=?",
                 (lease, now + LEASE_SECONDS, now, run["id"]),
             )
+            self.interaction_evidence(connection, run, row, "confirmed")
             self.audit(
                 connection,
                 run,
@@ -557,6 +639,7 @@ class RunStore:
                 if receipt is None or receipt["status"] == "executing":
                     # All enabled writes have atomic receipts. An uncommitted execution is safe to re-confirm.
                     if pending["status"] == "submitted":
+                        replacement_id = identity("int")
                         connection.execute(
                             "UPDATE agent_interactions SET status='invalidated' WHERE id=?",
                             (pending["id"],),
@@ -565,7 +648,7 @@ class RunStore:
                             """INSERT INTO agent_interactions(id,run_id,call_key,tool_call_id,operation_id,catalog_revision,document,status,created_at,expires_at)
                         VALUES(?,?,?,?,?,?,?,'pending',?,?)""",
                             (
-                                identity("int"),
+                                replacement_id,
                                 run_id,
                                 pending["call_key"],
                                 pending["tool_call_id"],
@@ -575,6 +658,12 @@ class RunStore:
                                 now,
                                 pending["expires_at"],
                             ),
+                        )
+                        self.interaction_evidence(
+                            connection,
+                            run,
+                            {**dict(pending), "id": replacement_id},
+                            "waiting",
                         )
                     connection.execute(
                         "DELETE FROM agent_tool_executions WHERE run_id=? AND call_key=? AND status='executing'",
@@ -698,6 +787,7 @@ class RunStore:
         )
         self.close_workflow(connection, run["id"], "cancelled")
         if not run["cancel_requested"]:
+            self.close_unstarted_calls(connection, run, "cancelled")
             self.audit(connection, run, "agent.run.cancelled", **audit_details)
 
     def cancel(self, run_id: str, user_id: str) -> dict:
@@ -705,6 +795,11 @@ class RunStore:
         with self.database.transaction(write=True) as connection:
             run = self._owned(connection, run_id, user_id)
             if run["status"] in {"waiting", "interrupted", "running", "failed"}:
+                for item in connection.execute(
+                    "SELECT * FROM agent_interactions WHERE run_id=? AND status='pending'",
+                    (run_id,),
+                ).fetchall():
+                    self.interaction_evidence(connection, run, item, "cancelled")
                 connection.execute(
                     "UPDATE agent_interactions SET status='cancelled',version=version+1 WHERE run_id=? AND status='pending'",
                     (run_id,),

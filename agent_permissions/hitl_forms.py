@@ -8,6 +8,7 @@ import httpx
 from jsonschema import Draft202012Validator, FormatChecker
 from pydantic import ValidationError
 
+from agent_permissions import audit
 from agent_permissions.agent_grants import _label
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.models import (
@@ -271,12 +272,16 @@ def requires_confirmation(tool: dict) -> bool:
 async def get_data(
     http: httpx.AsyncClient, path: str, authorization: str, params: dict | None = None
 ) -> tuple[Any, str | None]:
-    response = await http.get(
-        path,
-        headers={"Authorization": authorization},
-        params=params,
-        follow_redirects=False,
-    )
+    token = audit.form_read.set(True)
+    try:
+        response = await http.get(
+            path,
+            headers={"Authorization": authorization},
+            params=params,
+            follow_redirects=False,
+        )
+    finally:
+        audit.form_read.reset(token)
     body = response.json()
     if not response.is_success:
         error = body.get("error", {})

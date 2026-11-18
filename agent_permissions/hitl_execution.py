@@ -5,6 +5,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from typing import Any
 
+from agent_permissions import audit
 from agent_permissions.errors import ApiError
 from agent_permissions.storage import Connection
 
@@ -75,6 +76,19 @@ def guard_execution(
         "SELECT enabled FROM user_agent_tool_grants WHERE user_id=? AND operation_id=?",
         (user_id, operation),
     ).fetchone()
+    call = audit.active.get()
+    if call and call.stage == "business":
+        user = connection.execute(
+            "SELECT id,agent_tools_version FROM users WHERE id=?", (user_id,)
+        ).fetchone()
+        call.checks.append(
+            {
+                "stage": "business",
+                "check": "user_grant",
+                "decision": "allowed" if grant and grant[0] else "denied",
+                **audit.grant_snapshot(connection, user, operation),
+            }
+        )
     if not grant or not grant[0]:
         raise ApiError(403, "TOOL_NOT_GRANTED", "当前用户未允许 Agent 调用此工具")
     return False, None
@@ -92,4 +106,5 @@ def record_execution(connection: Connection, value: Any, now: float) -> Any:
                 context.execution_id,
             ),
         )
+    audit.committed(connection)
     return value

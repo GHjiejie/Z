@@ -10,8 +10,13 @@ from fastapi import FastAPI, Request
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
 
+from agent_permissions import audit
+from agent_permissions.audit_http import before_dispatch
 from agent_permissions.errors import ApiError
-from agent_permissions.hitl_execution import confirmed_execution
+from agent_permissions.hitl_execution import (
+    TRANSACTIONAL_OPERATIONS,
+    confirmed_execution,
+)
 from agent_permissions.hitl_forms import requires_confirmation
 from agent_permissions.models import StrictModel
 from agent_permissions.security import token_digest
@@ -111,6 +116,18 @@ def mount_agent_tools(app: FastAPI) -> None:
 
     @app.post("/agent-tools/call", name="tools.call", openapi_extra=CONTROL_METADATA)
     async def call_tool(payload: ToolCall, request: Request) -> dict:
+        snapshot = app.state.tool_registry.snapshot()
+        tool = next(
+            (
+                item
+                for item in snapshot["tools"]
+                if item["definition"]["name"] == payload.name
+            ),
+            None,
+        )
+        call = audit.active.get()
+        call.bind(tool, snapshot["bundleDigest"])
+        call.requested_target(payload.arguments)
         context, operations = await _execution_access(request)
         address = request.client
         transport = httpx.ASGITransport(
@@ -118,18 +135,12 @@ def mount_agent_tools(app: FastAPI) -> None:
         )
         # This is an in-process call to the same API and identity domain, not a remote MCP proxy.
         async with httpx.AsyncClient(
-            transport=transport, base_url="http://agent-tools.internal", trust_env=False
+            transport=transport,
+            base_url="http://agent-tools.internal",
+            trust_env=False,
+            event_hooks={"request": [before_dispatch]},
         ) as client:
             try:
-                snapshot = app.state.tool_registry.snapshot()
-                tool = next(
-                    (
-                        item
-                        for item in snapshot["tools"]
-                        if item["definition"]["name"] == payload.name
-                    ),
-                    None,
-                )
                 if tool is None:
                     raise ToolError(
                         "TOOL_UNAVAILABLE", "工具不存在或已下线，请刷新工具目录", 404
@@ -139,6 +150,7 @@ def mount_agent_tools(app: FastAPI) -> None:
                         "TOOL_VERSION_MISMATCH", "工具版本已变化，请刷新工具目录"
                     )
                 binding = tool["binding"]
+                audit.tool_checks(call, tool, context, operations)
                 if (
                     binding["policy"]["authentication"] == "session"
                     and context.authenticated
@@ -153,6 +165,14 @@ def mount_agent_tools(app: FastAPI) -> None:
                     authenticated=context.authenticated,
                 ):
                     raise ToolError("PERMISSION_DENIED", "没有执行该工具的权限", 403)
+                if (
+                    binding["policy"]["effect"] != "read"
+                    and binding["operationId"] != "auth.login"
+                    and binding["operationId"] not in TRANSACTIONAL_OPERATIONS
+                ):
+                    raise ToolError(
+                        "TOOL_RECEIPT_REQUIRED", "此写工具尚未接入事务执行记录", 409
+                    )
                 if binding["policy"][
                     "authentication"
                 ] == "session" and requires_confirmation(tool):
@@ -169,13 +189,23 @@ def mount_agent_tools(app: FastAPI) -> None:
                             "此操作需要在会话页面填写参数并确认",
                             409,
                         )
-                return await app.state.tool_executor.call(
+                await call.emit("requested", fact="requested", permission_checks=[])
+                await call.emit("permission.checked")
+                result = await app.state.tool_executor.call(
                     payload.name,
                     payload.arguments,
                     revision=payload.revision,
                     context=context,
                     client=client,
                 )
+                if (
+                    result.get("httpStatus") == 503
+                    and isinstance(result.get("body"), dict)
+                    and result["body"].get("error", {}).get("code")
+                    == "AUDIT_UNAVAILABLE"
+                ):
+                    raise ApiError(503, "AUDIT_UNAVAILABLE", "审计记录暂时不可用")
+                return result
             except ToolError as error:
                 await run_in_threadpool(
                     request.app.state.service.record_failure,
@@ -187,8 +217,8 @@ def mount_agent_tools(app: FastAPI) -> None:
                 )
                 logger.warning(
                     "Tool rejected name=%s revision=%s request_id=%s reason=%s",
-                    payload.name,
-                    payload.revision,
+                    tool["definition"]["name"] if tool else "unknown",
+                    snapshot["bundleDigest"],
                     context.request_id,
                     error.code,
                 )
