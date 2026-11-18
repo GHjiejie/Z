@@ -41,9 +41,18 @@ _private_fields = {
 
 def _redact_fields(value: object) -> object:
     if isinstance(value, dict):
+        # Model spans are captured before the graph can apply the tool schema.
+        # Streaming fragments and parser diagnostics can contain opaque secrets.
+        model_call = value.get("type") in (
+            "function_call",
+            "tool_call",
+            "tool_call_chunk",
+            "invalid_tool_call",
+        )
         return {
             key: "[REDACTED]"
-            if str(key).lower().replace("-", "_") in _private_fields
+            if (model_call and key in {"arguments", "args", "error"})
+            or str(key).lower().replace("-", "_") in _private_fields
             else _redact_fields(item)
             for key, item in value.items()
         }

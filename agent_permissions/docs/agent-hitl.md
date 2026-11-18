@@ -83,7 +83,9 @@ flowchart LR
 }
 ```
 
-`values` 与 `sensitive_values` 必须使用对应字段通道。`omit` 只可省略可编辑选填字段；必填或绑定的目标、身份、版本字段不能省略或篡改。`decision=cancel` 不接受字段内容。刷新卡片请求是 `{"request_id":"refresh-01","expected_version":1}`，也支持幂等重试。
+`values` 与 `sensitive_values` 必须使用对应字段通道。`omit` 只可省略可编辑选填字段；必填或绑定的目标、身份、版本字段不能省略或篡改。刷新卡片请求是 `{"request_id":"refresh-01","expected_version":1}`，也支持幂等重试。
+
+取消卡片时向该卡片的 `resume` 地址提交 `{"decision":"cancel","submission_id":"cancel-01","expected_version":1}`，字段值和 `omit` 留空。服务端在同一事务内校验任务归属、卡片状态、有效期和版本，并终止任务。确认和取消并发时只有一个决定会生效。重复发送同一次取消会返回已保存的状态。卡片已被替换或处理时返回 409，待处理卡片的版本不匹配时返回 412，过期时返回 410。
 
 HTTP `422` 字段错误在图恢复前返回，保持卡片可编辑。授权或 RBAC 撤销返回 `403`；旧工具版本为 `409 TOOL_VERSION_MISMATCH`；目标 ETag 冲突为 `412 RESOURCE_VERSION_CONFLICT`；过期为 `410 INTERACTION_EXPIRED`。冲突后必须显式重新准备并再次确认。
 
@@ -136,6 +138,8 @@ SQLite 事务在进程内串行使用短连接，跨进程写入仍由 `BEGIN IM
 升级前保存一致性备份。SQLite 到 PostgreSQL 迁移支持 schema 2、3、4、5；等待任务、checkpoint、去重记录与已有工作流一起迁移，并保留同一摘要密钥。旧代码不能直接回退连接 schema 5，回滚需配套数据库备份。
 
 LangSmith 每段执行以相同 `run_id` 关联，工具 span 只接收脱敏参数。应用审计记录准备、提交、恢复、取消及工具完成的操作 ID 和关联标识，不记录密码。表单秘密不进入模型消息、checkpoint、SSE、浏览器存储或审计正文。
+
+模型提议的工具参数按字段名和工具 Schema 脱敏。保存模型消息时，Responses 的 `function_call.arguments` 和 LangChain 的 `tool_calls` 使用同一份脱敏参数。无效调用的原文会丢弃。恢复旧任务时也会处理读出的模型消息，历史 checkpoint 的清理由已有保留期控制。
 
 ## 代码与验证入口
 

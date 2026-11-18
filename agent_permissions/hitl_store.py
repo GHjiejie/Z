@@ -439,9 +439,12 @@ class RunStore:
         expected_version: int,
         arguments: dict,
         fingerprint: str,
+        *,
+        cancel: bool = False,
     ) -> tuple[dict, bool]:
-        now = self.now()
+        """Accept one card decision. Only approval claims a lease to resume the graph."""
         with self.database.transaction(write=True) as connection:
+            now = self.now()
             current = self._owned(connection, run["id"], run["user_id"])
             row = connection.execute(
                 "SELECT * FROM agent_interactions WHERE id=? AND run_id=?",
@@ -461,10 +464,6 @@ class RunStore:
                 raise ApiError(
                     410, "INTERACTION_EXPIRED", "待处理操作已过期，请重新发起"
                 )
-            if row["version"] != expected_version:
-                raise ApiError(
-                    412, "INTERACTION_VERSION_CONFLICT", "操作已变化，请载入最新状态"
-                )
             if row["status"] != "pending" or current["status"] not in {
                 "waiting",
                 "interrupted",
@@ -474,6 +473,22 @@ class RunStore:
                     "INTERACTION_ALREADY_RESOLVED",
                     "操作已提交或结束，请查看最新状态",
                 )
+            if row["version"] != expected_version:
+                raise ApiError(
+                    412, "INTERACTION_VERSION_CONFLICT", "操作已变化，请载入最新状态"
+                )
+            if cancel:
+                connection.execute(
+                    "UPDATE agent_interactions SET status='cancelled',version=version+1,submission_id=?,submission_digest=? WHERE id=?",
+                    (submission_id, fingerprint, row["id"]),
+                )
+                self._cancel_run(
+                    connection,
+                    current,
+                    interaction_id=row["id"],
+                    version=expected_version,
+                )
+                return self._owned(connection, run["id"], run["user_id"]), False
             document = json.loads(row["document"])
             document["arguments"] = arguments
             from agent_permissions.hitl_forms import read_pointer
@@ -676,25 +691,25 @@ class RunStore:
             ):
                 raise ApiError(409, "RUN_CANCELLED", "任务已停止")
 
+    def _cancel_run(self, connection: Connection, run: dict, **audit_details) -> None:
+        connection.execute(
+            "UPDATE agent_chat_runs SET status='cancelled',cancel_requested=1,version=version+1,updated_at=? WHERE id=?",
+            (self.now(), run["id"]),
+        )
+        self.close_workflow(connection, run["id"], "cancelled")
+        if not run["cancel_requested"]:
+            self.audit(connection, run, "agent.run.cancelled", **audit_details)
+
     def cancel(self, run_id: str, user_id: str) -> dict:
         self.cleanup()
         with self.database.transaction(write=True) as connection:
             run = self._owned(connection, run_id, user_id)
             if run["status"] in {"waiting", "interrupted", "running", "failed"}:
                 connection.execute(
-                    "UPDATE agent_interactions SET status='cancelled' WHERE run_id=? AND status='pending'",
+                    "UPDATE agent_interactions SET status='cancelled',version=version+1 WHERE run_id=? AND status='pending'",
                     (run_id,),
                 )
-                connection.execute(
-                    "UPDATE agent_chat_runs SET status='cancelled',cancel_requested=1,version=version+1,updated_at=? WHERE id=?",
-                    (self.now(), run_id),
-                )
-                self.close_workflow(connection, run_id, "cancelled")
-            if (
-                run["status"] in {"waiting", "interrupted", "running", "failed"}
-                and not run["cancel_requested"]
-            ):
-                self.audit(connection, run, "agent.run.cancelled")
+                self._cancel_run(connection, run)
         return self.snapshot(run_id, user_id)
 
     def execution(self, run_id: str, call_key: str) -> dict | None:

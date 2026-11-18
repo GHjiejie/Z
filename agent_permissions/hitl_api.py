@@ -311,7 +311,18 @@ def mount_hitl_api(app: FastAPI) -> None:
         if payload.decision == "cancel":
             if payload.values or payload.sensitive_values or payload.omit:
                 raise ApiError(422, "VALIDATION_ERROR", "取消操作不接受参数")
-            await run_in_threadpool(store.cancel, run_id, user_id)
+            run, _ = await run_in_threadpool(
+                store.submit,
+                run,
+                item,
+                payload.submission_id,
+                payload.expected_version,
+                {},
+                store.digest(
+                    {"decision": "cancel", "expected_version": payload.expected_version}
+                ),
+                cancel=True,
+            )
             return await event_response(request, run, fresh=False)
         # Check retries before reading targets that a successful call may have changed or deleted.
         fingerprint = store.digest(

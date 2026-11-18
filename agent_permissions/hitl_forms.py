@@ -82,11 +82,17 @@ def safe_arguments(tool: dict, arguments: dict) -> dict:
     """Also honor schema-marked secrets whose property names are application-specific."""
     clean = scrub(arguments)
     for field in fields_for(tool["definition"]["inputSchema"], clean):
-        if field["sensitive"]:
-            node = clean
-            path = parts(field["pointer"])
-            for part in path[:-1]:
-                node = node.get(part, {})
+        if not field["sensitive"]:
+            continue
+        node = clean
+        path = parts(field["pointer"])
+        for part in path[:-1]:
+            if not isinstance(node.get(part), dict):
+                # A malformed container can itself hold an opaque secret.
+                node.pop(part, None)
+                break
+            node = node[part]
+        else:
             node.pop(path[-1], None)
     return clean
 

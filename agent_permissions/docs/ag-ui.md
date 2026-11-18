@@ -112,7 +112,7 @@ Console 使用 AG-UI 1.0 的 `RunAgentInput` 和 SSE 事件，后端通过官方
 
 `state.run` 的示例仅列出标识，实际应原样携带完整快照；`interruptId`、版本和字段均以当前卡片为准，示例不是完整的创建用户参数。`runId` 同时作为本次提交的去重 ID；重复提交相同 ID 返回已有状态，变更参数后使用新 ID。敏感字段只在 `sensitive_values` 中提交。`RUN_STARTED` 不回显输入，密码不进入模型、工作流、checkpoint 或浏览器持久存储。
 
-原生取消可使用 `resume[0].status=cancelled` 和当前卡片的 `expected_version`。Console 的取消和停止按钮继续调用原取消接口，然后用权威快照结束活动步骤。
+Console 的“取消操作”发送原生 `resume[0].status=cancelled`，携带当前卡片的 `interruptId` 和 `expected_version`。服务端接受后返回已取消的任务快照。同一 `runId` 可以重试这次决定。另一窗口已确认或更换卡片时，旧卡片会提示读取最新任务状态。会话的“停止生成”仍通过任务级取消接口停止整个任务。
 
 断流后先读取原任务状态；需继续图执行时发送 `forwardedProps={"action":"recover","businessRunId":"run_example"}`，使用新 `runId`、相同 `threadId`、空 `resume`。后端恢复原 checkpoint，读取已提交的执行回执，不重放写入。角色或工具授权被撤回、版本冲突、交互过期时继续由原 HITL 逻辑拒绝，不因换用 AG-UI 放宽。
 

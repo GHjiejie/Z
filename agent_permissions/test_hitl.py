@@ -10,15 +10,18 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from uuid import uuid4
 
+import httpx
 from fastapi.testclient import TestClient
 from langchain_core.language_models import BaseChatModel
 from langchain_core.messages import AIMessage, AIMessageChunk, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResult
+from langchain_openai import ChatOpenAI
 from pydantic import Field
 
 from agent_permissions.api import create_app
 from agent_permissions.config import Settings
 from agent_permissions.hitl_checkpoint import DatabaseCheckpointer
+from agent_permissions.hitl_runtime import safe_model_message
 from agent_permissions.models import UserCreate
 from agent_permissions.test_support import grant_tools
 from agent_permissions.tracing import ChatTracing, TracingSettings
@@ -30,6 +33,64 @@ def events(response) -> list[dict]:
         for line in response.text.splitlines()
         if line.startswith("data: ")
     ]
+
+
+def responses_sse(response: dict) -> httpx.Response:
+    frames = [
+        {
+            "type": "response.created",
+            "response": {**response, "status": "in_progress", "output": []},
+        }
+    ]
+    for index, item in enumerate(response["output"]):
+        position = {"output_index": index, "item_id": item["id"]}
+        if item["type"] == "function_call":
+            frames.append(
+                {
+                    "type": "response.output_item.added",
+                    "output_index": index,
+                    "item": {**item, "arguments": "", "status": "in_progress"},
+                }
+            )
+            encoded = item["arguments"]
+            middle = len(encoded) // 2
+            for delta in (encoded[:middle], encoded[middle:]):
+                frames.append(
+                    {
+                        "type": "response.function_call_arguments.delta",
+                        **position,
+                        "delta": delta,
+                    }
+                )
+        else:
+            frames.append(
+                {
+                    "type": "response.output_text.delta",
+                    **position,
+                    "content_index": 0,
+                    "delta": item["content"][0]["text"],
+                }
+            )
+            frames.append(
+                {
+                    "type": "response.output_text.done",
+                    **position,
+                    "content_index": 0,
+                    "text": item["content"][0]["text"],
+                }
+            )
+        frames.append(
+            {"type": "response.output_item.done", "output_index": index, "item": item}
+        )
+    frames.append({"type": "response.completed", "response": response})
+    return httpx.Response(
+        200,
+        headers={"Content-Type": "text/event-stream"},
+        content="".join(
+            "data: " + json.dumps({**frame, "sequence_number": i}) + "\n\n"
+            for i, frame in enumerate(frames)
+        ),
+    )
 
 
 class InteractionModel(BaseChatModel):
@@ -95,6 +156,53 @@ class InteractionModel(BaseChatModel):
         return ChatResult(generations=[ChatGeneration(message=reply)])
 
 
+class ModelMessageTests(unittest.TestCase):
+    def test_schema_secrets_and_malformed_containers_in_normalized_blocks(self):
+        tool = {
+            "binding": {"operationId": "example"},
+            "definition": {
+                "name": "example",
+                "inputSchema": {
+                    "type": "object",
+                    "properties": {
+                        "body": {
+                            "type": "object",
+                            "properties": {
+                                "pin": {"type": "string", "writeOnly": True},
+                                "phrase": {"type": "string", "format": "password"},
+                                "label": {"type": "string"},
+                            },
+                        }
+                    },
+                },
+            },
+        }
+        for body, expected in [
+            (
+                {"pin": "private-pin", "phrase": "private-phrase", "label": "公开"},
+                {"body": {"label": "公开"}},
+            ),
+            ("opaque-private", {}),
+        ]:
+            with self.subTest(body_type=type(body).__name__):
+                call = {
+                    "type": "tool_call",
+                    "id": "call_one",
+                    "name": "example",
+                    "args": {"body": body},
+                }
+                text = {"type": "text", "text": "正在核对"}
+                message = AIMessage(
+                    content=[text, {**call, "index": 1}], tool_calls=[call]
+                )
+                safe = safe_model_message(message, [tool])
+                self.assertEqual(safe.tool_calls[0]["args"], expected)
+                self.assertEqual(
+                    safe.content, [text, {**call, "index": 1, "args": expected}]
+                )
+                self.assertEqual(message.tool_calls[0]["args"]["body"], body)
+
+
 class HitlTests(unittest.TestCase):
     def setUp(self) -> None:
         self.folder = Path(self.enterContext(tempfile.TemporaryDirectory()))
@@ -151,6 +259,7 @@ class HitlTests(unittest.TestCase):
         secrets: dict | None = None,
         submission: str = "submission-one",
         version: int | None = None,
+        decision: str = "submit",
         client=None,
     ):
         item = run["interaction"]
@@ -160,7 +269,7 @@ class HitlTests(unittest.TestCase):
             json={
                 "submission_id": submission,
                 "expected_version": version or item["version"],
-                "decision": "submit",
+                "decision": decision,
                 "values": values or {},
                 "sensitive_values": secrets or {},
             },
@@ -253,6 +362,131 @@ class HitlTests(unittest.TestCase):
         )
         self.assertEqual(login.status_code, 200)
 
+    def test_responses_tool_arguments_are_safe_in_checkpoints_and_next_request(self):
+        self.check_responses_replay(streaming=False)
+
+    def test_streamed_responses_tool_arguments_are_safe_after_assembly(self):
+        self.check_responses_replay(streaming=True)
+
+    def check_responses_replay(self, *, streaming):
+        proposed = "model-proposed-password"
+        malformed = "invalid-json-private-value"
+        form_secret = "human-entered-password"
+        body = {"username": "responses_user", "display_name": "表单用户"}
+
+        def function_call(key, name, arguments):
+            return {
+                "type": "function_call",
+                "id": "fc_" + key,
+                "call_id": "call_" + key,
+                "name": name,
+                "arguments": arguments,
+                "status": "completed",
+            }
+
+        calls = [
+            function_call(
+                "read",
+                "agent_users_user_self_read",
+                json.dumps({"authorization": proposed}),
+            ),
+            function_call("bad", "agent_users_user_create", "unparsed: " + malformed),
+            function_call(
+                "form",
+                "request_tool_input",
+                json.dumps(
+                    {
+                        "operation_id": "user.create",
+                        "arguments": {"body": {**body, "password": proposed}},
+                    }
+                ),
+            ),
+        ]
+        requests = []
+
+        def respond(request):
+            self.assertEqual(request.url.path, "/v1/responses")
+            requests.append(json.loads(request.content))
+            message = {
+                "type": "message",
+                "id": f"msg_{len(requests)}",
+                "role": "assistant",
+                "status": "completed",
+                "content": [
+                    {
+                        "type": "output_text",
+                        "text": "核对资料" if len(requests) == 1 else "已完成",
+                        "annotations": [],
+                    }
+                ],
+            }
+            response = {
+                "id": f"resp_{len(requests)}",
+                "object": "response",
+                "created_at": 1,
+                "model": "hitl-fixture",
+                "status": "completed",
+                "output": [message, *calls] if len(requests) == 1 else [message],
+            }
+            self.assertEqual(requests[-1].get("stream", False), streaming)
+            return (
+                responses_sse(response)
+                if streaming
+                else httpx.Response(200, json=response)
+            )
+
+        http = httpx.AsyncClient(transport=httpx.MockTransport(respond))
+        self.addCleanup(self.client.portal.call, http.aclose)
+        self.model = ChatOpenAI(
+            model="hitl-fixture",
+            api_key="offline",
+            base_url="https://model.test/v1",
+            use_responses_api=True,
+            streaming=streaming,
+            disable_streaming=not streaming,
+            http_socket_options=(),
+            http_async_client=http,
+            max_retries=0,
+        )
+        run = self.start()
+        self.assertEqual(run["status"], "waiting", run)
+        self.assertEqual(run["interaction"]["kind"], "collect_parameters")
+        result = self.submit(run, secrets={"/body/password": form_secret})
+        done = self.final(result)
+        self.assertEqual(done["status"], "completed", done)
+        self.assertEqual(
+            [e["status"] for e in done["executions"]], ["succeeded", "succeeded"]
+        )
+        self.assertEqual(len(requests), 2)
+        replay = requests[-1]["input"]
+        forwarded = [item for item in replay if item["type"] == "function_call"]
+        self.assertEqual(
+            [(c["id"], c["call_id"]) for c in forwarded],
+            [("fc_read", "call_read"), ("fc_form", "call_form")],
+        )
+        self.assertEqual(
+            [json.loads(c["arguments"]) for c in forwarded],
+            [{}, {"operation_id": "user.create", "arguments": {"body": body}}],
+        )
+        self.assertEqual(
+            [
+                item["call_id"]
+                for item in replay
+                if item["type"] == "function_call_output"
+            ],
+            ["call_read", "call_form"],
+        )
+        self.assertIn("核对资料", repr(replay))
+        checkpoints = list(
+            DatabaseCheckpointer(self.app.state.database).list(
+                {"configurable": {"thread_id": run["id"]}}
+            )
+        )
+        self.assertTrue(checkpoints)
+        for secret in (proposed, malformed, form_secret):
+            for evidence in (run, result.text, requests[-1], checkpoints):
+                self.assertNotIn(secret, repr(evidence))
+
     def test_restart_restores_same_checkpoint_and_call(self):
         run = self.start()
         with TestClient(self.application()) as restarted:
@@ -263,6 +497,39 @@ class HitlTests(unittest.TestCase):
             done = self.final(self.submit(stored, client=restarted))
             self.assertEqual(done["status"], "completed")
             self.assertEqual(len(self.model.recorded), 2)
+
+    def test_resuming_a_legacy_checkpoint_cleans_future_messages_and_checkpoints(self):
+        run = self.start()
+        saver = DatabaseCheckpointer(self.app.state.database)
+        config = {"configurable": {"thread_id": run["id"]}}
+        saved = saver.get_tuple(config)
+        message = next(
+            m
+            for m in saved.checkpoint["channel_values"]["messages"]
+            if isinstance(m, AIMessage)
+        )
+        call = message.tool_calls[0]
+        legacy_secret = "legacy-model-private"
+        message.content = [
+            {
+                "type": "function_call",
+                "name": call["name"],
+                "call_id": call["id"],
+                "id": "fc_legacy",
+                "arguments": json.dumps({**call["args"], "password": legacy_secret}),
+            }
+        ]
+        saver.put(saved.parent_config or config, saved.checkpoint, saved.metadata, {})
+        self.assertIn(legacy_secret, repr(saver.get_tuple(config)))
+        self.assertEqual(self.final(self.submit(run))["status"], "completed")
+        self.assertNotIn(legacy_secret, repr(self.model.recorded))
+        newer = [
+            item
+            for item in saver.list(config)
+            if item.checkpoint["id"] > saved.checkpoint["id"]
+        ]
+        self.assertTrue(newer)
+        self.assertNotIn(legacy_secret, repr(newer))
 
     def test_read_only_complete_input_has_no_interaction(self):
         self.model.operation, self.model.arguments = "user.self.read", {}
@@ -296,11 +563,56 @@ class HitlTests(unittest.TestCase):
         expired = self.start()
         self.now += timedelta(seconds=1801)
         self.assertEqual(self.submit(expired).status_code, 410)
+        self.assertEqual(self.submit(expired, decision="cancel").status_code, 410)
         self.assertEqual(self.snapshot(expired)["status"], "expired")
         self.assertEqual(
             self.client.get("/api/v1/roles/new_role", headers=self.headers).status_code,
             404,
         )
+
+    def test_card_cancel_checks_version_and_replays_only_the_same_decision(self):
+        run = self.start()
+        version = run["interaction"]["version"]
+        wrong = self.submit(run, decision="cancel", version=version + 1)
+        self.assertEqual(wrong.status_code, 412)
+        self.assertEqual(wrong.json()["error"]["code"], "INTERACTION_VERSION_CONFLICT")
+        self.assertEqual(
+            self.submit(
+                run, decision="cancel", values={"/body/code": "unused"}
+            ).status_code,
+            422,
+        )
+        self.assertEqual(self.snapshot(run)["interaction"], run["interaction"])
+        grant_tools(
+            self.client, self.headers, self.user_id, ["role.create"], enabled=False
+        )
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            results = list(
+                pool.map(
+                    lambda _: self.final(self.submit(run, decision="cancel")), range(2)
+                )
+            )
+        self.assertEqual(results[0], results[1])
+        self.assertEqual(results[0]["status"], "cancelled")
+        self.assertIsNone(results[0]["interaction"])
+        self.assertEqual(results[0]["executions"], [])
+        for changed in (
+            self.submit(run),
+            self.submit(run, decision="cancel", version=version + 1),
+        ):
+            self.assertEqual(changed.status_code, 409)
+            self.assertEqual(changed.json()["error"]["code"], "IDEMPOTENCY_CONFLICT")
+        store = self.app.state.run_store
+        card = store.interaction(run["id"], run["interaction"]["id"], self.user_id)
+        self.assertEqual((card["status"], card["version"]), ("cancelled", version + 1))
+        with self.app.state.database.transaction() as connection:
+            self.assertEqual(
+                connection.execute(
+                    "SELECT count(*) FROM audit_events WHERE request_id=? AND action='agent.run.cancelled'",
+                    (run["id"],),
+                ).fetchone()[0],
+                1,
+            )
 
     def test_cross_user_cannot_read_or_resume(self):
         run = self.start()
@@ -386,12 +698,39 @@ class HitlTests(unittest.TestCase):
                 1,
             )
 
+    def test_approval_and_cancellation_cannot_both_win(self):
+        run = self.start()
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            approve = pool.submit(self.submit, run, submission="approve")
+            cancel = pool.submit(
+                self.submit, run, submission="cancel", decision="cancel"
+            )
+            approved, cancelled = approve.result(), cancel.result()
+        self.assertEqual(
+            sorted([approved.status_code, cancelled.status_code]), [200, 409]
+        )
+        approval_won = approved.status_code == 200
+        snapshot = self.snapshot(run)
+        self.assertEqual(
+            snapshot["status"], "completed" if approval_won else "cancelled"
+        )
+        self.assertEqual(len(snapshot["executions"]), int(approval_won))
+        role = self.client.get("/api/v1/roles/new_role", headers=self.headers)
+        self.assertEqual(role.status_code, 200 if approval_won else 404)
+
     def test_multi_tool_calls_are_confirmed_separately(self):
         self.model.second = True
         first = self.start()
         second = self.final(self.submit(first))
         self.assertEqual(second["status"], "waiting")
         self.assertNotEqual(first["interaction"]["id"], second["interaction"]["id"])
+        self.assertEqual(
+            first["interaction"]["version"], second["interaction"]["version"]
+        )
+        stale = self.submit(first, decision="cancel", submission="cancel-old-card")
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.json()["error"]["code"], "INTERACTION_ALREADY_RESOLVED")
+        self.assertEqual(self.snapshot(second)["interaction"], second["interaction"])
         self.assertEqual(
             self.client.get(
                 "/api/v1/roles/second_role", headers=self.headers

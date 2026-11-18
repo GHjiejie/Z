@@ -3,9 +3,10 @@
 import asyncio
 import base64
 import json
-from collections.abc import AsyncIterator, Iterator, Sequence
+from collections.abc import AsyncIterator, Callable, Iterator, Sequence
 from typing import Any
 
+from langchain_core.messages import AIMessage
 from langchain_core.runnables import RunnableConfig
 from langgraph.checkpoint.base import (
     WRITES_IDX_MAP,
@@ -24,9 +25,15 @@ from agent_permissions.storage import DatabaseBackend
 class DatabaseCheckpointer(BaseCheckpointSaver[int]):
     """Persist full checkpoints and pending writes without holding borrowed connections."""
 
-    def __init__(self, database: DatabaseBackend) -> None:
+    def __init__(
+        self,
+        database: DatabaseBackend,
+        *,
+        restore_ai_message: Callable[[AIMessage], AIMessage] | None = None,
+    ) -> None:
         super().__init__()
         self.database = database
+        self.restore_ai_message = restore_ai_message
 
     def _encode(self, value: Any) -> tuple[str, str]:
         kind, data = self.serde.dumps_typed(value)
@@ -34,6 +41,16 @@ class DatabaseCheckpointer(BaseCheckpointSaver[int]):
 
     def _decode(self, kind: str, data: str) -> Any:
         return self.serde.loads_typed((kind, base64.b64decode(data)))
+
+    def _restore_messages(self, messages: list) -> list:
+        if self.restore_ai_message is None:
+            return messages
+        return [
+            self.restore_ai_message(message)
+            if isinstance(message, AIMessage)
+            else message
+            for message in messages
+        ]
 
     def get_tuple(self, config: RunnableConfig) -> CheckpointTuple | None:
         values = config["configurable"]
@@ -54,27 +71,27 @@ class DatabaseCheckpointer(BaseCheckpointSaver[int]):
                 "SELECT * FROM agent_checkpoint_writes WHERE thread_id=? AND namespace=? AND checkpoint_id=? ORDER BY task_id,idx",
                 (thread, namespace, row["checkpoint_id"]),
             ).fetchall()
-            base = {"thread_id": thread, "checkpoint_ns": namespace}
-            return CheckpointTuple(
-                config={
-                    "configurable": {**base, "checkpoint_id": row["checkpoint_id"]}
-                },
-                checkpoint=self._decode(row["kind"], row["checkpoint"]),
-                metadata=json.loads(row["metadata"]),
-                parent_config={
-                    "configurable": {**base, "checkpoint_id": row["parent_id"]}
-                }
-                if row["parent_id"]
-                else None,
-                pending_writes=[
-                    (
-                        item["task_id"],
-                        item["channel"],
-                        self._decode(item["kind"], item["value"]),
-                    )
-                    for item in writes
-                ],
-            )
+        # Older checkpoints and pending node writes can both contain raw Response arguments.
+        checkpoint = self._decode(row["kind"], row["checkpoint"])
+        channels = checkpoint["channel_values"]
+        if "messages" in channels:
+            channels["messages"] = self._restore_messages(channels["messages"])
+        pending_writes = []
+        for item in writes:
+            value = self._decode(item["kind"], item["value"])
+            if item["channel"] == "messages":
+                value = self._restore_messages(value)
+            pending_writes.append((item["task_id"], item["channel"], value))
+        base = {"thread_id": thread, "checkpoint_ns": namespace}
+        return CheckpointTuple(
+            config={"configurable": {**base, "checkpoint_id": row["checkpoint_id"]}},
+            checkpoint=checkpoint,
+            metadata=json.loads(row["metadata"]),
+            parent_config={"configurable": {**base, "checkpoint_id": row["parent_id"]}}
+            if row["parent_id"]
+            else None,
+            pending_writes=pending_writes,
+        )
 
     def put(
         self,

@@ -218,6 +218,15 @@ test("折叠中的可选字段校验失败会展开并定位，草稿可以继�
   await optional.locator("summary").click();
   let submissions = 0;
   await page.route("**/api/v1/ag-ui", async (route) => {
+    const decision = route.request().postDataJSON().resume?.[0];
+    if (decision?.status === "cancelled") {
+      expect(decision.payload).toMatchObject({
+        values: {},
+        sensitive_values: {},
+        omit: [],
+      });
+      return route.continue();
+    }
     submissions += 1;
     await route.fulfill({
       status: 422,
@@ -317,7 +326,7 @@ test("缺少查询目标时提供真实用户选项，提交后继续回复", as
   );
 });
 
-test("取消待确认操作后刷新不会执行，SDK 任务可以导入", async ({
+test("导入 SDK 任务后旧卡片不能取消新卡片，读取最新状态后可以取消", async ({
   page,
   request,
 }) => {
@@ -339,7 +348,53 @@ test("取消待确认操作后刷新不会执行，SDK 任务可以导入", asyn
   await page.getByRole("button", { name: "打开任务", exact: true }).click();
   const card = page.locator(".tool-interaction-card");
   await expect(card).toBeVisible();
+  const runUrl = `/api/v1/chat/runs/${id}`;
+  const original = (await (await request.get(runUrl, { headers })).json()).data;
+  const refresh = await request.post(
+    `${runUrl}/interactions/${original.interaction.id}/refresh`,
+    {
+      headers,
+      data: {
+        request_id: "another-tab",
+        expected_version: original.interaction.version,
+      },
+    },
+  );
+  expect(refresh.ok()).toBe(true);
+  const replacement = (await refresh.json()).data.interaction;
+  expect(replacement.id).not.toBe(original.interaction.id);
+  const cancelResponse = () =>
+    page.waitForResponse(
+      (res) =>
+        res.url().endsWith("/ag-ui") &&
+        res.request().postDataJSON()?.resume?.[0]?.status === "cancelled",
+    );
+  const stale = cancelResponse();
   await card.getByRole("button", { name: "取消操作" }).click();
+  const denied = await stale;
+  expect(denied.status()).toBe(409);
+  expect(denied.request().postDataJSON().resume[0]).toMatchObject({
+    interruptId: original.interaction.id,
+    payload: { expected_version: original.interaction.version },
+  });
+  await expect(card.getByRole("button", { name: "取消操作" })).toBeDisabled();
+  await card.getByRole("button", { name: "读取最新任务状态" }).click();
+  await expect(card.getByRole("button", { name: "取消操作" })).toBeEnabled();
+  const accepted = cancelResponse();
+  await card.getByRole("button", { name: "取消操作" }).click();
+  const responseToCancel = await accepted;
+  expect(responseToCancel.ok()).toBe(true);
+  expect(responseToCancel.request().postDataJSON().resume[0]).toMatchObject({
+    interruptId: replacement.id,
+    status: "cancelled",
+    payload: {
+      decision: "cancel",
+      expected_version: replacement.version,
+      values: {},
+      sensitive_values: {},
+      omit: [],
+    },
+  });
   await expect(card).toHaveCount(0);
   await page.reload();
   await expect(page.getByRole("article", { name: "Agent 回复" })).toContainText(

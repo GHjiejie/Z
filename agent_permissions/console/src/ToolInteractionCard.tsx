@@ -26,7 +26,6 @@ export function ToolInteractionCard({
   run,
   busy,
   onSubmit,
-  onCancel,
   onRefresh,
   onRecover,
 }: {
@@ -34,7 +33,6 @@ export function ToolInteractionCard({
   run: ChatRun;
   busy: boolean;
   onSubmit: (payload: ToolSubmission) => Promise<void>;
-  onCancel: () => Promise<void>;
   onRefresh: (requestId: string) => Promise<void>;
   onRecover: () => void;
 }) {
@@ -65,6 +63,7 @@ export function ToolInteractionCard({
   const mounted = useRef(true);
   const form = useRef<HTMLFormElement>(null);
   const submission = useRef<{ fingerprint: string; id: string } | null>(null);
+  const cancellationId = useRef<string | null>(null);
   useEffect(() => {
     mounted.current = true;
     return () => {
@@ -97,14 +96,16 @@ export function ToolInteractionCard({
   if (!interaction) return null;
   const disabled =
     working || busy || !["waiting", "interrupted"].includes(run.status);
-  const conflict =
+  const stale =
     error instanceof ApiError &&
     [
-      "RESOURCE_VERSION_CONFLICT",
-      "TOOL_VERSION_MISMATCH",
       "INTERACTION_VERSION_CONFLICT",
       "INTERACTION_ALREADY_RESOLVED",
+      "INTERACTION_EXPIRED",
     ].includes(error.code);
+  const needsNewProposal =
+    error instanceof ApiError &&
+    ["RESOURCE_VERSION_CONFLICT", "TOOL_VERSION_MISMATCH"].includes(error.code);
   const errors =
     error instanceof ApiError
       ? Object.fromEntries(
@@ -165,6 +166,18 @@ export function ToolInteractionCard({
       values,
       sensitive_values: sensitive,
       omit,
+    });
+  }
+  async function cancel() {
+    if (!interaction) return;
+    cancellationId.current ??= chatId();
+    await onSubmit({
+      submission_id: cancellationId.current,
+      expected_version: interaction.version,
+      decision: "cancel",
+      values: {},
+      sensitive_values: {},
+      omit: [],
     });
   }
   const target = interaction.target;
@@ -297,7 +310,7 @@ export function ToolInteractionCard({
         {Boolean(error) && (
           <div className="tool-card-error" role="alert">
             <p>{errorMessage(error)}</p>
-            {conflict ? (
+            {needsNewProposal ? (
               <button
                 className="text-button"
                 type="button"
@@ -340,8 +353,8 @@ export function ToolInteractionCard({
           <button
             className="button secondary"
             type="button"
-            disabled={disabled}
-            onClick={() => void act("cancel", onCancel)}
+            disabled={disabled || stale}
+            onClick={() => void act("cancel", cancel)}
           >
             {pendingAction === "cancel" && (
               <LoaderCircle size={16} className="spin" aria-hidden="true" />
@@ -350,7 +363,7 @@ export function ToolInteractionCard({
           </button>
           <button
             className={`button ${interaction.effect === "destructive" ? "danger" : "primary"}`}
-            disabled={disabled || conflict}
+            disabled={disabled || stale || needsNewProposal}
             type="submit"
           >
             {pendingAction === "submit" || busy ? (

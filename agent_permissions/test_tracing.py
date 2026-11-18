@@ -145,6 +145,24 @@ class TracingConfigurationTests(unittest.TestCase):
             identity = uuid4()
             inputs = {
                 "body": {"password": "private-password", "username": "visible"},
+                "model_blocks": [
+                    {
+                        "type": "function_call",
+                        "name": "example",
+                        "arguments": '{"pin":"private-proposal"}',
+                    },
+                    {
+                        "type": "tool_call",
+                        "name": "example",
+                        "args": {"pin": "private-proposal"},
+                    },
+                    {"type": "tool_call_chunk", "args": "private-fragment"},
+                    {
+                        "type": "invalid_tool_call",
+                        "args": "private-invalid",
+                        "error": "private-diagnostic",
+                    },
+                ],
                 "content": json.dumps(
                     {"body": {"new_password": "private-new-password"}}
                 ),
@@ -161,6 +179,10 @@ class TracingConfigurationTests(unittest.TestCase):
                 "private-password",
                 "private-new-password",
                 "private-session-token",
+                "private-proposal",
+                "private-fragment",
+                "private-invalid",
+                "private-diagnostic",
                 "sk-" + "a" * 40,
             ):
                 self.assertNotIn(secret, recorded)

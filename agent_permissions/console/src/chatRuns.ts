@@ -71,7 +71,7 @@ export interface ChatRun {
 export interface ToolSubmission {
   submission_id: string;
   expected_version: number;
-  decision: "submit";
+  decision: "submit" | "cancel";
   values: Record<string, FieldValue>;
   sensitive_values: Record<string, FieldValue>;
   omit: string[];

@@ -383,29 +383,38 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
       (item) => item.runId === run.id,
     );
     if (!message) return;
+    const controller = new AbortController();
+    const input = {
+      ...payload,
+      state: { run },
+      messages: (conversation?.messages ?? []).map((item) => ({
+        id: item.id,
+        role: item.role,
+        content: item.content,
+      })),
+    };
+    if (payload.resume?.[0]?.status === "cancelled") {
+      // This decision only reads back a snapshot. Leaving the conversation while
+      // it is in flight must never turn it into a request to stop the entire run.
+      await api.streamAgui(input, controller.signal, (event) => {
+        if (event.run) applyRun(event.run);
+      });
+      if (mounted.current) onSettled();
+      return;
+    }
     const current: Job = {
       conversationId: run.conversation_id,
       messageId: message.id,
       runId: run.id,
-      controller: new AbortController(),
+      controller,
       text: message.content,
       frame: null,
     };
     job.current = current;
     setGeneratingId(run.conversation_id);
     try {
-      await api.streamAgui(
-        {
-          ...payload,
-          state: { run },
-          messages: (conversation?.messages ?? []).map((item) => ({
-            id: item.id,
-            role: item.role,
-            content: item.content,
-          })),
-        },
-        current.controller.signal,
-        (event) => receive(current, event),
+      await api.streamAgui(input, controller.signal, (event) =>
+        receive(current, event),
       );
     } catch (error) {
       if (
@@ -444,7 +453,12 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
             context: [],
             forwardedProps: { action: "resume", businessRunId: run.id },
             resume: [
-              { interruptId: run.interaction.id, status: "resolved", payload },
+              {
+                interruptId: run.interaction.id,
+                status:
+                  payload.decision === "cancel" ? "cancelled" : "resolved",
+                payload,
+              },
             ],
           })
         : Promise.resolve(),
@@ -507,10 +521,6 @@ export function useChat(api: ApiClient, userId: string, onSettled: () => void) {
       applyRun(run);
     },
     recover: () => setRecoveryRevision((value) => value + 1),
-    cancel: async (run: ChatRun) => {
-      applyRun(await api.cancelChatRun(run.id));
-      onSettled();
-    },
     refresh: async (run: ChatRun, requestId: string) => {
       if (run.interaction)
         applyRun(

@@ -488,12 +488,11 @@ export function ChatPage({
                           const run = chat.runs[message.runId];
                           return run?.interaction ? (
                             <ToolInteractionCard
-                              key={run.interaction.id}
+                              key={`${run.interaction.id}:${run.interaction.version}`}
                               api={api}
                               run={run}
                               busy={generating}
                               onSubmit={(payload) => chat.resume(run, payload)}
-                              onCancel={() => chat.cancel(run)}
                               onRefresh={(requestId) =>
                                 chat.refresh(run, requestId)
                               }

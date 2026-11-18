@@ -163,6 +163,70 @@ def model_tools(tools: list[dict]) -> list[StructuredTool]:
     return adapted
 
 
+def selected_tool(tools: list[dict], call: dict) -> dict | None:
+    if call["name"] == PREPARE_NAME:
+        operation = call["args"].get("operation_id")
+        return next(
+            (tool for tool in tools if tool["binding"]["operationId"] == operation),
+            None,
+        )
+    return next(
+        (tool for tool in tools if tool["definition"]["name"] == call["name"]), None
+    )
+
+
+def safe_model_message(message: AIMessage, tools: list[dict]) -> AIMessage:
+    """Keep only schema-scrubbed function arguments in the replayable model message."""
+    calls = []
+    for call in message.tool_calls:
+        tool = selected_tool(tools, call)
+        if call["name"] == PREPARE_NAME:
+            proposal = call["args"].get("arguments")
+            operation = call["args"].get("operation_id")
+            arguments = {
+                "operation_id": operation if isinstance(operation, str) else None,
+                "arguments": safe_arguments(tool, proposal)
+                if tool and isinstance(proposal, dict)
+                else {},
+            }
+        else:
+            arguments = safe_arguments(tool, call["args"]) if tool else {}
+        calls.append({**call, "args": arguments})
+
+    content = message.content
+    if isinstance(content, list):
+        # Responses replays its content blocks in preference to tool_calls. Use the
+        # same sanitized arguments in both, preserving provider item IDs and order.
+        by_id = {(call["id"], call["name"]): call["args"] for call in calls}
+        content = []
+        for block in message.content:
+            kind = block.get("type") if isinstance(block, dict) else None
+            if kind in {"invalid_tool_call", "tool_call_chunk"}:
+                continue
+            if kind in {"function_call", "tool_call"}:
+                key = "call_id" if kind == "function_call" else "id"
+                args = by_id.get((block.get(key), block.get("name")))
+                if args is None:
+                    continue  # Unparsed calls have no executable counterpart.
+                if kind == "function_call":
+                    block = {**block, "arguments": json.dumps(args, ensure_ascii=False)}
+                else:
+                    block = {**block, "args": args}
+            content.append(block)
+    return message.model_copy(
+        update={
+            "content": content,
+            "tool_calls": calls,
+            "invalid_tool_calls": [],
+            "additional_kwargs": {
+                key: scrub(value)
+                for key, value in message.additional_kwargs.items()
+                if key not in {"tool_calls", "function_call"}
+            },
+        }
+    )
+
+
 def saved_result(row: dict, tool: dict, revision: str) -> dict | None:
     if row["result"]:
         return json.loads(row["result"])
@@ -216,7 +280,7 @@ async def build_graph(
 
     store: RunStore = request.app.state.run_store
     payload = json.loads(run["payload"])
-    _, tools = await available_tools(request)
+    catalog, tools = await available_tools(request)
     if payload.get("tool_choice") == "none":
         tools = []
     adapted = model_tools(tools)
@@ -266,30 +330,8 @@ async def build_graph(
             config=merge_configs(config, {"callbacks": [reasoning]}),
             **options,
         )
-        calls = []
-        for call in response.tool_calls:
-            arguments = scrub(call["args"])
-            selected = next(
-                (
-                    item
-                    for item in tools
-                    if item["definition"]["name"] == call["name"]
-                    or (
-                        call["name"] == PREPARE_NAME
-                        and item["binding"]["operationId"]
-                        == arguments.get("operation_id")
-                    )
-                ),
-                None,
-            )
-            if selected:
-                if call["name"] == PREPARE_NAME:
-                    arguments["arguments"] = safe_arguments(
-                        selected, arguments.get("arguments", {})
-                    )
-                else:
-                    arguments = safe_arguments(selected, arguments)
-            calls.append({**call, "args": arguments})
+        response = safe_model_message(response, tools)
+        calls = response.tool_calls
         await progress(
             {
                 "id": entry_id,
@@ -299,19 +341,7 @@ async def build_graph(
             }
         )
         for index, call in enumerate(calls):
-            selected = next(
-                (
-                    item
-                    for item in tools
-                    if item["definition"]["name"] == call["name"]
-                    or (
-                        call["name"] == PREPARE_NAME
-                        and item["binding"]["operationId"]
-                        == call["args"].get("operation_id")
-                    )
-                ),
-                None,
-            )
+            selected = selected_tool(tools, call)
             operation = selected["binding"]["operationId"] if selected else ""
             await progress(
                 {
@@ -335,16 +365,6 @@ async def build_graph(
                     ),
                 }
             )
-        response = response.model_copy(
-            update={
-                "tool_calls": calls,
-                "additional_kwargs": {
-                    key: scrub(value)
-                    for key, value in response.additional_kwargs.items()
-                    if key not in {"tool_calls", "function_call"}
-                },
-            }
-        )
         return {
             "messages": [response],
             "pending": calls,
@@ -358,19 +378,7 @@ async def build_graph(
         call = state["pending"][state["index"]]
         call_key = f"{state['turns']}:{state['index']}:{call['id']}"
         entry_id = "tool:" + call_key
-        selected = next(
-            (
-                item
-                for item in tools
-                if item["definition"]["name"] == call["name"]
-                or (
-                    call["name"] == PREPARE_NAME
-                    and item["binding"]["operationId"]
-                    == call["args"].get("operation_id")
-                )
-            ),
-            None,
-        )
+        selected = selected_tool(tools, call)
         operation_hint = selected["binding"]["operationId"] if selected else ""
         await progress(
             {
@@ -653,7 +661,12 @@ async def build_graph(
         lambda state: "tool" if state["index"] < len(state["pending"]) else "model",
     )
     return builder.compile(
-        checkpointer=DatabaseCheckpointer(request.app.state.database),
+        checkpointer=DatabaseCheckpointer(
+            request.app.state.database,
+            restore_ai_message=lambda message: safe_model_message(
+                message, catalog["tools"]
+            ),
+        ),
         name="agent_permissions.chat",
     ), tools
 
