@@ -32,7 +32,7 @@
 | [UsersPage.tsx](../console/src/UsersPage.tsx) | 用户列表、按权限显示行操作 | 增加“Agent 工具授权”入口 |
 | [database.py](../database.py)、[postgres.py](../postgres.py) | SQLite / PostgreSQL schema 2 | 事务化升级至 schema 3 |
 
-当前工具包有 21 个工具，其中 `auth.login` 是匿名认证入口；Chat 已排除该工具。首版用户配置覆盖其余 20 个需要用户会话的工具，包括退出登录和个人账号操作。登录工具继续保留现有认证用途，不纳入用户委托配置，也不交给 Chat 模型。
+当前工具包包含 23 个工具。其中 22 个需要用户会话，可在用户页面配置 Agent 授权，包括退出登录、个人账号操作和模型用量查询。`auth.login` 服务于匿名认证。
 
 ## 3. 授权模型
 

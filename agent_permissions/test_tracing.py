@@ -266,7 +266,7 @@ class ChatTracingTests(unittest.TestCase):
             root = self.roots()[-1]
             metadata = root["extra"]["metadata"]
             self.assertEqual(metadata["request_id"], response.headers["X-Request-ID"])
-            self.assertEqual(metadata["tool_count"], 20)
+            self.assertEqual(metadata["tool_count"], 22)
             self.assertEqual(metadata["stream"], stream)
             children = [
                 run

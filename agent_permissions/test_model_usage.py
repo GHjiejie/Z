@@ -7,6 +7,7 @@ from datetime import UTC, datetime, timedelta
 from agent_permissions import test_agui, test_hitl
 from agent_permissions.test_agui import FailingResponsesStream
 from agent_permissions.test_hitl import responses_sse
+from agent_permissions.test_support import grant_tools
 
 
 def provider_response(
@@ -158,6 +159,9 @@ class ModelUsageTests(unittest.TestCase):
         own = self.report(member_id, headers=member)
         self.assertEqual(own["total_tokens"], 49)
         self.assertEqual(own, self.report(member_id))
+        response = self.client.get("/api/v1/users/me/token-usage", headers=member)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["data"], own)
         path = f"/api/v1/users/{self.user_id}/token-usage"
         self.assertEqual(self.client.get(path, headers=member).status_code, 403)
         self.assertEqual(self.client.get(path).status_code, 401)
@@ -167,6 +171,91 @@ class ModelUsageTests(unittest.TestCase):
             ).status_code,
             404,
         )
+
+        revision = self.app.state.tool_registry.snapshot()["bundleDigest"]
+
+        def call(operation, headers, arguments=None):
+            return self.client.post(
+                "/agent-tools/call",
+                headers=headers,
+                json={
+                    "name": "agent_users_" + operation.replace(".", "_"),
+                    "arguments": arguments or {},
+                    "revision": revision,
+                },
+            )
+
+        response = call("user.self.token_usage", member)
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "TOOL_NOT_GRANTED")
+        grant_tools(
+            self.client,
+            self.headers,
+            member_id,
+            ["user.self.token_usage", "user.token_usage"],
+        )
+        visible = self.client.get("/agent-tools", headers=member).json()["tools"]
+        names = {tool["name"] for tool in visible}
+        self.assertIn("agent_users_user_self_token_usage", names)
+        self.assertNotIn("agent_users_user_token_usage", names)
+        response = call("user.self.token_usage", member)
+        self.assertEqual(response.json()["body"]["data"], own)
+        response = call("user.token_usage", member, {"path": {"user_id": self.user_id}})
+        self.assertEqual(response.status_code, 403)
+        self.assertEqual(response.json()["error"]["code"], "PERMISSION_DENIED")
+        response = call(
+            "user.token_usage", self.headers, {"path": {"user_id": member_id}}
+        )
+        self.assertEqual(response.json()["body"]["data"], own)
+
+    def test_usage_reader_can_supply_missing_user_id_without_user_list_permissions(
+        self,
+    ):
+        response = self.client.post(
+            "/api/v1/roles",
+            headers=self.headers,
+            json={
+                "code": "usage_reader",
+                "display_name": "用量查看者",
+                "permissions": ["agent.usage.read"],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        response = self.client.post(
+            "/api/v1/users",
+            headers=self.headers,
+            json={
+                "username": "usage_reader",
+                "display_name": "用量查看者",
+                "password": "test-password",
+                "roles": ["usage_reader"],
+            },
+        )
+        self.assertEqual(response.status_code, 201, response.text)
+        reader = response.json()["data"]["id"]
+        grant_tools(self.client, self.headers, reader, ["user.token_usage"])
+        self.headers = self.login("usage_reader")
+        self.assertEqual(
+            self.client.get("/api/v1/users", headers=self.headers).status_code, 403
+        )
+        self.model.operation, self.model.arguments, self.model.prepare = (
+            "user.token_usage",
+            {},
+            True,
+        )
+        run = self.start()
+        interaction = run["interaction"]
+        self.assertEqual(interaction["kind"], "collect_parameters")
+        target = next(
+            field
+            for field in interaction["fields"]
+            if field["pointer"] == "/path/user_id"
+        )
+        self.assertIsNone(target["source"])
+        done = self.final(self.submit(run, values={"/path/user_id": self.user_id}))
+        result = done["executions"][0]["result"]
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["body"]["data"]["user_id"], self.user_id)
 
     def test_date_range_includes_both_days_at_beijing_boundaries(self):
         self.now = datetime(2026, 11, 17, 15, 59, 59, tzinfo=UTC)

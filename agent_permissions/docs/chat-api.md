@@ -136,7 +136,7 @@ async def chat(session_token: str):
 
 ### 按用户查询模型用量
 
-`GET /api/v1/users/{user_id}/token-usage` 使用业务会话令牌。登录账号可以查询自己。查看其他账号需要 `agent.usage.read`，内置管理员升级后获得该权限。
+`GET /api/v1/users/me/token-usage` 从业务会话令牌取得当前账号。`GET /api/v1/users/{user_id}/token-usage` 支持按用户 ID 查询，查看其他账号需要 `agent.usage.read`，内置管理员具有该权限。
 
 `from_date` 和 `to_date` 接受 `YYYY-MM-DD`，按北京时间包含首尾两天。任一日期省略时，对应一侧没有日期限制。两项都省略时返回已记录的累计用量。
 
@@ -148,6 +148,8 @@ async def chat(session_token: str):
 | `legacy_runs` | 升级时从仍有用量的任务导入的记录数。按任务创建日期计入 token 合计，历史调用次数未知。 |
 
 Console 侧栏的「模型用量」默认展示当前账号。用户管理中的「查看模型用量」会打开已选账号。新用量按上游调用独立保存，会话清理后仍可查询。升级前已清理或未上报的用量无法从旧任务补录。
+
+两条 API 分别生成 `agent_users_user_self_token_usage` 和 `agent_users_user_token_usage`。在用户管理的 Agent 工具授权中启用后，Agent 可按需发现并调用对应工具。按 ID 查询工具还需要 `agent.usage.read`。
 
 模型客户端在首次访问模型目录或发起对话时加载，并复用至服务退出；修改模型配置后需重启服务。
 

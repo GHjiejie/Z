@@ -1,6 +1,6 @@
 # API Agent 工具使用与同步
 
-用户管理服务的 21 个业务接口现已一一生成 Agent 工具，包含登录、退出、用户管理、个人设置以及角色权限管理。工具沿原有 HTTP 路由执行，沿用事务、实时 RBAC、会话撤销、版本校验、限流和业务审计。
+用户管理服务从 23 个业务接口生成对应的 Agent 工具，涵盖登录、退出、用户管理、个人设置、角色权限和模型用量。工具沿原有 HTTP 路由执行，沿用事务、实时 RBAC、会话撤销、版本校验、限流和业务审计。
 
 当前实现对应[设计方案](../../api-agent-tools-design.md)的第一阶段。通用生成、执行和 LangChain 适配代码位于 [api_tools](../../api_tools/)，项目只提供操作元数据、可信会话上下文和同源调用入口。
 
@@ -27,6 +27,13 @@ flowchart TB
 新增或修改业务接口时，维护原有路由、请求响应类型和 `operations.py` 中的操作声明。路由的 `name` 作为稳定 `operationId`，`ContractRoute` 自动把说明和权限导出为 `x-agent`。服务层从同一操作声明读取所需权限，并在原有业务事务内检查。
 
 工具名称为 `agent_users_` 加上转换后的 `operationId`，例如 `user.self.read` 对应 `agent_users_user_self_read`。路径调整时保持操作标识稳定；语义或输入结构不兼容时使用新工具标识或兼容版本。
+
+| 模型用量工具 | 绑定接口 | 授权要求 |
+| --- | --- | --- |
+| `agent_users_user_self_token_usage` | `GET /api/v1/users/me/token-usage` | 当前账号的会话和该工具的 Agent 授权。 |
+| `agent_users_user_token_usage` | `GET /api/v1/users/{user_id}/token-usage` | 当前账号的会话、该工具的 Agent 授权和 `agent.usage.read`。 |
+
+两个工具均接受可选的 `query.from_date` 和 `query.to_date`，按北京时间统计。查询指定账号需提供 `path.user_id`，Agent 可通过表单收集缺少的目标 ID。[用量接口](chat-api.md#按用户查询模型用量)
 
 不用编写逐个工具的包装函数。新增路由未声明元数据、隐藏的业务路由、标识冲突、路由与契约遗漏、不支持的 Schema 都会使生成或启动失败。Console、文档页面、静态资源以及工具控制入口有明确的排除声明。
 
@@ -194,4 +201,4 @@ uv run ruff check api_tools agent_permissions
 uv run ruff format --check api_tools agent_permissions
 ```
 
-测试使用临时 SQLite，覆盖全部 21 个业务操作的真实 HTTP 工具调用，以及新增参数、必填参数变化、路由新增或删除、未分类路由、旧版本 callable、权限撤销、匿名访问、无效输入、超时与响应结构不匹配。测试不访问现有业务数据库，不调用模型。
+测试使用临时 SQLite，覆盖全部 23 个工具的真实 HTTP 调用，以及新增参数、必填参数变化、路由新增或删除、未分类路由、旧版本 callable、权限撤销、匿名访问、无效输入、超时与响应结构不匹配。测试不访问现有业务数据库，不调用真实模型。

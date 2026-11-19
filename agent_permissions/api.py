@@ -239,6 +239,20 @@ def own_permissions(service: Service, identity: Identity, info: Info) -> dict:
     return result(info, service.own_permissions(identity, info))
 
 
+@router.get(
+    "/users/me/token-usage",
+    response_model=Envelope[TokenUsageSummary],
+    name="user.self.token_usage",
+)
+def own_token_usage(
+    query: Annotated[TokenUsageQuery, Query()],
+    service: Service,
+    identity: Identity,
+    info: Info,
+) -> dict:
+    return result(info, service.token_usage(identity, None, query, info))
+
+
 @router.post(
     "/users", status_code=201, response_model=Envelope[User], name="user.create"
 )
@@ -279,7 +293,6 @@ def get_user(
     "/users/{user_id}/token-usage",
     response_model=Envelope[TokenUsageSummary],
     name="user.token_usage",
-    openapi_extra={"x-agent": {"expose": False, "reason": "Account usage reporting"}},
 )
 def token_usage(
     user_id: UserId,

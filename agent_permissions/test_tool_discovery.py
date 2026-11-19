@@ -169,6 +169,9 @@ class DiscoveryTests(unittest.TestCase):
             ("创建用户", "user.create"),
             ("为成员重设口令", "user.password.reset"),
             ("我的账号信息", "user.self.read"),
+            ("查询我的 Token 消耗量", "user.self.token_usage"),
+            ("查询指定用户的模型用量", "user.token_usage"),
+            ("tokens", "user.self.token_usage"),
             ("list users", "user.list"),
             ("agent_users_role_options", "role.options"),
         ]:
@@ -195,6 +198,20 @@ class DiscoveryTests(unittest.TestCase):
             self.assertEqual(
                 matching_operations([*tools, future], query), ["exportInvoices"]
             )
+
+    def test_model_usage_tool_is_found_and_executes_with_date_parameters(self):
+        name = "agent_users_user_self_token_usage"
+        run = self.chat(
+            [search("查询我的 Token 消耗量")],
+            [{"name": name, "args": {"query": {"from_date": "2026-11-17"}}}],
+        )
+        self.assertEqual(self.model.offered[0], [SEARCH_NAME])
+        self.assertIn(name, self.model.offered[1])
+        self.assertIsNone(run["interaction"])
+        self.assertEqual(run["executions"][0]["operation_id"], "user.self.token_usage")
+        result = self.model.results[-1][0]["body"]["data"]
+        self.assertEqual(result["user_id"], self.user_id)
+        self.assertEqual(result["from_date"], "2026-11-17")
 
     def test_each_search_replaces_candidates_and_a_new_run_starts_empty(self):
         read = {"name": "agent_users_user_self_read", "args": {}}

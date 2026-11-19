@@ -191,19 +191,21 @@ class UserService:
     def token_usage(
         self,
         authority: Authority,
-        user_id: str,
+        user_id: str | None,
         query: TokenUsageQuery,
         info: RequestInfo,
     ) -> TokenUsageSummary:
         with self.database.transaction() as connection:
             actor = self._authorize(connection, authority, info, None)
-            if user_id != actor["id"]:
-                if "agent.usage.read" not in permissions_for(connection, actor["id"]):
+            target_id = actor["id"] if user_id is None else user_id
+            if target_id != actor["id"]:
+                required = operation_spec("user.token_usage").all_permissions
+                if not set(required) <= set(permissions_for(connection, actor["id"])):
                     raise ApiError(
                         403, "PERMISSION_DENIED", "没有查看其他账号用量的权限"
                     )
-                self._target(connection, user_id)
-            return user_usage_summary(connection, user_id, query)
+                self._target(connection, target_id)
+            return user_usage_summary(connection, target_id, query)
 
     def record_failure(
         self,

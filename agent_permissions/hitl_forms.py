@@ -42,6 +42,8 @@ LABELS = {
     "q": "查询关键词",
     "sort_by": "排序字段",
     "sort_order": "排序方向",
+    "from_date": "开始日期",
+    "to_date": "结束日期",
 }
 SECRET_NAMES = {
     "password",
@@ -336,6 +338,11 @@ async def prepare_form(
                 )
             draft["header"] = {"If-Match": etag}
     fields = fields_for(tool["definition"]["inputSchema"], draft)
+    if operation == "user.token_usage":
+        # A usage reader can supply an ID even without permission to list accounts.
+        for field in fields:
+            if field["pointer"] == "/path/user_id":
+                field.update(label="目标用户 ID", source=None)
     missing = any(field["required"] and not field["present"] for field in fields)
     return {
         "title": _label(operation, tool)[0],

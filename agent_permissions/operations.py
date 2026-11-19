@@ -54,6 +54,10 @@ OPERATIONS = {
     "user.self.permissions": OperationSpec(
         "查看当前用户的角色与实时权限。", ("user.self.read",)
     ),
+    "user.self.token_usage": OperationSpec(
+        "查询当前登录账号的模型 Token 用量。用户由登录态确定。"
+        "可选开始、结束日期按北京时间计算，省略日期时查询累计用量。"
+    ),
     "user.self.update": OperationSpec(
         "更新当前用户资料。通过 header.If-Match 提交最近读取的 ETag。",
         ("user.self.update",),
@@ -78,6 +82,11 @@ OPERATIONS = {
     ),
     "user.read": OperationSpec(
         "读取指定用户资料及 ETag，用于后续版本校验。", ("user.read",)
+    ),
+    "user.token_usage": OperationSpec(
+        "按用户 ID 查询指定账号的模型 Token 用量。使用已知的用户 ID。"
+        "可选开始、结束日期按北京时间计算，省略日期时查询累计用量。",
+        ("agent.usage.read",),
     ),
     "user.update": OperationSpec(
         "修改指定用户资料。需提交最近读取的 header.If-Match；冲突时重新读取后处理。",

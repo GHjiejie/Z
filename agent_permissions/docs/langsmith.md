@@ -43,7 +43,7 @@ make -C agent_permissions run
 3. 查看名为 `agent_permissions.chat` 的根调用链，展开模型节点和工具节点。
 4. 使用 `metadata.request_id` 与接口响应的 `X-Request-ID` 对应，关联服务日志和业务审计。
 
-每条根调用链的 metadata 包含 `request_id`、`model`、`stream`、`tool_count` 和 `tool_names`。工具数量来自本次按权限过滤、并排除登录工具后的最终列表。例如默认全权限管理员为 20 个。`tool_names` 表示本次可用工具，实际调用的工具由子调用链体现。
+每条根调用链的 metadata 包含 `request_id`、`model`、`stream`、`tool_count` 和 `tool_names`。工具数量取决于当前角色权限和账号的 Agent 工具授权。授权全部业务工具的管理员可用 22 个。`tool_names` 表示本次可用工具，实际调用的工具由子调用链体现。
 
 SSE 追踪上下文持续到生成结束或取消；结束时恢复上下文，避免并发请求互相关联。LangGraph 保持使用 `astream_events(version="v3")`。
 

@@ -206,7 +206,7 @@ class UserAgentGrantTests(unittest.TestCase):
             403,
         )
         snapshot = self.app.state.tool_registry.snapshot()
-        self.assertEqual(len(snapshot["tools"]), 21)
+        self.assertEqual(len(snapshot["tools"]), 23)
         self.assertFalse(
             any(
                 tool["binding"]["operationId"].startswith("user.agent_tools.")

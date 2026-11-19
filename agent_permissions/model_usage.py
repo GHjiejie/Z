@@ -7,7 +7,7 @@ from typing import Literal, NamedTuple, Self
 from uuid import uuid4
 from zoneinfo import ZoneInfo
 
-from pydantic import field_validator, model_validator
+from pydantic import Field, field_validator, model_validator
 
 from agent_permissions.models import StrictModel
 from agent_permissions.storage import Connection, DatabaseBackend
@@ -48,8 +48,12 @@ REPORT_TIMEZONE = "Asia/Shanghai"
 
 
 class TokenUsageQuery(StrictModel):
-    from_date: date | None = None
-    to_date: date | None = None
+    from_date: date | None = Field(
+        default=None, description="开始日期，格式 YYYY-MM-DD，按北京时间计入当天"
+    )
+    to_date: date | None = Field(
+        default=None, description="结束日期，格式 YYYY-MM-DD，按北京时间计入当天"
+    )
 
     @field_validator("from_date", "to_date", mode="before")
     @classmethod
