@@ -20,6 +20,11 @@ from agent_permissions.agent_grants import config_view, grants_for, save_changes
 from agent_permissions.config import Settings
 from agent_permissions.errors import ApiError, invalid_field
 from agent_permissions.hitl_execution import guard_execution, record_execution
+from agent_permissions.model_usage import (
+    TokenUsageQuery,
+    TokenUsageSummary,
+    user_usage_summary,
+)
 from agent_permissions.models import (
     AgentToolGrantsUpdate,
     PasswordChange,
@@ -182,6 +187,23 @@ class UserService:
             if "agent.audit.read" not in permissions_for(conn, user["id"]):
                 raise ApiError(403, "PERMISSION_DENIED", "没有查看审计记录的权限")
             self._audit(conn, info, "agent.audit.read", None)
+
+    def token_usage(
+        self,
+        authority: Authority,
+        user_id: str,
+        query: TokenUsageQuery,
+        info: RequestInfo,
+    ) -> TokenUsageSummary:
+        with self.database.transaction() as connection:
+            actor = self._authorize(connection, authority, info, None)
+            if user_id != actor["id"]:
+                if "agent.usage.read" not in permissions_for(connection, actor["id"]):
+                    raise ApiError(
+                        403, "PERMISSION_DENIED", "没有查看其他账号用量的权限"
+                    )
+                self._target(connection, user_id)
+            return user_usage_summary(connection, user_id, query)
 
     def record_failure(
         self,

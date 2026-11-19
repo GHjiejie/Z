@@ -20,6 +20,7 @@ from agent_permissions.database import (
     Database,
 )
 from agent_permissions.hitl_schema import HITL_SCHEMA
+from agent_permissions.model_usage import MODEL_USAGE_SCHEMA, backfill_run_usage
 
 # Fixed application namespace, shared across processes and schema revisions.
 WRITE_LOCK = (0x41555052, 2)
@@ -318,7 +319,7 @@ class PostgresDatabase:
             version = connection.execute(
                 "SELECT version FROM schema_metadata WHERE key='schema_version'"
             ).fetchone()
-            if version is not None and version[0] not in (2, 3, 4, 5, 6):
+            if version is not None and version[0] not in (2, 3, 4, 5, 6, 7):
                 raise RuntimeError("Unsupported user database schema version")
             # BIGINT and DOUBLE PRECISION retain SQLite's integer/float range.
             schema = (
@@ -328,6 +329,7 @@ class PostgresDatabase:
                     + AGENT_GRANTS_SCHEMA
                     + HITL_SCHEMA
                     + SOURCE_SCHEMA
+                    + MODEL_USAGE_SCHEMA
                 )
                 .replace(" INTEGER", " BIGINT")
                 .replace(" REAL", " DOUBLE PRECISION")
@@ -345,6 +347,8 @@ class PostgresDatabase:
                 ) $$""")
             if seed:
                 Database._seed_catalog(connection)
+            if version is None or version[0] < 7:
+                backfill_run_usage(connection)
             connection.execute(
-                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',6) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
+                "INSERT INTO schema_metadata(key,version) VALUES('schema_version',7) ON CONFLICT(key) DO UPDATE SET version=excluded.version"
             )

@@ -1008,6 +1008,7 @@ class UserApiTests(unittest.TestCase):
                 ("GET", "/api/v1/audit/agent-operations"),
                 ("GET", "/api/v1/audit/agent-operations/{call_id}"),
                 ("GET", "/api/v1/audit/agent-grant-changes"),
+                ("GET", "/api/v1/users/{user_id}/token-usage"),
                 ("GET", "/agent-tools"),
                 ("POST", "/agent-tools/call"),
                 ("GET", "/v1/models"),
