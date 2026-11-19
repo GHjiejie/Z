@@ -17,6 +17,11 @@ import {
   type ChatMessageInput,
   type ChatStreamResult,
 } from "./chatStream";
+import {
+  tokenUsageSummary,
+  type TokenUsageQuery,
+  type TokenUsageSummary,
+} from "./tokenUsage";
 export { ApiError, errorMessage, aborted } from "./errors";
 
 export type RoleCode = string;
@@ -688,6 +693,24 @@ export class ApiClient {
         page: number(data.page),
         page_size: number(data.page_size),
       };
+    });
+  }
+  async tokenUsage(
+    userId: string,
+    query: TokenUsageQuery,
+    signal: AbortSignal,
+  ): Promise<TokenUsageSummary> {
+    const search = new URLSearchParams();
+    if (query.from_date) search.set("from_date", query.from_date);
+    if (query.to_date) search.set("to_date", query.to_date);
+    const path = `/users/${encodeURIComponent(userId)}/token-usage`;
+    const result = await this.send(search.size ? `${path}?${search}` : path, {
+      signal,
+    });
+    return this.decode(result.data, (value) => {
+      const summary = tokenUsageSummary.parse(value);
+      if (summary.user_id !== userId) throw new Error("Unexpected user ID");
+      return summary;
     });
   }
   async getUser(id: string, signal?: AbortSignal): Promise<UserRecord> {

@@ -43,6 +43,8 @@ SYNONYMS = {
     "个人": "自己",
     "我的": "自己",
     "我是谁": "自己的资料",
+    "消耗量": "用量",
+    "消耗": "用量",
 }
 TERM_ALIASES = {
     "user": "用户",
@@ -66,9 +68,11 @@ TERM_ALIASES = {
     "logout": "退出",
     "enable": "启用",
     "disable": "禁用",
+    "token": "用量",
+    "usage": "用量",
 }
 ACTIONS = {"新增", "查询", "更新", "删除", "重置", "分配", "退出", "启用", "禁用"}
-RESOURCES = {"用户", "角色", "权限", "密码"}
+RESOURCES = {"用户", "角色", "权限", "密码", "用量"}
 
 
 def _terms(text: str) -> set[str]:
@@ -76,7 +80,7 @@ def _terms(text: str) -> set[str]:
     for alias, canonical in SYNONYMS.items():
         text = text.replace(alias, canonical)
     terms = set(re.findall(r"[a-z0-9]+", text))
-    for plural in ("users", "roles", "permissions", "tools"):
+    for plural in ("users", "roles", "permissions", "tools", "tokens"):
         if plural in terms:
             terms.add(plural[:-1])
     for word in re.findall(r"[\u3400-\u9fff]+", text):

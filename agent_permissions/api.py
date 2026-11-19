@@ -29,6 +29,7 @@ from agent_permissions.console_ui import mount_console
 from agent_permissions.database import create_database
 from agent_permissions.database_errors import connection_failure_reason
 from agent_permissions.errors import ApiError, invalid_field
+from agent_permissions.model_usage import TokenUsageQuery, TokenUsageSummary
 from agent_permissions.models import (
     AgentToolGrantsUpdate,
     Envelope,
@@ -238,6 +239,20 @@ def own_permissions(service: Service, identity: Identity, info: Info) -> dict:
     return result(info, service.own_permissions(identity, info))
 
 
+@router.get(
+    "/users/me/token-usage",
+    response_model=Envelope[TokenUsageSummary],
+    name="user.self.token_usage",
+)
+def own_token_usage(
+    query: Annotated[TokenUsageQuery, Query()],
+    service: Service,
+    identity: Identity,
+    info: Info,
+) -> dict:
+    return result(info, service.token_usage(identity, None, query, info))
+
+
 @router.post(
     "/users", status_code=201, response_model=Envelope[User], name="user.create"
 )
@@ -272,6 +287,21 @@ def get_user(
     info: Info,
 ) -> dict:
     return user_result(response, info, service.get_user(identity, user_id, info))
+
+
+@router.get(
+    "/users/{user_id}/token-usage",
+    response_model=Envelope[TokenUsageSummary],
+    name="user.token_usage",
+)
+def token_usage(
+    user_id: UserId,
+    query: Annotated[TokenUsageQuery, Query()],
+    service: Service,
+    identity: Identity,
+    info: Info,
+) -> dict:
+    return result(info, service.token_usage(identity, user_id, query, info))
 
 
 @router.patch("/users/{user_id}", response_model=Envelope[User], name="user.update")

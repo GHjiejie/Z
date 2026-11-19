@@ -472,6 +472,117 @@ tbody tr {
   line-height: 16px;
   color: var(--text-muted);
 }
+.usage-query {
+  padding: 20px 24px;
+  margin-bottom: 24px;
+}
+.usage-filters {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+}
+.usage-filters-account {
+  grid-template-columns: minmax(0, 1.7fr) repeat(2, minmax(0, 1fr)) auto;
+}
+.usage-filters .field {
+  min-width: 0;
+  align-self: start;
+}
+.usage-filters input {
+  width: 100%;
+  min-width: 0;
+}
+.usage-filters > .button {
+  align-self: start;
+  margin-top: 28px;
+}
+.usage-note {
+  margin-top: 12px;
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--text-secondary);
+}
+.usage-results-heading {
+  display: flex;
+  align-items: start;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  margin-bottom: 16px;
+}
+.usage-results-heading > div {
+  min-width: 0;
+}
+.usage-results-heading h2 {
+  font-size: 18px;
+  font-weight: 600;
+}
+.usage-results-heading p,
+.usage-period {
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+.usage-results-heading p {
+  margin-top: 4px;
+  overflow-wrap: anywhere;
+}
+.usage-stats dd,
+.usage-counts dd {
+  margin: 0;
+}
+.usage-stats .stat-card {
+  min-height: 120px;
+  overflow-wrap: anywhere;
+}
+.usage-stats .stat-card small {
+  display: block;
+}
+.usage-counts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px 24px;
+  padding: 16px 24px;
+  font-size: 13px;
+  color: var(--text-secondary);
+}
+.usage-counts > div {
+  display: flex;
+  gap: 8px;
+}
+.usage-counts dd {
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  color: var(--text-primary);
+}
+@media (max-width: 1024px) {
+  .usage-filters-account {
+    grid-template-columns: repeat(2, minmax(0, 1fr)) auto;
+  }
+  .usage-filters-account .field:first-child {
+    grid-column: 1 / -1;
+  }
+}
+@media (max-width: 620px) {
+  .usage-query,
+  .usage-counts {
+    padding: 16px;
+  }
+  .usage-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .usage-filters > .button {
+    grid-column: 1 / -1;
+    justify-self: start;
+    margin-top: 0;
+  }
+  .usage-stats.stats-grid {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .usage-stats .stat-card {
+    min-height: auto;
+  }
+}
 .panel {
   min-width: 0;
   border: 1px solid var(--border);

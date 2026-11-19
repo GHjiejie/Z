@@ -8,7 +8,7 @@ async function login(page: Page) {
   await expect(page.getByLabel("聊天模型")).toHaveValue("fixture-model");
   await expect(
     page.getByLabel("Agent 工具状态", { exact: true }),
-  ).toContainText("可用业务工具：20 个");
+  ).toContainText("可用业务工具：22 个");
 }
 
 for (const viewport of [

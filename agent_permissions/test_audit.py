@@ -710,7 +710,7 @@ class AuditMigrationTests(unittest.TestCase):
             database.initialize()
             database.initialize()
             with database.transaction() as conn:
-                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 6)
+                self.assertEqual(conn.execute("PRAGMA user_version").fetchone()[0], 7)
                 self.assertEqual(
                     conn.execute("SELECT id FROM audit_events").fetchone()[0], "old"
                 )

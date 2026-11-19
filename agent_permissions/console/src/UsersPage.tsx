@@ -50,6 +50,7 @@ export function UsersPage({
   notify,
   onSelfChanged,
   onProfile,
+  onUsage,
 }: {
   api: ApiClient;
   currentUser: User;
@@ -57,6 +58,7 @@ export function UsersPage({
   notify: (message: string) => void;
   onSelfChanged: (record: UserRecord) => void;
   onProfile: () => void;
+  onUsage: (userId: string) => void;
 }) {
   const [query, setQuery] = useState<UserQuery>(defaults);
   const [search, setSearch] = useState("");
@@ -165,6 +167,8 @@ export function UsersPage({
     const self = user.id === currentUser.id;
     const items: MenuAction[] = [];
     items.push({ label: "Agent 工具授权", onClick: () => setAgentUser(user) });
+    if (self || can("agent.usage.read"))
+      items.push({ label: "查看模型用量", onClick: () => onUsage(user.id) });
     if (can("user.roles.assign"))
       items.push({
         label: "设置角色",

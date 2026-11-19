@@ -121,7 +121,7 @@ HTTP `422` 字段错误在图恢复前返回，保持卡片可编辑。授权或
 
 ## 持久化、配置和升级
 
-schema 从 3 升级为 4 时新增 `agent_chat_runs`、`agent_interactions`、`agent_tool_executions`、`agent_checkpoints`、`agent_checkpoint_writes` 五张表；当前 schema 5 另增 `agent_workflow_entries` 保存公开执行步骤。SQLite 和 PostgreSQL 使用同一数据库边界的 checkpoint 适配器；启动时原子升级，保留账号、角色、用户工具授权与会话，已有等待任务可以继续处理。Console 现在通过 [AG-UI 原生中断与恢复](ag-ui.md)接入，本文的命名 SSE 接口继续兼容。
+schema 从 3 升级为 4 时新增 `agent_chat_runs`、`agent_interactions`、`agent_tool_executions`、`agent_checkpoints`、`agent_checkpoint_writes` 五张表。schema 5 增加 `agent_workflow_entries` 保存公开执行步骤。SQLite 和 PostgreSQL 使用同一数据库边界的 checkpoint 适配器。启动时在事务中升级，保留账号、角色、用户工具授权与会话，已有等待任务可以继续处理。Console 通过 AG-UI 原生中断与恢复接入，本文的命名 SSE 接口继续兼容。按账号长期统计的模型用量保存在 schema 7 的独立记录中。[模型用量](chat-api.md#按用户查询模型用量) · [AG-UI 原生中断与恢复](ag-ui.md)
 
 SQLite 事务在进程内串行使用短连接，跨进程写入仍由 `BEGIN IMMEDIATE` 保护，以避免当前 SQLite 构建并发开关 WAL 连接时的内部锁竞争。PostgreSQL 继续使用原连接池和事务级写锁，等待用户时不占连接。
 

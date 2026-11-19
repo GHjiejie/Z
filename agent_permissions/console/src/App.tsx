@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import {
   ArrowUpRight,
+  ChartColumn,
   ChevronRight,
   LogOut,
   MessageSquare,
@@ -22,22 +23,38 @@ import {
   type ToastValue,
 } from "./components";
 import { useSession } from "./useSession";
+import { TokenUsagePage } from "./TokenUsagePage";
 import { UsersPage } from "./UsersPage";
 
-type Page = "users" | "roles" | "profile" | "chat";
-function route(): Page {
-  return location.hash === "#chat"
-    ? "chat"
-    : location.hash === "#roles"
-      ? "roles"
-      : location.hash === "#profile"
-        ? "profile"
-        : "users";
+type Page = "users" | "roles" | "profile" | "chat" | "usage";
+
+const pageTitles: Record<Page, string> = {
+  users: "用户管理",
+  roles: "角色与权限",
+  profile: "个人设置",
+  chat: "会话",
+  usage: "模型用量",
+};
+
+function route(hash: string): Page {
+  switch (hash.split("?")[0]) {
+    case "#chat":
+      return "chat";
+    case "#roles":
+      return "roles";
+    case "#usage":
+      return "usage";
+    case "#profile":
+      return "profile";
+    default:
+      return "users";
+  }
 }
 
 export function App() {
   const session = useSession();
-  const [page, setPage] = useState<Page>(route);
+  const [hash, setHash] = useState(() => location.hash);
+  const page = route(hash);
   const [toast, setToast] = useState<ToastValue | null>(null);
   const [logoutError, setLogoutError] = useState<unknown>(null);
   const [loggingOut, setLoggingOut] = useState(false);
@@ -48,15 +65,16 @@ export function App() {
   const dismiss = useCallback(() => setToast(null), []);
   const navigate = useCallback((next: Page) => {
     location.hash = next;
-    setPage(next);
+    setHash(location.hash);
   }, []);
   useEffect(() => {
-    const changed = () => setPage(route());
+    const changed = () => setHash(location.hash);
     window.addEventListener("hashchange", changed);
     return () => window.removeEventListener("hashchange", changed);
   }, []);
   const canManage = session.permissions.includes("user.read");
   const canRoles = session.permissions.includes("role.read");
+  const canReadUsage = session.permissions.includes("agent.usage.read");
   useEffect(() => {
     if (session.record && !session.loading) {
       if ((page === "users" && !canManage) || (page === "roles" && !canRoles))
@@ -105,14 +123,15 @@ export function App() {
       </main>
     );
   const user = session.record.user;
-  const title =
-    page === "users"
-      ? "用户管理"
-      : page === "chat"
-        ? "会话"
-        : page === "roles"
-          ? "角色与权限"
-          : "个人设置";
+  const requestedUsageUser = new URLSearchParams(hash.split("?")[1]).get(
+    "user_id",
+  );
+  const usageUserId =
+    canReadUsage &&
+    requestedUsageUser &&
+    /^[A-Za-z0-9_-]{1,64}$/.test(requestedUsageUser)
+      ? requestedUsageUser
+      : user.id;
   const accountControls = (
     <div className="topbar-account">
       <button
@@ -159,6 +178,10 @@ export function App() {
           <a href="#chat" aria-current={page === "chat" ? "page" : undefined}>
             <MessageSquare size={18} />
             <span>会话</span>
+          </a>
+          <a href="#usage" aria-current={page === "usage" ? "page" : undefined}>
+            <ChartColumn size={18} aria-hidden="true" />
+            <span>{pageTitles.usage}</span>
           </a>
           {canManage && (
             <a
@@ -220,7 +243,7 @@ export function App() {
             <div className="breadcrumb">
               <span>Console</span>
               <ChevronRight size={16} />
-              <strong>{title}</strong>
+              <strong>{pageTitles[page]}</strong>
             </div>
             {accountControls}
           </header>
@@ -238,6 +261,10 @@ export function App() {
               notify={notify}
               onSelfChanged={session.setRecord}
               onProfile={() => navigate("profile")}
+              onUsage={(userId) => {
+                location.hash = `usage?${new URLSearchParams({ user_id: userId })}`;
+                setHash(location.hash);
+              }}
             />
           )}
           {page === "chat" && (
@@ -256,6 +283,14 @@ export function App() {
               permissions={session.permissions}
               notify={notify}
               onPermissionsChanged={session.refresh}
+            />
+          )}
+          {page === "usage" && (
+            <TokenUsagePage
+              key={`${user.id}:${usageUserId}:${canReadUsage}`}
+              api={session.api}
+              userId={usageUserId}
+              canReadOthers={canReadUsage}
             />
           )}
           {page === "profile" && (

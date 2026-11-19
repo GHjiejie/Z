@@ -122,8 +122,10 @@ class UserToolTests(unittest.TestCase):
         self.called.add(operation)
         return result
 
-    def test_all_21_operations_execute_through_generated_tools(self) -> None:
-        self.assertEqual(len(self.catalog["tools"]), 21)
+    def test_all_exposed_operations_execute_through_generated_tools(self) -> None:
+        self.assertEqual(
+            len(self.catalog["tools"]), sum(spec.expose for spec in OPERATIONS.values())
+        )
         login = self.call(
             "auth.login",
             {"body": {"username": "admin", "password": PASSWORD}},
@@ -134,6 +136,8 @@ class UserToolTests(unittest.TestCase):
         }
         own = self.call("user.self.read")
         self.call("user.self.permissions")
+        own_usage = self.call("user.self.token_usage")["body"]["data"]
+        self.assertEqual(own_usage["user_id"], own["body"]["data"]["id"])
         self.call(
             "user.self.update",
             {
@@ -153,6 +157,10 @@ class UserToolTests(unittest.TestCase):
             status=201,
         )
         user_id = created["body"]["data"]["id"]
+        usage = self.call("user.token_usage", {"path": {"user_id": user_id}})["body"][
+            "data"
+        ]
+        self.assertEqual(usage["user_id"], user_id)
         self.call("user.list", {"query": {"q": "member", "page_size": 1}})
         current = self.call("user.read", {"path": {"user_id": user_id}})
         for operation, body in [

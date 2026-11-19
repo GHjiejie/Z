@@ -128,7 +128,7 @@ class DatabaseLifecycleTests(unittest.TestCase):
             database.initialize()
             with database.transaction() as connection:
                 self.assertEqual(
-                    connection.execute("PRAGMA user_version").fetchone()[0], 6
+                    connection.execute("PRAGMA user_version").fetchone()[0], 7
                 )
 
     def test_app_cleanup_covers_open_and_initialize_failures(self) -> None:

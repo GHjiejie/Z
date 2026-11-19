@@ -21,6 +21,7 @@ from agent_permissions import (
     test_api,
     test_audit,
     test_hitl,
+    test_model_usage,
     test_rbac,
     test_tool_discovery,
 )
@@ -119,6 +120,13 @@ class PostgresHitlTests(PostgresFixture, test_hitl.HitlTests):
     TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
 )
 class PostgresAguiTests(PostgresFixture, test_agui.AguiTests):
+    pass
+
+
+@unittest.skipUnless(
+    TEST_URL, "Set AGENT_USERS_TEST_DATABASE_URL for PostgreSQL integration tests"
+)
+class PostgresModelUsageTests(PostgresFixture, test_model_usage.ModelUsageTests):
     pass
 
 
@@ -293,7 +301,7 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
                 target.execute(
                     "SELECT version FROM schema_metadata WHERE key='schema_version'"
                 ).fetchone()[0],
-                6,
+                7,
             )
             self.assertEqual(
                 target.execute("SELECT count(*) FROM users").fetchone()[0], 2
@@ -335,6 +343,7 @@ class PostgresMigrationTests(PostgresFixture, unittest.TestCase):
         self.assertGreater(report["tables"]["agent_audit_outbox"]["rows"], 0)
         self.assertGreater(report["tables"]["agent_audit_call_refs"]["rows"], 0)
         self.assertGreater(report["tables"]["agent_checkpoints"]["rows"], 0)
+        self.assertGreater(report["tables"]["agent_model_usage"]["rows"], 0)
         settings = Settings(
             database_path=self.path, database_url=self.target.database_url
         )

@@ -536,5 +536,5 @@ test("工具状态查询失败可重试，普通聊天仍然可用", async ({ pa
   await expect(status.getByRole("alert")).toContainText("工具目录暂不可用");
   failed = false;
   await status.getByRole("button", { name: "重试", exact: true }).click();
-  await expect(status).toContainText("可用业务工具：20 个");
+  await expect(status).toContainText("可用业务工具：22 个");
 });

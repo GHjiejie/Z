@@ -38,6 +38,7 @@ from agent_permissions.hitl_forms import (
     validate_arguments,
 )
 from agent_permissions.hitl_store import GRAPH_VERSION, RunStore, identity
+from agent_permissions.model_usage_runtime import ModelUsageMeter
 from agent_permissions.tool_discovery import (
     SEARCH_NAME,
     SEARCH_SCHEMA,
@@ -376,9 +377,22 @@ async def build_graph(
             SystemMessage(content=SYSTEM_PROMPT + "\n" + tool_prompt),
             *state["messages"],
         ]
-        model_config = merge_configs(config, {"callbacks": [reasoning]})
-        try:
+
+        async def invoke_model() -> AIMessage:
+            meter = await ModelUsageMeter.start(
+                store.database,
+                user_id=run["user_id"],
+                run_id=run["id"],
+                model=payload["model"],
+                started_at=store.now(),
+            )
+            model_config = merge_configs(config, {"callbacks": [reasoning, meter]})
             response = await bound.ainvoke(messages, config=model_config, **options)
+            await meter.record(response.usage_metadata)
+            return response
+
+        try:
+            response = await invoke_model()
         except MODEL_TIMEOUT_ERRORS:
             # Only repeat the initial model request, before any streamed content or tool call.
             if state["turns"] or reasoning.received_output:
@@ -387,7 +401,7 @@ async def build_graph(
             await progress(
                 {"id": entry_id, "detail": "等待模型响应超时，正在重试首次请求"}
             )
-            response = await bound.ainvoke(messages, config=model_config, **options)
+            response = await invoke_model()
         response = safe_model_message(
             response, candidates, searchable=allowed if discovery_enabled else []
         )

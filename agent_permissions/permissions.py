@@ -15,6 +15,7 @@ PERMISSION_CATALOG = [
     ("user.roles.assign", "分配用户角色", "用户管理"),
     ("user.agent_tools.manage", "管理用户的 Agent 工具授权", "用户管理"),
     ("agent.audit.read", "查询 Agent 操作与授权审计", "审计"),
+    ("agent.usage.read", "查询其他用户的模型用量", "模型用量"),
     ("role.read", "查看角色与权限", "角色管理"),
     ("role.create", "新增角色", "角色管理"),
     ("role.update", "编辑角色及权限", "角色管理"),

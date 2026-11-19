@@ -134,6 +134,23 @@ async def chat(session_token: str):
 
 首次模型请求遇到传输超时，如果尚未收到正文、推理内容或工具调用片段，会在同一任务的时间预算内重试一次模型请求。已开始输出或已进入后续规划轮次时，服务会保留已有内容和执行记录，交由用户恢复。收到的用量以供应商实际返回为准。
 
+### 按用户查询模型用量
+
+`GET /api/v1/users/me/token-usage` 从业务会话令牌取得当前账号。`GET /api/v1/users/{user_id}/token-usage` 支持按用户 ID 查询，查看其他账号需要 `agent.usage.read`，内置管理员具有该权限。
+
+`from_date` 和 `to_date` 接受 `YYYY-MM-DD`，按北京时间包含首尾两天。任一日期省略时，对应一侧没有日期限制。两项都省略时返回已记录的累计用量。
+
+| 字段 | 含义 |
+| --- | --- |
+| `input_tokens`、`output_tokens`、`total_tokens` | 已确认的 token 合计。范围内没有上报的用量时返回 `null`。 |
+| `cached_input_tokens`、`reasoning_tokens` | 已上报的缓存命中和推理明细，分别包含在输入与输出合计里。 |
+| `model_calls`、`unknown_calls` | 模型调用尝试数和其中用量未知或尚未返回的次数。重试产生新的调用记录。 |
+| `legacy_runs` | 升级时从仍有用量的任务导入的记录数。按任务创建日期计入 token 合计，历史调用次数未知。 |
+
+Console 侧栏的「模型用量」默认展示当前账号。用户管理中的「查看模型用量」会打开已选账号。新用量按上游调用独立保存，会话清理后仍可查询。升级前已清理或未上报的用量无法从旧任务补录。
+
+两条 API 分别生成 `agent_users_user_self_token_usage` 和 `agent_users_user_token_usage`。在用户管理的 Agent 工具授权中启用后，Agent 可按需发现并调用对应工具。按 ID 查询工具还需要 `agent.usage.read`。
+
 模型客户端在首次访问模型目录或发起对话时加载，并复用至服务退出；修改模型配置后需重启服务。
 
 本接口实现面向业务 Agent 的 Chat Completions 核心能力。客户端自定义 `tools`、`response_format`、多候选、图像、音频、tool 角色历史等未实现参数会明确返回 `400`。对外 `/v1/responses` 不在本次兼容范围内；上游模型继续使用 Responses API。
