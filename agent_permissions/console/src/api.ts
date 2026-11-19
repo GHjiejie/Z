@@ -3,6 +3,14 @@ import type { RunAgentInput } from "@ag-ui/core";
 import { RunAgentInputSchema } from "@ag-ui/core/schemas";
 import { readAguiStream } from "./aguiStream";
 import {
+  auditGrantPage,
+  auditOperationDetail,
+  auditOperationPage,
+  auditQueryString,
+  type AuditOutcome,
+  type AuditQuery,
+} from "./auditRecords";
+import {
   decodeRun,
   decodeRuns,
   decodeOptions,
@@ -451,6 +459,35 @@ export class ApiClient {
     return this.decode(result.data, decodeRun);
   }
 
+  async auditOperations(
+    query: AuditQuery & { business_outcome?: AuditOutcome },
+    signal: AbortSignal,
+  ) {
+    const result = await this.send(
+      `/audit/agent-operations?${auditQueryString(query)}`,
+      { signal },
+    );
+    return this.decode(result.data, (value) => auditOperationPage.parse(value));
+  }
+
+  async auditOperation(callId: string, signal: AbortSignal) {
+    const result = await this.send(
+      `/audit/agent-operations/${encodeURIComponent(callId)}`,
+      { signal },
+    );
+    return this.decode(result.data, (value) =>
+      auditOperationDetail.parse(value),
+    );
+  }
+
+  async auditGrantChanges(query: AuditQuery, signal: AbortSignal) {
+    const result = await this.send(
+      `/audit/agent-grant-changes?${auditQueryString(query)}`,
+      { signal },
+    );
+    return this.decode(result.data, (value) => auditGrantPage.parse(value));
+  }
+
   async cancelChatRun(runId: string): Promise<ChatRun> {
     const result = await this.send(
       `/chat/runs/${encodeURIComponent(runId)}/cancel`,
@@ -695,6 +732,7 @@ export class ApiClient {
       };
     });
   }
+
   async tokenUsage(
     userId: string,
     query: TokenUsageQuery,

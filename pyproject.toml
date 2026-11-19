@@ -39,6 +39,9 @@ dependencies = [
 dev = [
     "ruff>=0.16.3",
 ]
+mcp = [
+    "fastmcp>=3.4.11,<4",
+]
 rag = [
     "boto3>=1.40,<2",
     "httpx>=0.28,<0.29",

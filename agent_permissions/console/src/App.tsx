@@ -3,6 +3,7 @@ import {
   ArrowUpRight,
   ChartColumn,
   ChevronRight,
+  ClipboardList,
   LogOut,
   MessageSquare,
   ShieldCheck,
@@ -11,6 +12,7 @@ import {
 } from "lucide-react";
 import { ApiError } from "./api";
 import { LoginPage, ProfilePage } from "./AccountPages";
+import { AuditPage } from "./AuditPage";
 import { RolesPage } from "./RolesPage";
 import { ChatPage } from "./ChatPage";
 import {
@@ -26,11 +28,12 @@ import { useSession } from "./useSession";
 import { TokenUsagePage } from "./TokenUsagePage";
 import { UsersPage } from "./UsersPage";
 
-type Page = "users" | "roles" | "profile" | "chat" | "usage";
+type Page = "users" | "roles" | "audit" | "profile" | "chat" | "usage";
 
 const pageTitles: Record<Page, string> = {
   users: "用户管理",
   roles: "角色与权限",
+  audit: "Agent 操作审计",
   profile: "个人设置",
   chat: "会话",
   usage: "模型用量",
@@ -42,6 +45,8 @@ function route(hash: string): Page {
       return "chat";
     case "#roles":
       return "roles";
+    case "#audit":
+      return "audit";
     case "#usage":
       return "usage";
     case "#profile":
@@ -74,13 +79,26 @@ export function App() {
   }, []);
   const canManage = session.permissions.includes("user.read");
   const canRoles = session.permissions.includes("role.read");
+  const canAudit = session.permissions.includes("agent.audit.read");
   const canReadUsage = session.permissions.includes("agent.usage.read");
   useEffect(() => {
     if (session.record && !session.loading) {
-      if ((page === "users" && !canManage) || (page === "roles" && !canRoles))
+      if (
+        (page === "users" && !canManage) ||
+        (page === "roles" && !canRoles) ||
+        (page === "audit" && !canAudit)
+      )
         navigate("profile");
     }
-  }, [session.record, session.loading, page, canManage, canRoles, navigate]);
+  }, [
+    session.record,
+    session.loading,
+    page,
+    canManage,
+    canRoles,
+    canAudit,
+    navigate,
+  ]);
 
   async function logout() {
     if (loggingOut) return;
@@ -201,6 +219,15 @@ export function App() {
               <span>角色与权限</span>
             </a>
           )}
+          {canAudit && (
+            <a
+              href="#audit"
+              aria-current={page === "audit" ? "page" : undefined}
+            >
+              <ClipboardList size={18} aria-hidden="true" />
+              <span>{pageTitles.audit}</span>
+            </a>
+          )}
           <a
             href="#profile"
             aria-current={page === "profile" ? "page" : undefined}
@@ -284,6 +311,9 @@ export function App() {
               notify={notify}
               onPermissionsChanged={session.refresh}
             />
+          )}
+          {page === "audit" && canAudit && (
+            <AuditPage key={user.id} api={session.api} />
           )}
           {page === "usage" && (
             <TokenUsagePage

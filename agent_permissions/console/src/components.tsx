@@ -473,6 +473,7 @@ export const permissionLabels: Record<string, string> = {
   "role.create": "新增角色",
   "role.update": "编辑角色及权限",
   "role.delete": "删除角色",
+  "agent.audit.read": "查询 Agent 操作与授权审计",
 };
 export function PermissionList({ permissions }: { permissions: string[] }) {
   return (

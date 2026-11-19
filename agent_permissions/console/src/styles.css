@@ -687,6 +687,194 @@ tbody tr {
 .table-scroll {
   overflow-x: auto;
 }
+/* The audit console shares table, button and modal styles with user management. */
+.audit-views {
+  display: flex;
+  gap: 24px;
+  padding: 0 24px;
+  border-bottom: 1px solid var(--border);
+}
+.audit-view {
+  min-height: 48px;
+  padding: 0 2px;
+  border: 0;
+  border-bottom: 2px solid transparent;
+  background: var(--surface);
+  color: var(--text-secondary);
+  font-weight: 500;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.audit-view[aria-pressed="true"] {
+  color: var(--primary-hover);
+  border-bottom-color: var(--primary);
+}
+.audit-filters {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr)) auto;
+  align-items: end;
+  gap: 12px;
+  padding: 20px 24px;
+}
+.audit-filters select {
+  display: block;
+  width: 100%;
+  margin-top: 8px;
+  font-size: 14px;
+}
+.audit-table {
+  min-width: 680px;
+}
+.audit-table time {
+  font-variant-numeric: tabular-nums;
+}
+.audit-table .audit-identity,
+.audit-table .audit-operation-name {
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.audit-operation-name strong {
+  display: block;
+  font-weight: 500;
+}
+.audit-table code,
+.audit-grant-change small {
+  display: block;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.audit-status {
+  display: inline-flex;
+  align-items: center;
+  border-radius: 4px;
+  padding: 2px 8px;
+  color: var(--text-secondary);
+  background: var(--raised);
+  font-size: 12px;
+  line-height: 20px;
+  white-space: nowrap;
+}
+.audit-status-succeeded {
+  background: var(--positive-soft);
+  color: var(--positive);
+}
+.audit-status-failed {
+  background: var(--danger-soft);
+  color: var(--danger);
+}
+.audit-detail-link,
+.audit-back {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+.modal.audit-dialog {
+  width: min(780px, calc(100vw - 32px));
+}
+.audit-dialog .modal-body {
+  overflow-wrap: anywhere;
+}
+.audit-back {
+  margin-bottom: 16px;
+}
+.audit-detail-content {
+  display: grid;
+  gap: 20px;
+}
+.audit-detail-summary,
+.audit-permission-heading {
+  display: flex;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+.audit-detail-summary {
+  justify-content: space-between;
+}
+.audit-detail-summary h3,
+.audit-detail-section h3 {
+  font-size: 16px;
+  font-weight: 500;
+}
+.audit-detail-summary code {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.audit-facts {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px 20px;
+  margin: 0;
+}
+.audit-facts dt,
+.audit-permission-heading time,
+.audit-records time,
+.audit-records code,
+.audit-detail-section summary small {
+  color: var(--text-muted);
+  font-size: 12px;
+}
+.audit-facts dd {
+  margin: 2px 0 0;
+  overflow-wrap: anywhere;
+}
+.audit-detail-section {
+  border-top: 1px solid var(--border);
+  padding-top: 16px;
+}
+.audit-detail-section summary {
+  cursor: pointer;
+}
+.audit-detail-section summary small {
+  margin-left: 4px;
+}
+.audit-references .audit-facts {
+  margin-top: 12px;
+}
+.audit-permissions,
+.audit-records {
+  list-style: none;
+  margin: 8px 0 0;
+  padding: 0;
+}
+.audit-permission,
+.audit-records li {
+  padding: 12px 0;
+  border-bottom: 1px solid var(--border);
+}
+.audit-permission:last-child,
+.audit-records li:last-child {
+  border-bottom: 0;
+}
+.audit-permission strong {
+  font-weight: 500;
+}
+.audit-permission-heading time {
+  margin-left: auto;
+}
+.audit-permission .audit-facts:not(:empty) {
+  margin-top: 8px;
+}
+.audit-check-decision {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+.audit-check-decision[data-decision="allowed"] {
+  color: var(--positive);
+}
+.audit-check-decision[data-decision="denied"] {
+  color: var(--danger);
+}
+.audit-records li {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 4px 12px;
+}
+.audit-records code {
+  display: block;
+}
 .table-mobile-hint {
   display: none;
 }
@@ -2137,6 +2325,17 @@ tbody tr:focus-within {
   .page-heading > .button {
     padding: 8px 12px;
     margin-top: 24px;
+  }
+  .audit-heading > .button {
+    margin-top: 0;
+    white-space: nowrap;
+  }
+  .audit-views {
+    padding: 0 16px;
+  }
+  .audit-filters {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    padding: 16px;
   }
   .stats-grid {
     gap: 8px;
