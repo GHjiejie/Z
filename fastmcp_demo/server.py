@@ -1,50 +1,54 @@
-"""Expose the sprint API as tools generated from its OpenAPI contract."""
+"""Load the backend's OpenAPI document and serve its operations over MCP."""
+
+import argparse
+import asyncio
 
 import httpx
-from fastapi import HTTPException
 from fastmcp import FastMCP
-from fastmcp.exceptions import ResourceError
 from fastmcp.server.providers.openapi import MCPType, RouteMap
 
-from fastmcp_demo.api import Task, app, get_task
 
-api_client = httpx.AsyncClient(
-    transport=httpx.ASGITransport(app=app),
-    base_url="http://sprint-tasks",
-)
-mcp = FastMCP.from_openapi(
-    openapi_spec=app.openapi(),
-    client=api_client,
-    name="Sprint Task Assistant",
-    route_maps=[RouteMap(pattern=r"^/v1/responses$", mcp_type=MCPType.EXCLUDE)],
-)
+async def serve(api_url: str, host: str, port: int) -> None:
+    async with httpx.AsyncClient(base_url=api_url, timeout=10.0) as api_client:
+        response = await api_client.get("/openapi.json")
+        response.raise_for_status()
+        openapi_spec = response.json()
+        if not isinstance(openapi_spec, dict) or not isinstance(
+            openapi_spec.get("paths"), dict
+        ):
+            raise TypeError("FastAPI 的 /openapi.json 未返回有效的 OpenAPI 规格。")
+
+        mcp = FastMCP.from_openapi(
+            openapi_spec=openapi_spec,
+            client=api_client,
+            name="Sprint Tasks MCP",
+            route_maps=[
+                RouteMap(
+                    methods=["POST"],
+                    pattern=r"^/v1/responses$",
+                    mcp_type=MCPType.EXCLUDE,
+                ),
+            ],
+        )
+        await mcp.run_async(
+            transport="http", host=host, port=port, path="/mcp", show_banner=False
+        )
 
 
-@mcp.resource("tasks://status-guide", mime_type="text/plain")
-def status_guide() -> str:
-    """解释迭代任务的状态值。"""
-    return "todo（待处理）\nin_progress（进行中）\ndone（已完成）"
-
-
-@mcp.resource("tasks://item/{task_id}", mime_type="application/json")
-def task_detail(task_id: str) -> Task:
-    """按任务编号读取详情，包括任务说明。"""
-    try:
-        return get_task(task_id)
-    except HTTPException as error:
-        raise ResourceError(str(error.detail)) from error
-
-
-@mcp.prompt
-def sprint_brief(goal: str) -> str:
-    """为给定的迭代目标生成简报提示。"""
-    return (
-        f"请围绕「{goal}」撰写一份迭代简报。\n"
-        "先调用 summarize_tasks 获取状态统计，再用 list_tasks 分别查询 todo 和 in_progress。"
-        "需要更多上下文时，读取任务条目里的详情 URI。\n"
-        "根据任务数据整理当前进展、下一步和已知风险。"
+def main() -> None:
+    parser = argparse.ArgumentParser(description="从 FastAPI OpenAPI 生成 MCP 服务")
+    parser.add_argument(
+        "--api-url", default="http://127.0.0.1:8022", help="FastAPI 地址"
     )
+    parser.add_argument("--host", default="127.0.0.1", help="MCP 监听地址")
+    parser.add_argument("--port", type=int, default=8020, help="MCP 监听端口")
+    args = parser.parse_args()
+
+    try:
+        asyncio.run(serve(args.api_url, args.host, args.port))
+    except (httpx.HTTPError, TypeError, ValueError) as error:
+        parser.exit(1, f"MCP 服务启动失败。{error}\n")
 
 
 if __name__ == "__main__":
-    mcp.run(transport="stdio", show_banner=False)
+    main()

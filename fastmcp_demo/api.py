@@ -1,24 +1,27 @@
-"""Sample sprint API and the OpenAPI contract consumed by FastMCP."""
+"""Serve the sprint tasks and publish their OpenAPI contract."""
 
 from collections import Counter
 from typing import Literal, TypedDict
 
-from fastapi import FastAPI, HTTPException
+import httpx
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.exception_handlers import request_validation_exception_handler
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from mcp import McpError
+from openai import APIError, APIStatusError, APITimeoutError
+from openai.types.responses import Response
 
 from fastmcp_demo.responses import ResponseRequest, generate_response
 
 type TaskStatus = Literal["todo", "in_progress", "done"]
+RESPONSES_PATH = "/v1/responses"
 
 
 class TaskSummary(TypedDict):
     id: str
     title: str
     status: TaskStatus
-
-
-class TaskListItem(TaskSummary):
-    uri: str
 
 
 class Task(TaskSummary):
@@ -56,17 +59,12 @@ app = FastAPI(title="Sprint Tasks API")
 
 
 @app.get("/tasks", operation_id="list_tasks", summary="列出迭代任务")
-def list_tasks(status: TaskStatus | None = None) -> list[TaskListItem]:
-    """可按状态筛选。每条结果含有详情 URI。"""
+def list_tasks(status: TaskStatus | None = None) -> list[TaskSummary]:
+    """按状态筛选迭代任务。省略状态时返回全部任务的编号、标题和状态。"""
     return [
-        {
-            "id": task["id"],
-            "title": task["title"],
-            "status": task["status"],
-            "uri": f"tasks://item/{task['id']}",
-        }
+        {"id": task["id"], "title": task["title"], "status": task["status"]}
         for task in TASKS
-        if status is None or task["status"] == status
+        if status is None or status == task["status"]
     ]
 
 
@@ -91,11 +89,61 @@ def get_task(task_id: str) -> Task:
     raise HTTPException(status_code=404, detail=f"任务 {task_id} 不存在。")
 
 
-@app.post("/v1/responses", response_class=JSONResponse, summary="创建模型响应")
-async def create_response(request: ResponseRequest) -> JSONResponse:
-    """Run the configured model with the generated task tools."""
-    # The MCP server reads this app's OpenAPI schema during initialization.
-    from fastmcp_demo.server import mcp
+def responses_error(
+    status_code: int, message: str, *, parameter: str | None = None
+) -> JSONResponse:
+    error_type = {400: "invalid_request_error", 429: "rate_limit_error"}.get(
+        status_code, "server_error"
+    )
+    return JSONResponse(
+        status_code=status_code,
+        content={
+            "error": {
+                "message": message,
+                "type": error_type,
+                "param": parameter,
+                "code": None,
+            }
+        },
+    )
 
-    response = await generate_response(request, mcp)
-    return JSONResponse(response.model_dump(mode="json", exclude_unset=True))
+
+@app.exception_handler(RequestValidationError)
+async def validation_error(
+    request: Request, error: RequestValidationError
+) -> JSONResponse:
+    if getattr(request.scope.get("route"), "path", None) != RESPONSES_PATH:
+        return await request_validation_exception_handler(request, error)
+
+    issue = error.errors()[0]
+    parameter = ".".join(str(part) for part in issue["loc"][1:]) or None
+    return responses_error(400, issue["msg"], parameter=parameter)
+
+
+@app.post(
+    RESPONSES_PATH,
+    operation_id="create_response",
+    summary="创建模型响应",
+    response_model=Response,
+    response_model_exclude_unset=True,
+    responses={
+        "4XX": {"description": "请求参数无效或模型供应商限流"},
+        "5XX": {"description": "Agent、MCP 或模型供应商请求失败"},
+    },
+)
+async def create_response(request: ResponseRequest) -> Response | JSONResponse:
+    """通过 MCP 执行模型的工具调用，返回最终的非流式 Responses 对象。"""
+    try:
+        return await generate_response(request)
+    except APITimeoutError:
+        return responses_error(504, "模型供应商请求超时。")
+    except APIStatusError as error:
+        if error.status_code == 429:
+            return responses_error(429, "模型供应商正在限流。")
+        return responses_error(502, f"模型供应商返回 HTTP {error.status_code}。")
+    except APIError:
+        return responses_error(502, "模型供应商请求失败。")
+    except ValueError:
+        return responses_error(503, "Agent 服务配置不可用。")
+    except (httpx.HTTPError, McpError, RuntimeError):
+        return responses_error(502, "MCP 调用或 Agent 执行未完成。")
