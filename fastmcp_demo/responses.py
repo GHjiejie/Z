@@ -110,7 +110,7 @@ async def generate_response(
                 "type": "function",
                 "name": tool.name,
                 "description": tool.description or tool.name,
-                "parameters": tool.inputSchema,
+                "parameters": tool.input_schema,
                 "strict": False,
             }
             for tool in discovered_tools

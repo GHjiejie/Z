@@ -1,6 +1,6 @@
 # FastAPI、OpenAPI 与 MCP 示例
 
-FastAPI 发布任务接口和 `/openapi.json`。MCP 服务创建 `httpx.AsyncClient`，读取并解析 OpenAPI 规格，再通过 `FastMCP.from_openapi()` 生成工具。同一个 HTTP 客户端在运行时把工具调用转发给 FastAPI。
+FastAPI 发布任务接口和 `/openapi.json`。MCP 服务创建 `httpx2.AsyncClient`，读取并解析 OpenAPI 规格，再通过 `FastMCP.from_openapi()` 生成工具。同一个 HTTP 客户端在运行时把工具调用转发给 FastAPI。
 
 Agent 连接 `/mcp`，通过 `tools/list` 获取工具定义。模型请求工具时，Agent 发送 `tools/call`，再按模型提供的 `call_id` 把工具结果交回模型，直到得到最终回答。
 

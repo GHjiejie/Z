@@ -4,8 +4,8 @@ import argparse
 import asyncio
 import logging
 
-import httpx
-from mcp import McpError
+import httpx2
+from fastmcp.exceptions import McpError
 from openai import APIError, APIStatusError, APITimeoutError
 
 from fastmcp_demo.responses import ResponseRequest, generate_response
@@ -35,7 +35,7 @@ def main() -> None:
         parser.exit(1, f"模型供应商返回 HTTP {error.status_code}。\n")
     except APIError:
         parser.exit(1, "模型供应商请求失败。\n")
-    except httpx.HTTPError:
+    except httpx2.HTTPError:
         parser.exit(1, "MCP 服务请求失败。\n")
     except (McpError, RuntimeError, ValueError) as error:
         parser.exit(1, f"{error}\n")

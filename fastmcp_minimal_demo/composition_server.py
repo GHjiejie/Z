@@ -4,7 +4,7 @@ import argparse
 import asyncio
 from typing import Any
 
-import httpx
+import httpx2
 from fastmcp import FastMCP
 from fastmcp.server.providers.openapi import MCPType, RouteMap
 
@@ -16,7 +16,7 @@ GROUP_PATTERNS = {
 
 
 def build_group(
-    group: str, openapi_spec: dict[str, Any], api_client: httpx.AsyncClient
+    group: str, openapi_spec: dict[str, Any], api_client: httpx2.AsyncClient
 ) -> FastMCP:
     return FastMCP.from_openapi(
         openapi_spec=openapi_spec,
@@ -32,7 +32,7 @@ def build_group(
 
 
 async def serve(service: str) -> None:
-    async with httpx.AsyncClient(base_url="http://127.0.0.1:8032") as api_client:
+    async with httpx2.AsyncClient(base_url="http://127.0.0.1:8032") as api_client:
         response = await api_client.get("/openapi.json")
         response.raise_for_status()
         openapi_spec = response.json()

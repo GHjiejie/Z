@@ -4,7 +4,7 @@ import argparse
 import asyncio
 import logging
 
-import httpx
+import httpx2
 from fastmcp import FastMCP
 from fastmcp.server.providers.openapi import MCPType, RouteMap
 
@@ -12,7 +12,7 @@ logger = logging.getLogger(__name__)
 
 
 async def serve(api_url: str, host: str, port: int) -> None:
-    async with httpx.AsyncClient(base_url=api_url, timeout=10.0) as api_client:
+    async with httpx2.AsyncClient(base_url=api_url, timeout=10.0) as api_client:
         response = await api_client.get("/openapi.json")
         response.raise_for_status()
         openapi_spec = response.json()
@@ -55,7 +55,7 @@ def main() -> None:
 
     try:
         asyncio.run(serve(args.api_url, args.host, args.port))
-    except (httpx.HTTPError, TypeError, ValueError) as error:
+    except (httpx2.HTTPError, TypeError, ValueError) as error:
         parser.exit(1, f"MCP 服务启动失败。{error}\n")
 
 

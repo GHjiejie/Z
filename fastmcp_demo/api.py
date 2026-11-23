@@ -3,12 +3,12 @@
 from collections import Counter
 from typing import Literal, TypedDict
 
-import httpx
+import httpx2
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
-from mcp import McpError
+from fastmcp.exceptions import McpError
 from openai import APIError, APIStatusError, APITimeoutError
 from openai.types.responses import Response
 
@@ -145,5 +145,5 @@ async def create_response(request: ResponseRequest) -> Response | JSONResponse:
         return responses_error(502, "模型供应商请求失败。")
     except ValueError:
         return responses_error(503, "Agent 服务配置不可用。")
-    except (httpx.HTTPError, McpError, RuntimeError):
+    except (httpx2.HTTPError, McpError, RuntimeError):
         return responses_error(502, "MCP 调用或 Agent 执行未完成。")

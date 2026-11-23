@@ -2,7 +2,7 @@
 
 import asyncio
 
-import httpx
+import httpx2
 from fastmcp import FastMCP
 
 TOOL_NAMES = {
@@ -14,7 +14,7 @@ TOOL_NAMES = {
 
 
 async def main() -> None:
-    async with httpx.AsyncClient(base_url="http://127.0.0.1:8032") as api_client:
+    async with httpx2.AsyncClient(base_url="http://127.0.0.1:8032") as api_client:
         response = await api_client.get("/openapi.json")
         response.raise_for_status()
         mcp = FastMCP.from_openapi(
