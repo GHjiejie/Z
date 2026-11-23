@@ -2,10 +2,13 @@
 
 import argparse
 import asyncio
+import logging
 
 import httpx
 from fastmcp import FastMCP
 from fastmcp.server.providers.openapi import MCPType, RouteMap
+
+logger = logging.getLogger(__name__)
 
 
 async def serve(api_url: str, host: str, port: int) -> None:
@@ -30,6 +33,9 @@ async def serve(api_url: str, host: str, port: int) -> None:
                 ),
             ],
         )
+        for tool in await mcp.list_tools():
+            logger.info("MCP 工具已注册 · %r · description=%r", tool, tool.description)
+
         await mcp.run_async(
             transport="http", host=host, port=port, path="/mcp", show_banner=False
         )
@@ -43,6 +49,9 @@ def main() -> None:
     parser.add_argument("--host", default="127.0.0.1", help="MCP 监听地址")
     parser.add_argument("--port", type=int, default=8020, help="MCP 监听端口")
     args = parser.parse_args()
+
+    logging.basicConfig(format="%(message)s")
+    logger.setLevel(logging.INFO)
 
     try:
         asyncio.run(serve(args.api_url, args.host, args.port))
