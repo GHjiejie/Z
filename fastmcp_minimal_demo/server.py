@@ -2,9 +2,10 @@ import asyncio
 
 import httpx
 from fastmcp import FastMCP
+from fastmcp.server.auth import AuthProvider
 
 
-async def main() -> None:
+async def serve(*, port: int, auth: AuthProvider | None = None) -> None:
     async with httpx.AsyncClient(base_url="http://127.0.0.1:8032") as api_client:
         response = await api_client.get("/openapi.json")
         response.raise_for_status()
@@ -12,9 +13,10 @@ async def main() -> None:
             openapi_spec=response.json(),
             client=api_client,
             name="Minimal MCP Demo",
+            auth=auth,
         )
-        await mcp.run_async(transport="http", host="127.0.0.1", port=8030, path="/mcp")
+        await mcp.run_async(transport="http", host="127.0.0.1", port=port, path="/mcp")
 
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    asyncio.run(serve(port=8030))
