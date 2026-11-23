@@ -4,6 +4,7 @@ import asyncio
 
 import httpx2
 from fastmcp import FastMCP
+from fastmcp.server.providers.openapi import MCPType, RouteMap
 
 TOOL_NAMES = {
     "add": "calculator_add",
@@ -22,6 +23,7 @@ async def main() -> None:
             client=api_client,
             name="Calculator MCP",
             mcp_names=TOOL_NAMES,
+            route_maps=[RouteMap(methods=["DELETE"], mcp_type=MCPType.EXCLUDE)],
         )
         await mcp.run_async(transport="http", host="127.0.0.1", port=8033, path="/mcp")
 

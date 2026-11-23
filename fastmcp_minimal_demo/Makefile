@@ -8,7 +8,7 @@ API_COMMAND := $(UV_RUN) uvicorn fastmcp_minimal_demo.api:app --host 127.0.0.1 -
 MCP_COMMAND := $(UV_RUN) python -m fastmcp_minimal_demo.server
 OPENAPI_URL := http://127.0.0.1:8032/openapi.json
 
-.PHONY: help start api mcp mcp-auth client
+.PHONY: help start api mcp mcp-auth mcp-hitl client
 
 help:
 	@printf '%s\n' \
@@ -16,6 +16,7 @@ help:
 		'make api     单独启动 FastAPI' \
 		'make mcp     单独启动 MCP，需先启动 FastAPI' \
 		'make mcp-auth 启动需要 Bearer Token 的 MCP，监听 8031' \
+		'make mcp-hitl 启动人工确认 MCP，监听 8037，需先启动 FastAPI' \
 		'make client  查看并调用 add 工具'
 
 start:
@@ -55,6 +56,9 @@ mcp:
 
 mcp-auth:
 	cd "$(REPO_ROOT)" && exec $(UV_RUN) python -m fastmcp_minimal_demo.auth_server
+
+mcp-hitl:
+	cd "$(REPO_ROOT)" && exec $(UV_RUN) python -m fastmcp_minimal_demo.hitl_server
 
 client:
 	cd "$(REPO_ROOT)" && exec $(UV_RUN) python -m fastmcp_minimal_demo.client

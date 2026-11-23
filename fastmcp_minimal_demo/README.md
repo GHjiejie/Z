@@ -38,3 +38,35 @@ Agent 客户端选 Streamable HTTP，URL 填 `http://127.0.0.1:8031/mcp`。使�
 ```text
 Authorization=Bearer <token>
 ```
+
+## 工具级授权与人工确认
+
+`8037/mcp` 连接 `8032` 上的 FastAPI。`FASTMCP_DEMO_MCP_TOKEN` 可以调用已有的计算工具。`FASTMCP_DEMO_DELETE_TOKEN` 具有 `records:delete` scope，可以发起以下两种删除。
+
+| MCP 工具 | FastAPI 接口 | 确认目标 |
+| --- | --- | --- |
+| `delete_record` | `DELETE /records/{record_id}` | 指定记录 |
+| `delete_record_user` | `DELETE /records_user?user_id=...` | 用户 ID |
+
+在 `.env` 或环境变量中为两个 MCP token 和 `FASTMCP_DEMO_BACKEND_DELETE_TOKEN` 配置各自的随机值。后端凭据供 FastAPI 和 `8037` 的服务间调用使用。先启动 FastAPI，再启动 MCP。
+
+```bash
+# 终端 1
+make -C fastmcp_minimal_demo api
+# 终端 2
+make -C fastmcp_minimal_demo mcp-hitl
+```
+
+另开终端查看工具，或使用实际的记录 ID、用户 ID 发起删除。终端会展示目标，输入 `yes` 确认，回车取消。
+
+```bash
+uv run --locked --group mcp python -m fastmcp_minimal_demo.hitl_client
+uv run --locked --group mcp python -m fastmcp_minimal_demo.hitl_client RECORD_ID
+uv run --locked --group mcp python -m fastmcp_minimal_demo.hitl_client --user-id USER_ID
+```
+
+两个删除工具用 `auth=require_scopes("records:delete")` 校验调用权限，再以 MCP `2026-07-28` 的 `InputRequiredResult` 请求确认。确认绑定到调用者、工具和参数，10 分钟内可使用一次。服务端收到明确确认后，携带内部凭据向 FastAPI 发出 DELETE 并返回处理器的响应。
+
+当前 `api.py` 的两个删除处理器返回固定的 `deleted` 响应。实际数据变更取决于处理器接入的业务逻辑。
+
+HITL 依赖受信客户端向真实用户展示确认，示例使用终端。跨会话、可审计的业务审批可结合项目已有的 [Agent 交互工具流程](../agent_permissions/docs/agent-hitl.md)。
