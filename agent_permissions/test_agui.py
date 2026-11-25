@@ -208,6 +208,54 @@ class AguiTests(unittest.TestCase):
         self.assertIn(run["id"], " ".join(logs.output))
         self.assertNotIn("upstream-private-diagnostic", repr((logs.output, stream)))
 
+    def test_first_responses_request_has_only_retrieved_schemas_and_executes_directly(
+        self,
+    ):
+        operation = "user.self.token_usage"
+        name = "agent_users_user_self_token_usage"
+        requests = self.scripted_responses(
+            function_response("usage", name, {}), text_response("已查询用量")
+        )
+        body = self.input()
+        body["messages"][0]["content"] = "我的模型用了多少 token"
+        run = self.snapshot(self.call(body))
+        self.assertEqual(run["status"], "completed", run)
+        self.assertEqual([e["operation_id"] for e in run["executions"]], [operation])
+        self.assertEqual(len(requests), 2)
+        offered = {t["name"]: t for t in requests[0]["tools"]}
+        prepare = offered.pop("request_tool_input")["parameters"]
+        offered.pop("search_tools")
+        ids = prepare["properties"]["operation_id"]["enum"]
+        self.assertIn(operation, ids)
+        self.assertLessEqual(len(ids), 3)
+        registry = self.app.state.tool_registry.snapshot()
+        expected = {
+            t["definition"]["name"]: t["definition"]["inputSchema"]
+            for t in registry["tools"]
+            if t["binding"]["operationId"] in ids
+        }
+
+        # The provider adapter strips some optional JSON Schema title annotations.
+        def without_titles(schema):
+            if isinstance(schema, list):
+                return [without_titles(item) for item in schema]
+            if isinstance(schema, dict):
+                return {k: without_titles(v) for k, v in schema.items() if k != "title"}
+            return schema
+
+        self.assertEqual(
+            without_titles({name: t["parameters"] for name, t in offered.items()}),
+            without_titles(expected),
+        )
+        self.assertEqual(
+            [
+                i["name"]
+                for i in requests[1]["input"]
+                if i.get("type") == "function_call"
+            ],
+            [name],
+        )
+
     def test_read_timeout_after_partial_text_preserves_text_and_skips_retry(self):
         # The fixture starts with response.created and a single output_text.delta.
         prefix = b"\n\n".join(text_response("已有回复").split(b"\n\n")[:2]) + b"\n\n"

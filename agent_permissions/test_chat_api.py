@@ -45,25 +45,31 @@ class BusinessModel(BaseChatModel):
         return self.bind(bound_names=[tool.name for tool in tools], **kwargs)
 
     def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-        self.tool_names.append(kwargs.get("bound_names", []))
+        bound_names = kwargs.get("bound_names", [])
+        self.tool_names.append(bound_names)
         self.system_prompts.append(str(messages[0].content))
         self.options.append(kwargs)
         if self.failure:
             raise self.failure
+        operation = {"create": "role.create", "list": "user.list"}.get(
+            self.mode, "user.self.read"
+        )
+        name = "agent_users_" + operation.replace(".", "_")
         if self.mode == "echo":
             response = AIMessage(content=messages[-1].content, usage_metadata=USAGE)
-        elif not isinstance(messages[-1], ToolMessage):
-            query = {"create": "role.create", "list": "user.list"}.get(
-                self.mode, "user.self.read"
-            )
+        elif not isinstance(messages[-1], ToolMessage) and name not in bound_names:
             response = AIMessage(
                 content="",
                 tool_calls=[
-                    {"id": "call_search", "name": SEARCH_NAME, "args": {"query": query}}
+                    {
+                        "id": "call_search",
+                        "name": SEARCH_NAME,
+                        "args": {"query": operation},
+                    }
                 ],
                 usage_metadata=USAGE,
             )
-        elif messages[-1].name != SEARCH_NAME:
+        elif isinstance(messages[-1], ToolMessage) and messages[-1].name != SEARCH_NAME:
             tool = messages[-1]
             if tool.status == "error":
                 try:
@@ -79,14 +85,13 @@ class BusinessModel(BaseChatModel):
                 else:
                     text = result["body"]["data"]["username"]
             response = AIMessage(content=text, usage_metadata=USAGE)
-        elif not json.loads(messages[-1].content).get("tools"):
+        elif name not in bound_names:
             response = AIMessage(content="没有匹配的可用工具", usage_metadata=USAGE)
         else:
             if self.on_first_call:
                 self.on_first_call()
-            name, arguments = "agent_users_user_self_read", {}
+            arguments = {}
             if self.mode == "create":
-                name = "agent_users_role_create"
                 arguments = {
                     "body": {
                         "code": "chat_role",
@@ -94,8 +99,6 @@ class BusinessModel(BaseChatModel):
                         "permissions": [],
                     }
                 }
-            elif self.mode == "list":
-                name = "agent_users_user_list"
             response = AIMessage(
                 content="",
                 tool_calls=[{"id": "call_fixture", "name": name, "args": arguments}],
@@ -179,16 +182,14 @@ class OpenAIChatTests(unittest.TestCase):
         self.assertEqual(result.choices[0].message.content, "admin")
         self.assertEqual(result.choices[0].finish_reason, "stop")
         self.assertIsNone(result.choices[0].message.tool_calls)
-        self.assertEqual(result.usage.total_tokens, 36)
+        self.assertEqual(result.usage.total_tokens, 24)
         self.assertTrue(result._request_id.startswith("req_"))
         self.assertEqual(self.factory_calls, 1)
         self.assertEqual(self.model.options[-1]["max_tokens"], 256)
         self.assertEqual(self.model.options[-1]["temperature"], 0.2)
-        self.assertEqual(self.model.tool_names[0], [SEARCH_NAME])
-        self.assertEqual(
-            set(self.model.tool_names[1]),
-            {SEARCH_NAME, "agent_users_user_self_read", "request_tool_input"},
-        )
+        self.assertEqual(len(self.model.tool_names), 2)
+        self.assertIn("agent_users_user_self_read", self.model.tool_names[0])
+        self.assertEqual(self.model.tool_names[0], self.model.tool_names[1])
 
     def test_stream_sdk_decodes_deltas_finish_and_usage(self) -> None:
         stream = self.sdk.chat.completions.create(
@@ -207,7 +208,7 @@ class OpenAIChatTests(unittest.TestCase):
         )
         self.assertEqual(chunks[-2].choices[0].finish_reason, "stop")
         self.assertEqual(chunks[-1].choices, [])
-        self.assertEqual(chunks[-1].usage.total_tokens, 36)
+        self.assertEqual(chunks[-1].usage.total_tokens, 24)
         self.assertEqual(len({chunk.id for chunk in chunks}), 1)
         self.assertEqual({chunk.object for chunk in chunks}, {"chat.completion.chunk"})
         raw = self.http.post(
@@ -319,8 +320,8 @@ class OpenAIChatTests(unittest.TestCase):
             model="fixture-model", messages=[{"role": "user", "content": "列出用户"}]
         )
         self.assertEqual(result.choices[0].message.content, "PERMISSION_DENIED")
-        self.assertEqual(self.model.tool_names[0], [SEARCH_NAME])
-        self.assertIn("agent_users_user_list", self.model.tool_names[1])
+        self.assertIn("agent_users_user_list", self.model.tool_names[0])
+        self.assertEqual(self.model.tool_names[1], [SEARCH_NAME])
 
     def test_no_delegated_tools_still_supports_normal_and_streaming_chat(self):
         headers = {"Authorization": "Bearer " + self.token}

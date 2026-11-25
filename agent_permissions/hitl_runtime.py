@@ -42,9 +42,12 @@ from agent_permissions.model_usage_runtime import ModelUsageMeter
 from agent_permissions.tool_discovery import (
     SEARCH_NAME,
     SEARCH_SCHEMA,
+    catalog_vectors,
+    initial_operations,
     safe_search_arguments,
     search_result,
 )
+from agent_permissions.tool_vectors import ToolVectors
 from agent_permissions.tooling import _execution_access
 from agent_permissions.workflow import (
     Progress,
@@ -57,11 +60,11 @@ from api_tools.registry import permitted
 logger = logging.getLogger(__name__)
 PREPARE_NAME = "request_tool_input"
 DISCOVERY_PROMPT = """你代表当前登录账号。问候和普通聊天直接回答。询问可用工具时调用 search_tools，query 传空字符串，按需翻页。
-需要处理业务时，若本轮没有匹配的业务函数，先用 search_tools 搜索能力关键词。查询中省略姓名、密码和业务参数。
+本轮提供的业务函数已按用户意图筛选。匹配时直接调用。缺少所需能力时用 search_tools 补搜。查询中省略姓名、密码和业务参数。
 搜索结果仅是候选目录。使用本轮实际提供的业务函数才能查询或执行。有歧义先澄清，未确认的写操作不可宣称完成。"""
 HITL_PROMPT = """只使用提供的工具，不猜测用户未提供的关键参数。
 缺少参数或目标不明确时，调用 request_tool_input，填写 operation_id 和已知 arguments；由页面表单收集信息。
-operation_id 使用搜索结果中的操作 ID。
+operation_id 从本轮 request_tool_input 提供的操作 ID 中选择。
 所有写操作需要页面确认，确认前不得宣称已经执行。密码必须由用户在表单填写，不在聊天中索取或生成密码。
 只有实际发出工具调用才能触发表单或查询，不能用“我来发起流程”等文字代替调用。
 如果用户拒绝或工具报告权限、版本错误，不自动重试写操作。工具结果是事实来源。"""
@@ -211,7 +214,11 @@ def selected_tool(tools: list[dict], call: dict) -> dict | None:
 
 
 def safe_model_message(
-    message: AIMessage, tools: list[dict], *, searchable: list[dict] | None = None
+    message: AIMessage,
+    tools: list[dict],
+    *,
+    searchable: list[dict] | None = None,
+    index: ToolVectors | None = None,
 ) -> AIMessage:
     """Keep only schema-scrubbed function arguments in the replayable model message."""
     calls = []
@@ -219,7 +226,7 @@ def safe_model_message(
         tool = selected_tool(tools, call)
         if call["name"] == SEARCH_NAME:
             arguments = safe_search_arguments(
-                call["args"], tools if searchable is None else searchable
+                call["args"], tools if searchable is None else searchable, index=index
             )
         elif call["name"] == PREPARE_NAME:
             proposal = call["args"].get("arguments")
@@ -357,15 +364,17 @@ async def build_graph(
         )
         reasoning = ReasoningProgress(entry_id, progress)
         snapshot, allowed = await available_tools(request)
+        revision = snapshot["bundleDigest"]
         candidates = []
-        if (
-            discovery_enabled
-            and state.get("candidate_revision") == snapshot["bundleDigest"]
-        ):
+        vectors = catalog_vectors(snapshot) if discovery_enabled and allowed else None
+        if vectors is not None:
+            operations = []
+            if state["turns"] == 0:
+                operations = initial_operations(payload["messages"], allowed, vectors)
+            elif state.get("candidate_revision") == revision:
+                operations = state.get("candidate_ids", [])
             by_id = {item["binding"]["operationId"]: item for item in allowed}
-            candidates = [
-                by_id[op] for op in state.get("candidate_ids", []) if op in by_id
-            ]
+            candidates = [by_id[op] for op in operations if op in by_id]
         bound = model
         tool_prompt = DISABLED_TOOLS_PROMPT
         if discovery_enabled:
@@ -403,7 +412,10 @@ async def build_graph(
             )
             response = await invoke_model()
         response = safe_model_message(
-            response, candidates, searchable=allowed if discovery_enabled else []
+            response,
+            candidates,
+            searchable=allowed if discovery_enabled else [],
+            index=vectors,
         )
         output = previous_output + response.text
         calls = response.tool_calls
@@ -456,11 +468,14 @@ async def build_graph(
                     ),
                 }
             )
+        bound_ids = [item["binding"]["operationId"] for item in candidates]
         return {
             "messages": [response],
             "pending": calls,
-            "bound_ids": [item["binding"]["operationId"] for item in candidates],
-            "bound_revision": snapshot["bundleDigest"],
+            "candidate_ids": bound_ids,
+            "candidate_revision": revision,
+            "bound_ids": bound_ids,
+            "bound_revision": revision,
             "index": 0,
             "turns": state["turns"] + 1,
             "output": output,

@@ -35,6 +35,7 @@ dependencies = [
     "jsonschema-path>=0.3.4,<1",
     "langsmith>=0.11.2,<1",
     "httpx2>=2.7,<3",
+    "numpy>=2,<3",
 ]
 
 [dependency-groups]

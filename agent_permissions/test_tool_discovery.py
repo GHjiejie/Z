@@ -20,6 +20,8 @@ from agent_permissions.tool_discovery import (
     CANDIDATE_LIMIT,
     PAGE_SIZE,
     SEARCH_NAME,
+    catalog_vectors,
+    initial_operations,
     matching_operations,
 )
 from api_tools.compiler import digest
@@ -27,6 +29,21 @@ from api_tools.compiler import digest
 
 def search(query: str = "", **options) -> dict:
     return {"name": SEARCH_NAME, "args": {"query": query, **options}}
+
+
+# Labeled conversation examples for regression comparisons on the same catalog.
+INTENT_CASES = [
+    ("我想换个昵称", "user.self.update"),
+    ("先让这个同事暂时登不进来", "user.status.update"),
+    ("我用掉了多少词元", "user.self.token_usage"),
+    ("给组里新来的小陈开个账号", "user.create"),
+    ("他忘了口令，得重设一下", "user.password.reset"),
+    ("我上个月用了多少 token", "user.self.token_usage"),
+    ("查询指定用户的模型用量", "user.token_usage"),
+    ("列出用户", "user.list"),
+    ("创建一个角色", "role.create"),
+    ("我的账号信息", "user.self.read"),
+]
 
 
 class ScriptedModel(BaseChatModel):
@@ -76,7 +93,14 @@ class DiscoveryTests(unittest.TestCase):
         )
         registry.activate(bundle, expected=bundle)
 
-    def chat(self, *turns: list[dict], headers=None, **options) -> dict:
+    def chat(
+        self,
+        *turns: list[dict],
+        headers=None,
+        prompt="查询当前账号可用的工具",
+        waiting=False,
+        **options,
+    ) -> dict:
         self.model.turns = [*turns, []]
         self.model.offered.clear()
         self.model.results.clear()
@@ -85,16 +109,181 @@ class DiscoveryTests(unittest.TestCase):
             headers=headers or self.headers,
             json={
                 "model": self.model.model_name,
-                "messages": [{"role": "user", "content": "查询当前账号可用的工具"}],
+                "messages": [{"role": "user", "content": prompt}],
                 "conversation_id": "discovery",
                 "client_request_id": uuid4().hex,
                 **options,
             },
         )
         run = self.final(response)
-        self.assertEqual(run["status"], "completed", run)
-        self.assertFalse(self.model.turns)
+        self.assertEqual(run["status"], "waiting" if waiting else "completed", run)
+        self.assertEqual(self.model.turns, [[]] if waiting else [])
         return run
+
+    def test_first_turn_paraphrase_binds_only_the_profile_update_and_requires_confirmation(
+        self,
+    ):
+        update = {
+            "name": "agent_users_user_self_update",
+            "args": {"body": {"display_name": "新昵称"}},
+        }
+        run = self.chat([update], prompt="我想换个昵称", waiting=True)
+        self.assertEqual(
+            self.model.offered, [[SEARCH_NAME, update["name"], PREPARE_NAME]]
+        )
+        self.assertTrue(run["interaction"]["confirmation_required"])
+        self.assertEqual(run["executions"], [])
+        profile = "/api/v1/users/me"
+        self.assertNotEqual(
+            self.client.get(profile, headers=self.headers).json()["data"][
+                "display_name"
+            ],
+            "新昵称",
+        )
+        completed = self.final(test_hitl.HitlTests.submit(self, run))
+        self.assertEqual(completed["status"], "completed", completed)
+        self.assertEqual(
+            [e["operation_id"] for e in completed["executions"]], ["user.self.update"]
+        )
+        self.assertEqual(
+            self.client.get(profile, headers=self.headers).json()["data"][
+                "display_name"
+            ],
+            "新昵称",
+        )
+
+    def test_followup_reads_with_the_prior_user_intent_and_new_topics_start_fresh(self):
+        usage = {"name": "agent_users_user_self_token_usage", "args": {}}
+        history = [
+            {"role": "user", "content": "看看我用了多少词元"},
+            {"role": "assistant", "content": "已经查询。"},
+            {"role": "user", "content": "那上个月呢？"},
+        ]
+        run = self.chat([usage], messages=history)
+        self.assertEqual(len(self.model.offered), 2)
+        self.assertIn(usage["name"], self.model.offered[0])
+        self.assertEqual(
+            [e["operation_id"] for e in run["executions"]], ["user.self.token_usage"]
+        )
+        self.assertEqual(
+            self.model.results[-1][0]["body"]["data"]["user_id"], self.user_id
+        )
+        for other in ("你好", "查一下明天的天气", "查询订单"):
+            with self.subTest(other=other):
+                self.chat(messages=[*history, {"role": "user", "content": other}])
+                self.assertEqual(self.model.offered, [[SEARCH_NAME]])
+        self.chat(messages=history, tool_choice="none")
+        self.assertEqual(self.model.offered, [[]])
+
+    def test_semantic_fallback_replaces_prefetched_ids(self):
+        self.chat([search("先让这个同事暂时登不进来")], prompt="我想换个昵称")
+        self.assertIn("agent_users_user_self_update", self.model.offered[0])
+        self.assertEqual(
+            self.model.offered[1],
+            [SEARCH_NAME, "agent_users_user_status_update", PREPARE_NAME],
+        )
+
+    def test_allowed_candidates_and_mutation_checks_apply_to_first_turn(self):
+        snapshot = self.app.state.tool_registry.snapshot()
+        tools = configurable_tools(snapshot)
+        vectors = catalog_vectors(snapshot)
+        restricted = [tools["user.delete"], tools["role.create"]]
+        for query in (
+            "创建用户",
+            "user.self.update",
+            "暂时让这个同事不能登录",
+            "我想换个昵称",
+        ):
+            with self.subTest(query=query):
+                self.assertEqual(
+                    initial_operations(
+                        [{"role": "user", "content": query}], restricted, vectors
+                    ),
+                    [],
+                )
+        record = self.app.state.run_store.record_workflow
+
+        def change_on_selection(run, entry):
+            result = record(run, entry)
+            if entry.get("phase") == "selected":
+                self.update_catalog_revision()
+            return result
+
+        with patch.object(
+            self.app.state.run_store, "record_workflow", side_effect=change_on_selection
+        ):
+            run = self.chat(
+                [{"name": "agent_users_user_self_read", "args": {}}],
+                prompt="查看我的账号",
+            )
+        self.assertIn("agent_users_user_self_read", self.model.offered[0])
+        self.assertEqual(
+            self.model.results[-1][0]["error"]["code"], "TOOL_VERSION_MISMATCH"
+        )
+        self.assertEqual(self.model.offered[-1], [SEARCH_NAME])
+        self.assertEqual(run["executions"], [])
+
+    def test_hybrid_top_three_and_unserved_queries(self):
+        snapshot = self.app.state.tool_registry.snapshot()
+        tools = list(configurable_tools(snapshot).values())
+        vectors = catalog_vectors(snapshot)
+        for question, expected in INTENT_CASES:
+            with self.subTest(question=question):
+                ranked = initial_operations(
+                    [{"role": "user", "content": question}], tools, vectors
+                )
+                self.assertIn(expected, ranked)
+                self.assertLessEqual(len(ranked), CANDIDATE_LIMIT)
+                if expected != "user.delete":
+                    self.assertNotIn("user.delete", ranked)
+        for question in (
+            "天气预报",
+            "查询订单",
+            "明年我想换个城市",
+            "请处理操作",
+            "你有哪些工具？",
+        ):
+            self.assertEqual(
+                initial_operations(
+                    [{"role": "user", "content": question}], tools, vectors
+                ),
+                [],
+            )
+
+        for query, expected, wrong_subject in (
+            ("我想换个昵称", "user.self.update", "user.update"),
+            ("给同事换个昵称", "user.update", "user.self.update"),
+            ("查同事的模型用量", "user.token_usage", "user.self.token_usage"),
+        ):
+            with self.subTest(query=query):
+                ranked = matching_operations(tools, query, index=vectors)
+                self.assertEqual(ranked[0], expected)
+                self.assertNotIn(wrong_subject, ranked)
+
+    def test_catalog_revision_refits_the_vectors_for_published_tools(self):
+        original = self.app.state.tool_registry.snapshot()
+        old_index = catalog_vectors(original)
+        self.assertIs(catalog_vectors(original), old_index)
+        future = {
+            "binding": {
+                "operationId": "billing.export",
+                "policy": {"authentication": "session", "effect": "read"},
+            },
+            "definition": {"name": "billing_export", "description": "导出发票凭证。"},
+        }
+        changed = {
+            **original,
+            "bundleDigest": "next",
+            "tools": [*original["tools"], future],
+        }
+        revised = catalog_vectors(changed)
+        self.assertNotIn("billing.export", old_index.rows)
+        self.assertEqual(
+            matching_operations([future], "导出发票", index=revised), ["billing.export"]
+        )
+        self.assertEqual(
+            matching_operations(original["tools"], "billing.export", index=revised), []
+        )
 
     def test_directory_pages_show_only_metadata_and_never_bind_business_tools(self):
         expected = sorted(configurable_tools(self.app.state.tool_registry.snapshot()))
@@ -157,6 +346,14 @@ class DiscoveryTests(unittest.TestCase):
         )
         self.assertEqual(self.model.results[-1][0]["tools"], [])
         self.assertEqual(self.model.offered, [[SEARCH_NAME]] * 3)
+        for prompt in ("我想换个昵称", "创建一个角色"):
+            self.chat(headers=headers, prompt=prompt)
+            self.assertEqual(self.model.offered, [[SEARCH_NAME]])
+        self.chat(headers=headers, prompt="查看我的账号")
+        self.assertEqual(
+            self.model.offered,
+            [[SEARCH_NAME, "agent_users_user_self_read", PREPARE_NAME]],
+        )
         self.chat([search("role.create")])
         self.assertIn("agent_users_role_create", self.model.offered[-1])
 

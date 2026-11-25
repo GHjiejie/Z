@@ -21,6 +21,7 @@ from agent_permissions.hitl_forms import requires_confirmation
 from agent_permissions.models import StrictModel
 from agent_permissions.security import token_digest
 from agent_permissions.service import Authority
+from agent_permissions.tool_discovery import catalog_vectors
 from api_tools.compiler import compile_app, compile_catalog
 from api_tools.executor import ExecutionContext, ToolError, ToolExecutor
 from api_tools.registry import ToolRegistry, permitted
@@ -59,6 +60,7 @@ def activate_tools(app: FastAPI, *, manifest_path: Path | None = None) -> None:
     )
     bundle = json.loads(manifest_path.read_text()) if manifest_path else expected
     registry = ToolRegistry(bundle, expected=expected, requests=requests)
+    catalog_vectors(registry.snapshot())
     app.state.tool_registry = registry
     app.state.tool_executor = ToolExecutor(registry)
 
