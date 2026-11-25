@@ -10,7 +10,7 @@
 - [数据库连接池改造方案](docs/connection-pool-plan.md)：已实施的 PostgreSQL 池化设计、生命周期、容量与验收标准。
 - [连接池验证报告](docs/connection-pool-validation.md)：真实 PostgreSQL 测试、本地压测结果及过载边界。
 - [可配置 RBAC](docs/rbac.md)：数据模型、角色管理接口、授权边界和旧数据库迁移。
-- [API Agent 工具](docs/agent-tools.md)：工具生成、发现与调用、LangChain 适配、版本绑定和自动同步检查。
+- API 工具由 FastMCP 解析 OpenAPI 并构造业务请求，Agent 按当前用户的授权发现和调用工具。[工具契约、调用流程与 LangChain 接入](docs/agent-tools.md)
 - [用户级 Agent 工具授权](docs/user-agent-tool-grants.md)：用户页面配置、独立授权存储、角色变更保留设置和执行时 RBAC 校验；附[改造方案与架构图](docs/user-agent-tool-grants-plan.md)。
 - Agent 操作审计按业务调用关联操作者、当时的授权、HITL 确认和业务结果。[查询接口与部署](docs/agent-operation-audit.md) · [方案与架构图](docs/agent-operation-audit-design.md)
 - [项目独立模型配置](docs/model.md)：本目录专用的 Responses API 客户端、供应商配置及 Agent 接入示例。

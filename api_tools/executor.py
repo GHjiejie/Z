@@ -4,9 +4,9 @@ import json
 import logging
 from dataclasses import dataclass, field
 from time import monotonic
-from urllib.parse import quote
 
 import httpx
+import httpx2
 from jsonschema import Draft202012Validator
 
 from api_tools.compiler import canonical
@@ -32,12 +32,6 @@ class ExecutionContext:
     request_id: str = ""
 
 
-def _scalar(value: object) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
 class ToolExecutor:
     def __init__(self, registry: ToolRegistry) -> None:
         self.registry = registry
@@ -49,9 +43,9 @@ class ToolExecutor:
         *,
         revision: str,
         context: ExecutionContext,
-        client: httpx.AsyncClient,
+        client: httpx.AsyncClient | httpx2.AsyncClient,
     ) -> dict:
-        snapshot = self.registry.snapshot()
+        snapshot, requests = self.registry.execution_snapshot()
         tool = next(
             (item for item in snapshot["tools"] if item["definition"]["name"] == name),
             None,
@@ -77,57 +71,33 @@ class ToolExecutor:
         if not valid:
             # JSON Schema exception messages can include passwords or arbitrary input.
             raise ToolError("TOOL_INPUT_INVALID", "工具参数不符合当前输入结构", 422)
-        path, query, headers = binding["path"], [], {}
+        try:
+            request = requests.build(binding["operationId"], arguments)
+        except (ValueError, TypeError, httpx2.InvalidURL, httpx2.LocalProtocolError):
+            raise ToolError(
+                "TOOL_INPUT_INVALID", "工具参数无法转换为 HTTP 请求", 422
+            ) from None
+        # The caller owns the destination and session. Only the encoded path and
+        # query, API-declared headers and body come from FastMCP.
+        headers = dict(request.headers)
+        headers.pop("host", None)
         if context.authorization:
             headers["Authorization"] = context.authorization
-        for parameter in binding["parameters"]:
-            location, parameter_name = parameter["in"], parameter["name"]
-            group = arguments.get(location, {})
-            if parameter_name not in group:
-                continue
-            value = group[parameter_name]
-            if location == "path":
-                encoded = (
-                    ",".join(quote(_scalar(v), safe="") for v in value)
-                    if parameter["array"]
-                    else quote(_scalar(value), safe="")
-                )
-                if encoded in {".", ".."} or "/" in _scalar(value):
-                    raise ToolError("TOOL_INPUT_INVALID", "路径参数不符合要求", 422)
-                path = path.replace("{" + parameter_name + "}", encoded)
-            elif location == "query":
-                values = (
-                    value
-                    if parameter["array"] and parameter["explode"]
-                    else [
-                        ",".join(map(_scalar, value))
-                        if parameter["array"]
-                        else _scalar(value)
-                    ]
-                )
-                query.extend((parameter_name, _scalar(item)) for item in values)
-            else:
-                headers[parameter_name] = (
-                    ",".join(map(_scalar, value))
-                    if parameter["array"]
-                    else _scalar(value)
-                )
         started = monotonic()
         try:
-            kwargs = {"json": arguments["body"]} if "body" in arguments else {}
             response = await client.request(
-                binding["method"],
-                path,
-                params=query,
+                request.method,
+                request.url.copy_with(query=None).raw_path.decode("ascii"),
+                params=request.url.params.multi_items(),
                 headers=headers,
+                content=request.content,
                 follow_redirects=False,
-                **kwargs,
             )
-        except httpx.TimeoutException:
+        except (httpx.TimeoutException, httpx2.TimeoutException):
             raise ToolError(
                 "TOOL_RESULT_UNKNOWN", "调用超时，执行结果未知，请先查询确认", 504
             ) from None
-        except httpx.HTTPError:
+        except (httpx.HTTPError, httpx2.HTTPError):
             raise ToolError(
                 "TOOL_TRANSPORT_ERROR", "无法完成工具请求，请凭请求标识排查", 502
             ) from None

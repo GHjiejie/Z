@@ -2,7 +2,7 @@
 
 用户管理服务从 23 个业务接口生成对应的 Agent 工具，涵盖登录、退出、用户管理、个人设置、角色权限和模型用量。工具沿原有 HTTP 路由执行，沿用事务、实时 RBAC、会话撤销、版本校验、限流和业务审计。
 
-当前实现对应[设计方案](../../api-agent-tools-design.md)的第一阶段。通用生成、执行和 LangChain 适配代码位于 [api_tools](../../api_tools/)，项目只提供操作元数据、可信会话上下文和同源调用入口。
+服务使用 FastMCP 4 的 OpenAPI 解析器生成操作及参数映射，执行时使用同一份映射和 FastMCP 的 `RequestDirector` 构造 HTTP 请求。这两个组件也是上游 `OpenAPIProvider` 生成工具和发送请求的基础。项目在这一层上维护已发布的工具名称、分组输入和逐状态响应契约。[FastMCP OpenAPI 集成](https://gofastmcp.com/docs/integrations/openapi) · [项目适配代码](../../api_tools/openapi.py)
 
 ## 1. 架构与维护入口
 
@@ -11,7 +11,7 @@ flowchart TB
     apiRoutes["api.py 路由与 models.py 类型"] --> contract["新鲜 OpenAPI 契约"]
     operations["operations.py 操作语义与权限"] --> contract
     operations --> authorization["service.py 事务内实时授权"]
-    contract --> compiler["api_tools.compiler"]
+    contract --> compiler["核对路由和 x-agent，再由 FastMCP 解析开放操作"]
     compiler --> bundle["tools.manifest.json"]
     bundle --> activation["启动时与 API 契约校验"]
     activation --> registry["不可变工具注册表"]
@@ -19,7 +19,10 @@ flowchart TB
     registry --> discovery
     agent --> execution["POST /agent-tools/call"]
     registry --> execution
-    execution --> sameOrigin["统一执行器与同进程 HTTP 请求"]
+    compiler --> mappings["FastMCP 操作与参数映射"]
+    mappings --> sameOrigin["RequestDirector 构造请求，同源 ASGI 调用业务 API"]
+    execution --> guards["实时授权、版本检查、写操作确认"]
+    guards --> sameOrigin
     sameOrigin --> authorization
     authorization --> storage["原有业务和数据库"]
 ```
@@ -27,6 +30,8 @@ flowchart TB
 新增或修改业务接口时，维护原有路由、请求响应类型和 `operations.py` 中的操作声明。路由的 `name` 作为稳定 `operationId`，`ContractRoute` 自动把说明和权限导出为 `x-agent`。服务层从同一操作声明读取所需权限，并在原有业务事务内检查。
 
 工具名称为 `agent_users_` 加上转换后的 `operationId`，例如 `user.self.read` 对应 `agent_users_user_self_read`。路径调整时保持操作标识稳定；语义或输入结构不兼容时使用新工具标识或兼容版本。
+
+例如，Agent 选择 `agent_users_user_read` 并传入 `{"path":{"user_id":"u_123"}}`。控制入口校验本轮工具版本、当前用户的工具授权及业务权限。执行器根据 FastMCP 生成的参数映射取得 `user_id`，由框架构造 `GET /api/v1/users/u_123`。本次请求单独携带当前会话凭据。原业务路由处理请求后，执行器按实际状态码校验响应，并将 `ETag`、请求标识和响应体一同返回。会话中的写工具先走原有的表单确认和事务执行记录。[工具发现](tool-discovery.md) · [写操作确认](agent-hitl.md)
 
 | 模型用量工具 | 绑定接口 | 授权要求 |
 | --- | --- | --- |

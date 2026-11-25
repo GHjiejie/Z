@@ -5,7 +5,7 @@ import logging
 from pathlib import Path
 from typing import Any
 
-import httpx
+import httpx2
 from fastapi import FastAPI, Request
 from pydantic import Field
 from starlette.concurrency import run_in_threadpool
@@ -21,10 +21,11 @@ from agent_permissions.hitl_forms import requires_confirmation
 from agent_permissions.models import StrictModel
 from agent_permissions.security import token_digest
 from agent_permissions.service import Authority
-from api_tools.compiler import compile_app
+from api_tools.compiler import compile_app, compile_catalog
 from api_tools.executor import ExecutionContext, ToolError, ToolExecutor
 from api_tools.registry import ToolRegistry, permitted
 
+TOOL_NAMESPACE = "agent_users"
 EXCLUSIONS = {
     "/openapi.json": "OpenAPI document transport",
     "/docs": "Swagger UI",
@@ -49,14 +50,15 @@ class ToolCall(StrictModel):
 
 
 def compile_tools(app: FastAPI) -> dict:
-    return compile_app(app, namespace="agent_users", exclusions=EXCLUSIONS)
+    return compile_app(app, namespace=TOOL_NAMESPACE, exclusions=EXCLUSIONS)
 
 
 def activate_tools(app: FastAPI, *, manifest_path: Path | None = None) -> None:
-    expected = compile_tools(app)
+    expected, requests = compile_catalog(
+        app, namespace=TOOL_NAMESPACE, exclusions=EXCLUSIONS
+    )
     bundle = json.loads(manifest_path.read_text()) if manifest_path else expected
-    registry = ToolRegistry(expected)
-    registry.activate(bundle, expected=expected)
+    registry = ToolRegistry(bundle, expected=expected, requests=requests)
     app.state.tool_registry = registry
     app.state.tool_executor = ToolExecutor(registry)
 
@@ -130,11 +132,10 @@ def mount_agent_tools(app: FastAPI) -> None:
         call.requested_target(payload.arguments)
         context, operations = await _execution_access(request)
         address = request.client
-        transport = httpx.ASGITransport(
+        transport = httpx2.ASGITransport(
             app=app, client=(address.host, address.port) if address else ("unknown", 0)
         )
-        # This is an in-process call to the same API and identity domain, not a remote MCP proxy.
-        async with httpx.AsyncClient(
+        async with httpx2.AsyncClient(
             transport=transport,
             base_url="http://agent-tools.internal",
             trust_env=False,

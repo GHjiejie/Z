@@ -10,8 +10,11 @@ from typing import Any
 from fastapi import FastAPI
 from fastapi.openapi.utils import get_openapi
 from fastapi.routing import APIRoute
+from fastmcp.utilities.openapi import HTTPRoute
 from jsonschema import Draft202012Validator
 from starlette.routing import BaseRoute
+
+from api_tools.openapi import OpenAPIRequests, whole_json_body
 
 GENERATOR_VERSION = "1"
 TARGET_PROFILE = "json-schema-2020-12"
@@ -101,12 +104,25 @@ def _object(properties: dict | None = None, required: list | None = None) -> dic
     }
 
 
-def _input_schema(operation: dict, parameters: list) -> tuple[dict, list]:
+def _input_schema(route: HTTPRoute, operation: dict) -> tuple[dict, list]:
     groups: dict[str, dict] = {}
     bindings = []
     required_groups = []
-    for parameter in parameters:
-        location, name = parameter["in"], parameter["name"]
+    # Keep the published JSON exactly as authored (including explicit defaults).
+    # FastMCP supplies the argument locations and resolves name collisions.
+    parameters = {(p["in"], p["name"]): p for p in operation.get("parameters", [])}
+    mapped = {
+        (p["location"], p["openapi_name"])
+        for p in route.parameter_map.values()
+        if p["location"] != "body"
+    }
+    if mapped != parameters.keys() or len(parameters) != len(route.parameters):
+        raise ContractError(
+            f"FastMCP could not map every parameter: {route.operation_id}"
+        )
+    for native in route.parameters:
+        location, name = native.location, native.name
+        parameter = parameters[location, name]
         if location not in {"path", "query", "header"}:
             raise ContractError(f"Unsupported parameter location: {location}.{name}")
         if location == "header" and (
@@ -123,8 +139,8 @@ def _input_schema(operation: dict, parameters: list) -> tuple[dict, list]:
             raise ContractError(f"Unsupported serialization: {location}.{name}")
         schema = parameter["schema"]
         types = _types(schema) - {"null"}
-        style = parameter.get("style", "form" if location == "query" else "simple")
-        explode = parameter.get("explode", location == "query")
+        style = native.style or ("form" if location == "query" else "simple")
+        explode = native.explode if native.explode is not None else location == "query"
         array = types == {"array"}
         if types - {"string", "integer", "number", "boolean", "array"}:
             raise ContractError(f"Object parameters need a dedicated adapter: {name}")
@@ -136,17 +152,14 @@ def _input_schema(operation: dict, parameters: list) -> tuple[dict, list]:
             location != "query" and explode
         ):
             raise ContractError(f"Unsupported style/explode: {location}.{name}")
-        if location != "query" and "null" in _types(schema):
-            # Optional nullable headers in FastAPI represent absence. Explicit null is rejected.
-            schema = {"allOf": [schema, {"not": {"type": "null"}}]}
-        if location == "query" and "null" in _types(schema):
-            # HTTP has no lossless null query encoding; omission and null stay distinct.
+        if "null" in _types(schema):
+            # HTTP parameters cannot encode JSON null separately from absence.
             schema = {"allOf": [schema, {"not": {"type": "null"}}]}
         group = groups.setdefault(location, _object())
         if name in group["properties"]:
             raise ContractError(f"Duplicate parameter: {location}.{name}")
         group["properties"][name] = schema
-        if parameter.get("required"):
+        if native.required:
             group["required"].append(name)
             if location not in required_groups:
                 required_groups.append(location)
@@ -155,6 +168,10 @@ def _input_schema(operation: dict, parameters: list) -> tuple[dict, list]:
         )
     body = operation.get("requestBody")
     if body:
+        if not any(p["location"] == "body" for p in route.parameter_map.values()):
+            raise ContractError(
+                f"FastMCP could not map the JSON body: {route.operation_id}"
+            )
         groups["body"] = _json_schema(body.get("content", {}))
         if body.get("required"):
             required_groups.append("body")
@@ -171,12 +188,11 @@ def _types(schema: dict) -> set[str]:
     raise ContractError("Parameters require an explicit scalar or array type")
 
 
-def _compile_operation(
-    namespace: str, path: str, method: str, operation: dict, inherited: list
-) -> dict:
-    operation_id = operation.get("operationId")
-    policy = operation.get("x-agent", {})
-    description = operation.get("description") or operation.get("summary")
+def _compile_operation(namespace: str, route: HTTPRoute, operation: dict) -> dict:
+    operation_id = route.operation_id
+    path, method = route.path, route.method
+    policy = route.extensions.get("x-agent", {})
+    description = route.description or route.summary
     if not operation_id or not description or policy.get("expose") is not True:
         raise ContractError(
             f"Missing explicit identity, description or exposure: {method} {path}"
@@ -204,11 +220,7 @@ def _compile_operation(
         raise ContractError(
             f"Invalid permission or idempotency metadata: {operation_id}"
         )
-    parameters = {(item["in"], item["name"]): item for item in inherited}
-    parameters.update(
-        {(item["in"], item["name"]): item for item in operation.get("parameters", [])}
-    )
-    input_schema, bindings = _input_schema(operation, list(parameters.values()))
+    input_schema, bindings = _input_schema(route, operation)
     placeholders = set(re.findall(r"\{([^{}]+)\}", path))
     if placeholders != {p["name"] for p in bindings if p["in"] == "path"}:
         raise ContractError(f"Path parameters do not match template: {operation_id}")
@@ -264,6 +276,13 @@ def _compile_operation(
 def compile_app(
     app: FastAPI, *, namespace: str, exclusions: dict[str, str] | None = None
 ) -> dict:
+    bundle, _ = compile_catalog(app, namespace=namespace, exclusions=exclusions)
+    return bundle
+
+
+def compile_catalog(
+    app: FastAPI, *, namespace: str, exclusions: dict[str, str] | None = None
+) -> tuple[dict, OpenAPIRequests]:
     """Compile without opening a database, using a fresh schema rather than its cache."""
     exclusions = exclusions or {}
     document = get_openapi(
@@ -305,27 +324,49 @@ def compile_app(
             )
     tools = []
     seen = set()
-    expected = set()
+    operations = {}
+    paths = {}
     for item in inventory:
         if "excluded" in item:
             continue
         key = (item["path"], item["method"])
-        if key in expected:
+        if key in operations:
             raise ContractError(f"Duplicate route: {key}")
-        expected.add(key)
         operation = document.get("paths", {}).get(key[0], {}).get(key[1])
         if not operation or operation.get("operationId") != item["operationId"]:
             raise ContractError(f"Actual route missing from contract: {key}")
-        inherited = document["paths"][key[0]].get("parameters", [])
+        operation = _resolve(operation, document)
+        inherited = _resolve(document["paths"][key[0]].get("parameters", []), document)
+        parameters = {(p["in"], p["name"]): p for p in inherited}
+        parameters.update(
+            {(p["in"], p["name"]): p for p in operation.get("parameters", [])}
+        )
+        operation["parameters"] = list(parameters.values())
+        operations[key] = operation
+        native_operation = operation
+        if body := operation.get("requestBody"):
+            native_operation = {
+                **operation,
+                "requestBody": whole_json_body(
+                    _json_schema(body.get("content", {})),
+                    required=bool(body.get("required")),
+                ),
+            }
+        paths.setdefault(key[0], {})[key[1]] = native_operation
+    try:
+        requests = OpenAPIRequests(paths)
+    except ValueError as error:
+        raise ContractError(
+            "FastMCP could not parse the selected OpenAPI operations"
+        ) from error
+    if {(r.path, r.method.lower()) for r in requests.routes} != operations.keys():
+        raise ContractError("FastMCP routes and selected operations differ")
+    for route in requests.routes:
         tool = _compile_operation(
-            namespace,
-            key[0],
-            key[1],
-            _resolve(operation, document),
-            _resolve(inherited, document),
+            namespace, route, operations[route.path, route.method.lower()]
         )
         for identifier in (
-            "operation:" + item["operationId"],
+            "operation:" + route.operation_id,
             "tool:" + tool["definition"]["name"],
         ):
             if identifier in seen:
@@ -340,7 +381,7 @@ def compile_app(
         and operation.get("x-agent", {}).get("expose") is not False
         and path not in exclusions
     }
-    if advertised != expected:
+    if advertised != operations.keys():
         raise ContractError("Actual routes and OpenAPI operations differ")
     tools.sort(key=lambda tool: tool["definition"]["name"])
     bundle = {
@@ -351,7 +392,7 @@ def compile_app(
         "tools": tools,
         "exclusions": [item for item in inventory if "excluded" in item],
     }
-    return {**bundle, "bundleDigest": digest(bundle)}
+    return {**bundle, "bundleDigest": digest(bundle)}, requests
 
 
 def verify_bundle(bundle: dict) -> None:

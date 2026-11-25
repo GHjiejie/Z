@@ -1,6 +1,8 @@
 """Offline tests for compilation, version changes and HTTP execution semantics."""
 
 import copy
+import json
+import logging
 import unittest
 from typing import Annotated
 from unittest.mock import AsyncMock
@@ -10,7 +12,13 @@ from fastapi import APIRouter, FastAPI, Header, Query
 from jsonschema import Draft202012Validator
 from pydantic import BaseModel, ConfigDict
 
-from api_tools.compiler import ContractError, compare_bundles, compile_app, digest
+from api_tools.compiler import (
+    ContractError,
+    compare_bundles,
+    compile_app,
+    compile_catalog,
+    digest,
+)
 from api_tools.executor import ExecutionContext, ToolError, ToolExecutor
 from api_tools.registry import ToolRegistry
 
@@ -233,6 +241,119 @@ class Payload(BaseModel):
 
 
 class ExecutionTests(unittest.IsolatedAsyncioTestCase):
+    async def test_grouped_arguments_survive_fastmcp_aliases_and_manifest_reload(
+        self,
+    ) -> None:
+        app = FastAPI()
+
+        def update() -> dict:
+            return {}
+
+        app.add_api_route(
+            "/rows/{id}",
+            update,
+            methods=["POST"],
+            operation_id="row.update",
+            description="Update row",
+            openapi_extra={
+                **POLICY,
+                "parameters": [
+                    {
+                        "in": "path",
+                        "name": "id",
+                        "required": True,
+                        "schema": {"type": "string"},
+                    },
+                    {"in": "query", "name": "id", "schema": {"type": "string"}},
+                    {"in": "query", "name": "body", "schema": {"type": "string"}},
+                    {
+                        "in": "query",
+                        "name": "tags",
+                        "explode": False,
+                        "schema": {"type": "array", "items": {"type": "string"}},
+                    },
+                ],
+                "requestBody": {
+                    "content": {
+                        "application/json": {"schema": {"type": ["object", "null"]}}
+                    }
+                },
+            },
+        )
+        bundle, requests = compile_catalog(app, namespace="shop", exclusions=DOCS)
+        observed = []
+
+        def handle(request: httpx.Request) -> httpx.Response:
+            observed.append(request)
+            return httpx.Response(200, json={})
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handle),
+            base_url="http://test",
+            params={"workspace": "demo"},
+        ) as client:
+            for registry in (
+                ToolRegistry(bundle, requests=requests),
+                ToolRegistry(json.loads(json.dumps(bundle))),
+            ):
+                executor = ToolExecutor(registry)
+                arguments = {
+                    "path": {"id": "A B"},
+                    "query": {"id": "Q", "body": "query", "tags": []},
+                }
+                for body in (None, {}, {"id": "body-id", "extra": [None, False]}):
+                    result = await executor.call(
+                        "shop_row_update",
+                        {**arguments, "body": body},
+                        revision=bundle["bundleDigest"],
+                        context=ExecutionContext(frozenset({"item.read"}), True),
+                        client=client,
+                    )
+                    request = observed[-1]
+                    self.assertTrue(result["ok"])
+                    self.assertEqual(
+                        request.url.raw_path.split(b"?")[0], b"/rows/A%20B"
+                    )
+                    self.assertEqual(
+                        dict(request.url.params),
+                        {"id": "Q", "body": "query", "tags": "", "workspace": "demo"},
+                    )
+                    self.assertEqual(
+                        request.headers["content-type"], "application/json"
+                    )
+                    self.assertEqual(json.loads(request.content), body)
+                await executor.call(
+                    "shop_row_update",
+                    arguments,
+                    revision=bundle["bundleDigest"],
+                    context=ExecutionContext(frozenset({"item.read"}), True),
+                    client=client,
+                )
+                self.assertEqual(observed[-1].content, b"")
+                self.assertNotIn("content-type", observed[-1].headers)
+
+    async def test_fastmcp_debug_logging_omits_business_arguments(self) -> None:
+        bundle = compile_test(app_for(with_query=True))
+        marker = "private-argument-for-log-check"
+        upstream = logging.getLogger("fastmcp.utilities.openapi.director")
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(
+                lambda request: httpx.Response(200, json={"id": "a"})
+            ),
+            base_url="http://test",
+        ) as client:
+            with self.assertLogs(upstream, level="DEBUG") as logs:
+                upstream.debug("outside the agent request")
+                await ToolExecutor(ToolRegistry(bundle)).call(
+                    "shop_item_read",
+                    {"path": {"item_id": "a"}, "query": {"q": marker}},
+                    revision=bundle["bundleDigest"],
+                    context=ExecutionContext(frozenset({"item.read"}), True),
+                    client=client,
+                )
+        self.assertIn("outside the agent request", " ".join(logs.output))
+        self.assertNotIn(marker, " ".join(logs.output))
+
     async def test_serialization_preserves_headers_arrays_false_null_and_omission(
         self,
     ) -> None:
